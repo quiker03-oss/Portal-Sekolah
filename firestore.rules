@@ -1,0 +1,11 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Basic rules to allow the school app to function without Firebase Auth
+    // In a production app with sensitive data, Google Login or Firebase Auth MUST be implemented.
+    // For this prototype, we allow access to the schools collection to enable real-time sync.
+    match /schools/{schoolId}/{document=**} {
+      allow read, write: if true;
+    }
+  }
+}

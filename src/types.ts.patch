@@ -1,0 +1,10 @@
+--- src/types.ts
++++ src/types.ts
+@@ -10,7 +10,8 @@
+   jumlah: number;
+   kelasId?: string; // Untuk memisahkan kas per kelas
+   siswaId?: string; // Menyambungkan pembayaran ke siswa
+-  mingguKe?: string; // Penanda minggu e.g. "2026-W37"
++  bulan?: string; // Penanda bulan e.g., "2026-09"
++  mingguKe?: number; // 1, 2, 3, 4, 5
+ }

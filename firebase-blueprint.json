@@ -1,0 +1,90 @@
+{
+  "entities": {
+    "User": {
+      "title": "User",
+      "description": "User account for authentication and roles",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "schoolId": { "type": "string" },
+        "username": { "type": "string" },
+        "name": { "type": "string" },
+        "role": { "type": "string", "enum": ["admin", "guru", "superadmin"] },
+        "nip": { "type": "string" },
+        "guruId": { "type": "string" },
+        "email": { "type": "string" }
+      },
+      "required": ["id", "username", "name", "role"]
+    },
+    "School": {
+      "title": "School",
+      "description": "School account config",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "namaSekolah": { "type": "string" },
+        "npsn": { "type": "string" },
+        "status": { "type": "string" },
+        "createdAt": { "type": "string" }
+      }
+    },
+    "Siswa": {
+      "title": "Siswa",
+      "description": "Student record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "schoolId": { "type": "string" },
+        "qrId": { "type": "string" },
+        "nomorInduk": { "type": "string" },
+        "nisn": { "type": "string" },
+        "namaLengkap": { "type": "string" },
+        "kelas": { "type": "string" }
+      }
+    },
+    "Guru": {
+      "title": "Guru",
+      "description": "Teacher record",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "schoolId": { "type": "string" },
+        "nama": { "type": "string" },
+        "nip": { "type": "string" }
+      }
+    },
+    "TransaksiKas": {
+      "title": "TransaksiKas",
+      "description": "Cash transaction",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "schoolId": { "type": "string" },
+        "jumlah": { "type": "number" },
+        "kategori": { "type": "string" }
+      }
+    }
+  },
+  "firestore": {
+    "/users/{userId}": {
+      "schema": { "$ref": "#/entities/User" },
+      "description": "User profiles"
+    },
+    "/schools/{schoolId}": {
+      "schema": { "$ref": "#/entities/School" },
+      "description": "School configurations"
+    },
+    "/schools/{schoolId}/siswa/{siswaId}": {
+      "schema": { "$ref": "#/entities/Siswa" },
+      "description": "Students"
+    },
+    "/schools/{schoolId}/guru/{guruId}": {
+      "schema": { "$ref": "#/entities/Guru" },
+      "description": "Teachers"
+    },
+    "/schools/{schoolId}/kas/{kasId}": {
+      "schema": { "$ref": "#/entities/TransaksiKas" },
+      "description": "Cash transactions"
+    }
+  }
+}

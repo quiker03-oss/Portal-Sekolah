@@ -1,0 +1,205 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 560" width="100%" height="100%">
+  <defs>
+    <!-- Outer Shield Gradient -->
+    <linearGradient id="shieldBg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#16a9e0" />
+      <stop offset="50%" stop-color="#24b6ea" />
+      <stop offset="100%" stop-color="#028ac7" />
+    </linearGradient>
+
+    <!-- Gold Gradient for Star and Rice -->
+    <linearGradient id="goldGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#fff176" />
+      <stop offset="50%" stop-color="#fbc02d" />
+      <stop offset="100%" stop-color="#f57f17" />
+    </linearGradient>
+
+    <!-- Red Gradient for Figures -->
+    <linearGradient id="redGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#ff3d44" />
+      <stop offset="60%" stop-color="#e51c23" />
+      <stop offset="100%" stop-color="#b71c1c" />
+    </linearGradient>
+
+    <!-- Ribbon Drop Shadow -->
+    <filter id="shadow" x="-5%" y="-5%" width="110%" height="115%">
+      <feDropShadow dx="0" dy="4" stdDeviation="4" flood-opacity="0.25" />
+    </filter>
+  </defs>
+
+  <!-- 1. Pentagonal Shield Outer Border & Background -->
+  <!-- Outline points: Top center (250, 15), Top-Right (475, 175), Bottom-Right (405, 515), Bottom-Left (95, 515), Top-Left (25, 175) -->
+  <polygon points="250,15 478,175 408,518 92,518 22,175" fill="#0b1329" />
+  
+  <polygon points="250,22 470,178 402,510 98,510 30,178" fill="url(#shieldBg)" stroke="#0b1329" stroke-width="4" stroke-linejoin="round" />
+
+  <!-- Inner border accent -->
+  <polygon points="250,30 460,180 395,502 105,502 40,180" fill="none" stroke="#60d5fa" stroke-width="2" opacity="0.6" />
+
+  <!-- 2. Top Golden 5-Point Star -->
+  <g transform="translate(250, 82)">
+    <polygon points="0,-48 14,-14 48,-14 20,8 31,42 0,22 -31,42 -20,8 -48,-14 -14,-14" fill="url(#goldGrad)" stroke="#b26a00" stroke-width="2.5" stroke-linejoin="round" />
+  </g>
+
+  <!-- 3. Center White Medallion -->
+  <circle cx="250" cy="275" r="125" fill="#ffffff" stroke="#1da1d8" stroke-width="5" filter="url(#shadow)" />
+
+  <!-- 4. Left Branch: Stalk of Cotton (Kapas) -->
+  <g id="cotton-branch" stroke-linejoin="round">
+    <!-- Main stem -->
+    <path d="M 125,410 C 95,310 115,190 195,95" fill="none" stroke="#2e7d32" stroke-width="7" stroke-linecap="round" />
+    
+    <!-- Cotton Bolls (White with green calyx) -->
+    <!-- Boll 1 -->
+    <g transform="translate(195, 95)">
+      <path d="M0,0 Q-15,-10 -5,-25 Q15,-15 0,0" fill="#4caf50" stroke="#1b5e20" stroke-width="1.5" />
+      <circle cx="-6" cy="-14" r="8" fill="#ffffff" stroke="#9e9e9e" stroke-width="1" />
+      <circle cx="2" cy="-17" r="7" fill="#ffffff" stroke="#9e9e9e" stroke-width="1" />
+      <circle cx="-3" cy="-7" r="8" fill="#ffffff" stroke="#9e9e9e" stroke-width="1" />
+    </g>
+
+    <!-- Boll 2 -->
+    <g transform="translate(170, 120)">
+      <path d="M0,0 Q-15,-10 -5,-25 Q15,-15 0,0" fill="#4caf50" stroke="#1b5e20" stroke-width="1.5" />
+      <circle cx="-6" cy="-14" r="8" fill="#ffffff" stroke="#9e9e9e" stroke-width="1" />
+      <circle cx="2" cy="-17" r="7" fill="#ffffff" stroke="#9e9e9e" stroke-width="1" />
+      <circle cx="-3" cy="-7" r="8" fill="#ffffff" stroke="#9e9e9e" stroke-width="1" />
+    </g>
+
+    <!-- Boll 3 -->
+    <g transform="translate(145, 155)">
+      <path d="M0,0 Q-18,-8 -8,-24 Q12,-16 0,0" fill="#4caf50" stroke="#1b5e20" stroke-width="1.5" />
+      <circle cx="-7" cy="-14" r="8.5" fill="#ffffff" stroke="#9e9e9e" stroke-width="1" />
+      <circle cx="3" cy="-16" r="7.5" fill="#ffffff" stroke="#9e9e9e" stroke-width="1" />
+      <circle cx="-2" cy="-6" r="8.5" fill="#ffffff" stroke="#9e9e9e" stroke-width="1" />
+    </g>
+
+    <!-- Boll 4 -->
+    <g transform="translate(125, 195)">
+      <path d="M0,0 Q-18,-8 -8,-24 Q12,-16 0,0" fill="#4caf50" stroke="#1b5e20" stroke-width="1.5" />
+      <circle cx="-7" cy="-14" r="9" fill="#ffffff" stroke="#9e9e9e" stroke-width="1" />
+      <circle cx="3" cy="-16" r="8" fill="#ffffff" stroke="#9e9e9e" stroke-width="1" />
+      <circle cx="-2" cy="-6" r="9" fill="#ffffff" stroke="#9e9e9e" stroke-width="1" />
+    </g>
+
+    <!-- Boll 5 -->
+    <g transform="translate(112, 240)">
+      <path d="M0,0 Q-18,-5 -10,-22 Q10,-18 0,0" fill="#4caf50" stroke="#1b5e20" stroke-width="1.5" />
+      <circle cx="-8" cy="-13" r="9.5" fill="#ffffff" stroke="#9e9e9e" stroke-width="1" />
+      <circle cx="2" cy="-16" r="8.5" fill="#ffffff" stroke="#9e9e9e" stroke-width="1" />
+      <circle cx="-3" cy="-5" r="9.5" fill="#ffffff" stroke="#9e9e9e" stroke-width="1" />
+    </g>
+
+    <!-- Boll 6 -->
+    <g transform="translate(108, 290)">
+      <path d="M0,0 Q-18,-3 -10,-20 Q10,-20 0,0" fill="#4caf50" stroke="#1b5e20" stroke-width="1.5" />
+      <circle cx="-8" cy="-12" r="10" fill="#ffffff" stroke="#9e9e9e" stroke-width="1" />
+      <circle cx="2" cy="-15" r="9" fill="#ffffff" stroke="#9e9e9e" stroke-width="1" />
+      <circle cx="-3" cy="-4" r="10" fill="#ffffff" stroke="#9e9e9e" stroke-width="1" />
+    </g>
+
+    <!-- Boll 7 -->
+    <g transform="translate(110, 340)">
+      <path d="M0,0 Q-16,3 -12,-16 Q8,-22 0,0" fill="#4caf50" stroke="#1b5e20" stroke-width="1.5" />
+      <circle cx="-8" cy="-10" r="10" fill="#ffffff" stroke="#9e9e9e" stroke-width="1" />
+      <circle cx="2" cy="-13" r="9" fill="#ffffff" stroke="#9e9e9e" stroke-width="1" />
+      <circle cx="-3" cy="-3" r="10" fill="#ffffff" stroke="#9e9e9e" stroke-width="1" />
+    </g>
+
+    <!-- Boll 8 -->
+    <g transform="translate(122, 388)">
+      <path d="M0,0 Q-14,6 -14,-12 Q6,-22 0,0" fill="#4caf50" stroke="#1b5e20" stroke-width="1.5" />
+      <circle cx="-8" cy="-8" r="10" fill="#ffffff" stroke="#9e9e9e" stroke-width="1" />
+      <circle cx="2" cy="-12" r="9" fill="#ffffff" stroke="#9e9e9e" stroke-width="1" />
+      <circle cx="-3" cy="-2" r="10" fill="#ffffff" stroke="#9e9e9e" stroke-width="1" />
+    </g>
+  </g>
+
+  <!-- 5. Right Branch: Ear of Golden Rice (Padi Emas) -->
+  <g id="rice-branch">
+    <!-- Main stalk -->
+    <path d="M 375,410 C 405,310 385,190 305,95" fill="none" stroke="#ca8a04" stroke-width="7" stroke-linecap="round" />
+
+    <!-- Rice Grains along stalk -->
+    <!-- Top grains -->
+    <path d="M 305,95 C 315,90 330,95 325,110 C 318,118 305,108 305,95 Z" fill="url(#goldGrad)" stroke="#a16207" stroke-width="1.5" />
+    <path d="M 305,95 C 295,90 280,95 285,110 C 292,118 305,108 305,95 Z" fill="url(#goldGrad)" stroke="#a16207" stroke-width="1.5" />
+
+    <!-- Pair 2 -->
+    <path d="M 323,115 C 342,105 358,115 350,132 C 338,140 322,128 323,115 Z" fill="url(#goldGrad)" stroke="#a16207" stroke-width="1.5" />
+    <path d="M 323,115 C 310,120 305,138 318,145 C 330,140 330,125 323,115 Z" fill="url(#goldGrad)" stroke="#a16207" stroke-width="1.5" />
+
+    <!-- Pair 3 -->
+    <path d="M 345,145 C 368,135 385,148 375,165 C 362,175 344,160 345,145 Z" fill="url(#goldGrad)" stroke="#a16207" stroke-width="1.5" />
+    <path d="M 345,145 C 330,152 325,170 338,178 C 352,172 352,155 345,145 Z" fill="url(#goldGrad)" stroke="#a16207" stroke-width="1.5" />
+
+    <!-- Pair 4 -->
+    <path d="M 365,182 C 390,172 408,188 398,205 C 385,215 365,200 365,182 Z" fill="url(#goldGrad)" stroke="#a16207" stroke-width="1.5" />
+    <path d="M 365,182 C 348,190 345,210 358,218 C 372,212 374,195 365,182 Z" fill="url(#goldGrad)" stroke="#a16207" stroke-width="1.5" />
+
+    <!-- Pair 5 -->
+    <path d="M 382,225 C 410,215 428,232 418,250 C 402,260 380,245 382,225 Z" fill="url(#goldGrad)" stroke="#a16207" stroke-width="1.5" />
+    <path d="M 382,225 C 362,235 360,255 375,264 C 390,258 392,240 382,225 Z" fill="url(#goldGrad)" stroke="#a16207" stroke-width="1.5" />
+
+    <!-- Pair 6 -->
+    <path d="M 390,272 C 420,265 435,285 425,302 C 408,312 388,295 390,272 Z" fill="url(#goldGrad)" stroke="#a16207" stroke-width="1.5" />
+    <path d="M 390,272 C 370,282 368,302 384,310 C 398,304 402,285 390,272 Z" fill="url(#goldGrad)" stroke="#a16207" stroke-width="1.5" />
+
+    <!-- Pair 7 -->
+    <path d="M 390,320 C 420,315 432,335 422,352 C 405,362 386,345 390,320 Z" fill="url(#goldGrad)" stroke="#a16207" stroke-width="1.5" />
+    <path d="M 390,320 C 370,330 368,350 384,358 C 398,352 402,335 390,320 Z" fill="url(#goldGrad)" stroke="#a16207" stroke-width="1.5" />
+
+    <!-- Pair 8 -->
+    <path d="M 380,368 C 410,365 422,385 410,402 C 395,410 376,395 380,368 Z" fill="url(#goldGrad)" stroke="#a16207" stroke-width="1.5" />
+    <path d="M 380,368 C 362,378 360,398 375,405 C 390,400 392,382 380,368 Z" fill="url(#goldGrad)" stroke="#a16207" stroke-width="1.5" />
+  </g>
+
+  <!-- 6. Stylized Red Figures (Center Circle Content) -->
+  <g transform="translate(250, 275)">
+    <!-- Left human figure head -->
+    <circle cx="-38" cy="-55" r="21" fill="url(#redGrad)" />
+    
+    <!-- Left figure torso & dynamic arching arms/wings -->
+    <path d="M -36,-30 C -20,-10 -5,15 -10,65 C -25,72 -60,65 -90,38 C -70,25 -55,-10 -36,-30 Z" fill="url(#redGrad)" />
+    <path d="M -36,-30 C -60,-15 -85,15 -88,36 C -75,32 -60,20 -40,12 Z" fill="url(#redGrad)" />
+
+    <!-- Right flame / soaring figure wing -->
+    <path d="M -15,70 C 25,65 65,30 75,-25 C 80,-65 40,-95 20,-105 C 32,-70 30,-30 10,-10 C -5,10 -15,40 -15,70 Z" fill="url(#redGrad)" />
+
+    <!-- Center swooshing flame petal -->
+    <path d="M -18,60 C -10,30 5,-15 12,-70 C -5,-35 -15,10 -28,45 Z" fill="#ff5252" opacity="0.95" />
+
+    <!-- Central dynamic base wave (blue & white accents) -->
+    <path d="M -90,38 C -45,68 15,68 75,35 C 50,75 -20,80 -80,50 Z" fill="#1da1d8" opacity="0.8" />
+  </g>
+
+  <!-- 7. White Ribbon Banner with Blue Accents & Text -->
+  <g id="ribbon" filter="url(#shadow)">
+    <!-- Ribbon folds / back ends -->
+    <polygon points="50,470 95,435 95,495" fill="#0284c7" stroke="#005691" stroke-width="2" />
+    <polygon points="450,470 405,435 405,495" fill="#0284c7" stroke="#005691" stroke-width="2" />
+
+    <!-- Ribbon main banner arched shape -->
+    <!-- Top curve: from (70, 445) through (250, 415) to (430, 445) -->
+    <!-- Bottom curve: from (430, 505) through (250, 475) to (70, 505) -->
+    <path d="M 75,445 Q 250,412 425,445 L 435,505 Q 250,472 65,505 Z" fill="#ffffff" stroke="#0b1329" stroke-width="3" stroke-linejoin="round" />
+
+    <!-- Ribbon text paths -->
+    <path id="ribbonPathTop" d="M 85,455 Q 250,426 415,455" fill="none" stroke="none" />
+    <path id="ribbonPathBottom" d="M 80,490 Q 250,460 420,490" fill="none" stroke="none" />
+
+    <!-- Text: SDN 2 GIRIHARJA -->
+    <text font-family="'Arial Black', Impact, sans-serif" font-size="24" font-weight="900" fill="#0284c7" text-anchor="middle" letter-spacing="2">
+      <textPath href="#ribbonPathTop" startOffset="50%">
+        SDN 2 GIRIHARJA
+      </textPath>
+    </text>
+
+    <!-- Text: BERPRESTASI - BERAKHLAK MULIA -->
+    <text font-family="'Arial Black', Impact, sans-serif" font-size="16" font-weight="900" fill="#1e293b" text-anchor="middle" letter-spacing="1.5">
+      <textPath href="#ribbonPathBottom" startOffset="50%">
+        BERPRESTASI - BERAKHLAK MULIA
+      </textPath>
+    </text>
+  </g>
+</svg>

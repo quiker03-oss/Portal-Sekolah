@@ -1,0 +1,32 @@
+--- src/components/LoginModal.tsx
++++ src/components/LoginModal.tsx
+@@ -24,24 +24,19 @@
+     const users = db.getUsers();
+     const cleanUser = username.trim().toLowerCase();
+ 
+-    // Default passwords for demo: admin123, operator123, guru123
+     const user = users.find((u) => u.username.toLowerCase() === cleanUser);
+ 
+     if (!user) {
+       setError('Username tidak terdaftar dalam sistem sekolah.');
+       return;
+     }
+ 
+-    // Authenticate (standard check with demo fallback)
+-    if (
+-      (cleanUser === 'operator' && password === 'operator123') ||
+-      (cleanUser.startsWith('guru') && (password === 'guru123' || password === 'admin123')) ||
+-      password === 'admin123'
+-    ) {
++    // Check password (fallback to hardcoded for demo if not set)
++    const expectedPassword = user.password || (user.role === 'admin' ? 'admin123' : 'guru123');
++
++    if (password === expectedPassword) {
+       db.setCurrentUser(user);
+       onLoginSuccess(user);
+       onClose();
+     } else {
+-      setError('Password salah! Silakan gunakan password default demo (admin123, operator123, atau guru123).');
++      setError('Password salah! Silakan coba lagi.');
+     }
+   };
