@@ -5,6 +5,7 @@ import { PortalLogin } from './components/PortalLogin';
 import { AdminLayout } from './components/admin/AdminLayout';
 import { SuperAdminLogin } from './components/superadmin/SuperAdminLogin';
 import { SuperAdminDashboard } from './components/superadmin/SuperAdminDashboard';
+import { ErrorBoundary } from './components/common/ErrorBoundary';
 
 const isSuperAdminUrl = () => {
   if (typeof window === 'undefined') return false;
@@ -30,9 +31,7 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(db.getCurrentUser());
 
   // Super Admin view & auth state
-  const [isSuperAdminRoute, setIsSuperAdminRoute] = useState<boolean>(
-    () => isSuperAdminUrl() || db.isSuperAdminLoggedIn()
-  );
+  const [isSuperAdminRoute, setIsSuperAdminRoute] = useState<boolean>(() => isSuperAdminUrl());
   const [isSuperAdminAuth, setIsSuperAdminAuth] = useState<boolean>(() => db.isSuperAdminLoggedIn());
 
   useEffect(() => {
@@ -45,7 +44,7 @@ export default function App() {
 
   useEffect(() => {
     const handleLocationOrAuthChange = () => {
-      const isSA = isSuperAdminUrl() || db.isSuperAdminLoggedIn();
+      const isSA = isSuperAdminUrl();
       setIsSuperAdminRoute(isSA);
       setIsSuperAdminAuth(db.isSuperAdminLoggedIn());
     };
@@ -95,32 +94,42 @@ export default function App() {
   if (isSuperAdminRoute) {
     if (isSuperAdminAuth) {
       return (
-        <SuperAdminDashboard
-          onLogout={handleSuperAdminLogout}
-          onViewSchoolWebsite={handleSuperAdminExit}
-        />
+        <ErrorBoundary fallbackTitle="Kendala pada Dasbor Super Admin">
+          <SuperAdminDashboard
+            onLogout={handleSuperAdminLogout}
+            onViewSchoolWebsite={handleSuperAdminExit}
+          />
+        </ErrorBoundary>
       );
     }
     return (
-      <SuperAdminLogin
-        onLoginSuccess={handleSuperAdminLoginSuccess}
-        onExit={handleSuperAdminExit}
-      />
+      <ErrorBoundary fallbackTitle="Kendala pada Halaman Login Super Admin">
+        <SuperAdminLogin
+          onLoginSuccess={handleSuperAdminLoginSuccess}
+          onExit={handleSuperAdminExit}
+        />
+      </ErrorBoundary>
     );
   }
 
   // 2. School Operator / Admin Dashboard View (When Logged In)
   if (currentUser) {
     return (
-      <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-blue-600 selection:text-white">
-        <AdminLayout
-          currentUser={currentUser}
-          onLogout={handleLogout}
-        />
-      </div>
+      <ErrorBoundary fallbackTitle="Kendala pada Panel Sekolah">
+        <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-blue-600 selection:text-white">
+          <AdminLayout
+            currentUser={currentUser}
+            onLogout={handleLogout}
+          />
+        </div>
+      </ErrorBoundary>
     );
   }
 
   // 3. Portal Sekolah Login View (Main unauthenticated screen)
-  return <PortalLogin onLoginSuccess={handleLoginSuccess} />;
+  return (
+    <ErrorBoundary fallbackTitle="Kendala pada Portal Sekolah">
+      <PortalLogin onLoginSuccess={handleLoginSuccess} />
+    </ErrorBoundary>
+  );
 }

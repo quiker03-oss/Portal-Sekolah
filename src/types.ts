@@ -55,6 +55,7 @@ export interface User {
   role: UserRole;
   nip?: string;
   guruId?: string; // linked to Teacher
+  kelasId?: string; // assigned class id for teacher filtering
 }
 
 export interface SekolahInfo {
@@ -96,6 +97,7 @@ export interface Siswa {
   alamat: string;
   kelas: string; // e.g. "1A", "2", "6"
   namaOrangTua: string;
+  foto?: string;
   createdAt: string;
 }
 
@@ -111,6 +113,7 @@ export interface Guru {
   nomorHp: string;
   foto?: string;
   createdAt: string;
+  kelasId?: string; // id of the class this teacher is responsible for
 }
 
 export interface Kelas {
@@ -192,13 +195,15 @@ export interface NilaiHarianItem {
   namaKelas: string;
   mapelId: string;
   namaMapel: string;
-  jenisPenilaian: 'Tugas' | 'Ulangan Harian' | 'Formatif' | 'Kuis' | 'Praktik';
+  jenisPenilaian: 'Tugas' | 'Ulangan Harian' | 'Formatif' | 'Kuis' | 'Praktik' | string;
   materi: string; // e.g. "Bab 1: Bilangan Cacah"
   tanggal: string; // YYYY-MM-DD
   nilai: number; // 0 - 100
   catatan?: string;
   semester?: 'Ganjil' | 'Genap';
   tahunAjaran?: string;
+  assessmentId?: string; // Identifier for this specific assessment column/session
+  keterangan?: string;
 }
 
 export interface CatatanRapor {
@@ -275,6 +280,8 @@ export interface Settings {
 
 export interface AppSettings {
   schoolId?: string;
+  namaSekolah?: string;
+  logoUrl?: string;
   tahunAjaranAktif: string;
   semesterAktif: 'Ganjil' | 'Genap';
   bobotTugas: number;
@@ -301,4 +308,84 @@ export interface LandingConfig {
   showGuru: boolean;
   showGaleri: boolean;
   showKontak: boolean;
+}
+
+// ==================== ASISTEN AI GURU (SOAL & MODUL) ====================
+export interface SoalPilihanGanda {
+  nomor: number;
+  pertanyaan: string;
+  pilihan: {
+    A: string;
+    B: string;
+    C: string;
+    D: string;
+  };
+  kunciJawaban: 'A' | 'B' | 'C' | 'D';
+  pembahasan: string;
+}
+
+export interface SoalEsai {
+  nomor: number;
+  pertanyaan: string;
+  pedomanPenskoran: string;
+  kunciJawaban: string;
+}
+
+export interface NaskahUjianAI {
+  id: string;
+  schoolId?: string;
+  guruId?: string;
+  guruName?: string;
+  judul: string;
+  mataPelajaran: string;
+  kelas: string;
+  kurikulum: 'Kurikulum Merdeka' | 'Kurikulum 2013';
+  jenisUjian: 'Ulangan Harian' | 'Penilaian Tengah Semester (PTS/STS)' | 'Penilaian Akhir Semester (PAS/SAS)' | 'Kuis / Latihan Harian';
+  tingkatKesulitan: 'Mudah' | 'Sedang' | 'HOTS (Analisis Tinggi)';
+  topikMateri: string;
+  petunjukUmum: string;
+  pilihanGanda: SoalPilihanGanda[];
+  esai: SoalEsai[];
+  createdAt: string;
+}
+
+export interface ModulAjarAI {
+  id: string;
+  schoolId?: string;
+  guruId?: string;
+  guruName?: string;
+  judul: string;
+  mataPelajaran: string;
+  faseKelas: string;
+  alokasiWaktu: string;
+  targetProfilPelajar: string[];
+  tujuanPembelajaran: string[];
+  pemahamanBermakna: string;
+  pertanyaanPemantik: string[];
+  kegiatanPembelajaran: {
+    pendahuluan: string[];
+    inti: string[];
+    penutup: string[];
+  };
+  asesmen: {
+    diagnostik: string;
+    formatif: string;
+    sumatif: string;
+  };
+  lembarKerjaRingkas?: string;
+  createdAt: string;
+}
+
+export interface BahanAjarAI {
+  id: string;
+  schoolId?: string;
+  guruId?: string;
+  guruName?: string;
+  judul: string;
+  mataPelajaran: string;
+  kelas: string;
+  topikMateri: string;
+  tipe: 'ringkasan' | 'lkpd' | 'remedial';
+  isiMarkdown: string;
+  createdAt: string;
 }

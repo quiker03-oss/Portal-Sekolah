@@ -24,7 +24,7 @@ interface DashboardViewProps {
 export const DashboardView: React.FC<DashboardViewProps> = ({ currentUser, onNavigate }) => {
   const [siswaList, setSiswaList] = useState<Siswa[]>(db.getSiswaList());
   const [guruList, setGuruList] = useState<Guru[]>(db.getGuruList());
-  const [kelasList] = useState(db.getKelasList());
+  const [kelasList, setKelasList] = useState(db.getKelasList());
   const [absensiSiswa, setAbsensiSiswa] = useState<AbsensiSiswa[]>(db.getAbsensiSiswaList());
   const [absensiGuru, setAbsensiGuru] = useState<AbsensiGuru[]>(db.getAbsensiGuruList());
 
@@ -34,6 +34,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ currentUser, onNav
     const handleUpdate = () => {
       setSiswaList(db.getSiswaList());
       setGuruList(db.getGuruList());
+      setKelasList(db.getKelasList());
       setAbsensiSiswa(db.getAbsensiSiswaList());
       setAbsensiGuru(db.getAbsensiGuruList());
     };
@@ -41,11 +42,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ currentUser, onNav
     window.addEventListener('absensi_guru_updated', handleUpdate);
     window.addEventListener('data_siswa_changed', handleUpdate);
     window.addEventListener('data_guru_changed', handleUpdate);
+    window.addEventListener('data_kelas_changed', handleUpdate);
     return () => {
       window.removeEventListener('absensi_siswa_updated', handleUpdate);
       window.removeEventListener('absensi_guru_updated', handleUpdate);
       window.removeEventListener('data_siswa_changed', handleUpdate);
       window.removeEventListener('data_guru_changed', handleUpdate);
+      window.removeEventListener('data_kelas_changed', handleUpdate);
     };
   }, []);
 
@@ -105,6 +108,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ currentUser, onNav
 
           <div className="flex flex-wrap gap-2.5">
             <button
+              onClick={() => onNavigate('asisten-ai-guru')}
+              className="px-4 py-2 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white rounded-xl text-xs font-bold shadow-xs flex items-center gap-2 transition-colors cursor-pointer"
+            >
+              <Sparkles className="w-4 h-4 text-white" />
+              Asisten AI Guru (Soal & RPP)
+            </button>
+            <button
               onClick={() => onNavigate('nilai-harian')}
               className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-semibold shadow-xs flex items-center gap-2 transition-colors cursor-pointer"
             >
@@ -131,7 +141,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ currentUser, onNav
               Total Siswa
             </span>
             <h3 className="text-2xl font-extrabold text-slate-900 mt-1">{siswaList.length}</h3>
-            <span className="text-[11px] text-blue-600 font-medium">Terdaftar di 7 Rombel</span>
+            <span className="text-[11px] text-blue-600 font-medium">
+              Terdaftar di {kelasList.length} Rombel
+            </span>
           </div>
           <div className="w-12 h-12 rounded-xl bg-blue-50 text-blue-700 flex items-center justify-center">
             <GraduationCap className="w-6 h-6" />
@@ -214,24 +226,30 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ currentUser, onNav
           </div>
 
           <div className="space-y-3.5">
-            {classBreakdown.map((item) => (
-              <div key={item.nama} className="space-y-1.5">
-                <div className="flex justify-between text-xs">
-                  <span className="font-semibold text-slate-800">{item.nama}</span>
-                  <span className="text-slate-500">
-                    <strong className="text-slate-800">{item.present}</strong> / {item.total} Siswa ({item.rate}%)
-                  </span>
-                </div>
-                <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
-                  <div
-                    className={`h-full rounded-full transition-all duration-500 ${
-                      item.rate >= 80 ? 'bg-emerald-500' : item.rate >= 50 ? 'bg-blue-600' : 'bg-amber-500'
-                    }`}
-                    style={{ width: `${Math.max(item.rate, 4)}%` }}
-                  />
-                </div>
+            {classBreakdown.length === 0 ? (
+              <div className="text-center py-8 text-xs text-slate-400 bg-slate-50 rounded-xl border border-dashed border-slate-200">
+                Belum ada rombel kelas yang ditambahkan.
               </div>
-            ))}
+            ) : (
+              classBreakdown.map((item) => (
+                <div key={item.nama} className="space-y-1.5">
+                  <div className="flex justify-between text-xs">
+                    <span className="font-semibold text-slate-800">{item.nama}</span>
+                    <span className="text-slate-500">
+                      <strong className="text-slate-800">{item.present}</strong> / {item.total} Siswa ({item.rate}%)
+                    </span>
+                  </div>
+                  <div className="w-full h-2.5 bg-slate-100 rounded-full overflow-hidden">
+                    <div
+                      className={`h-full rounded-full transition-all duration-500 ${
+                        item.rate >= 80 ? 'bg-emerald-500' : item.rate >= 50 ? 'bg-blue-600' : 'bg-amber-500'
+                      }`}
+                      style={{ width: `${Math.max(item.rate, 4)}%` }}
+                    />
+                  </div>
+                </div>
+              ))
+            )}
           </div>
 
           <div className="pt-3 border-t border-slate-100 flex items-center justify-between text-xs text-slate-500">

@@ -719,23 +719,25 @@ export const AbsensiSiswaView: React.FC = () => {
                 </div>
               )}
 
-              <div>
-                <label className="block text-[11px] font-semibold text-slate-500 mb-1">
-                  Filter Kelas
-                </label>
-                <select
-                  value={filterKelas}
-                  onChange={(e) => setFilterKelas(e.target.value)}
-                  className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-blue-600"
-                >
-                  <option value="">Semua Kelas</option>
-                  {kelasList.map((k) => (
-                    <option key={k.id} value={k.nama}>
-                      {k.nama}
-                    </option>
-                  ))}
-                </select>
-              </div>
+              {kelasList.length > 1 && (
+                <div>
+                  <label className="block text-[11px] font-semibold text-slate-500 mb-1">
+                    Filter Kelas
+                  </label>
+                  <select
+                    value={filterKelas}
+                    onChange={(e) => setFilterKelas(e.target.value)}
+                    className="w-full px-3 py-1.5 bg-slate-50 border border-slate-200 rounded-xl text-xs font-medium focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-blue-600"
+                  >
+                    <option value="">Semua Kelas</option>
+                    {kelasList.map((k) => (
+                      <option key={k.id} value={k.nama}>
+                        {k.nama}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
               <div>
                 <label className="block text-[11px] font-semibold text-slate-500 mb-1">

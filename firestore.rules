@@ -1,11 +1,29 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // Basic rules to allow the school app to function without Firebase Auth
-    // In a production app with sensitive data, Google Login or Firebase Auth MUST be implemented.
-    // For this prototype, we allow access to the schools collection to enable real-time sync.
-    match /schools/{schoolId}/{document=**} {
-      allow read, write: if true;
+    // Whitelist valid school collections for multi-tenant and superadmin synchronization
+    match /schools/{schoolId}/{colName}/{docId} {
+      allow read: if true;
+      allow write: if colName in [
+        'siswa',
+        'guru',
+        'kelas',
+        'mapel',
+        'absensi_siswa',
+        'absensi_guru',
+        'nilai',
+        'nilai_harian',
+        'catatan_rapor',
+        'pengumuman',
+        'berita',
+        'galeri',
+        'kas',
+        'users',
+        'settings',
+        'sekolah',
+        'landing_config',
+        'school_accounts'
+      ];
     }
   }
 }

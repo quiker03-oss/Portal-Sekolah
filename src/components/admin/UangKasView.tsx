@@ -467,17 +467,23 @@ export const UangKasView: React.FC = () => {
           <div className="flex items-center gap-2 bg-slate-50 px-3 py-1.5 rounded-xl border border-slate-200">
             <Layers className="w-4 h-4 text-slate-500" />
             <span className="text-xs font-bold text-slate-600">Pilih Kelas:</span>
-            <select
-              value={selectedKelasId}
-              onChange={(e) => setSelectedKelasId(e.target.value)}
-              className="bg-transparent text-xs font-bold text-blue-700 focus:outline-hidden cursor-pointer"
-            >
-              {kelasList.map((k) => (
-                <option key={k.id} value={k.id}>
-                  {k.nama} {k.waliKelas ? `(${k.waliKelas})` : ''}
-                </option>
-              ))}
-            </select>
+            {kelasList.length <= 1 ? (
+               <div className="text-xs font-bold text-blue-700">
+                 {kelasList[0]?.nama || 'Belum ada kelas'}
+               </div>
+            ) : (
+              <select
+                value={selectedKelasId}
+                onChange={(e) => setSelectedKelasId(e.target.value)}
+                className="bg-transparent text-xs font-bold text-blue-700 focus:outline-hidden cursor-pointer"
+              >
+                {kelasList.map((k) => (
+                  <option key={k.id} value={k.id}>
+                    {k.nama} {k.waliKelas ? `(${k.waliKelas})` : ''}
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
 
           {/* Saldo Badge */}

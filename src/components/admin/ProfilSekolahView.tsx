@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { db } from '../../services/database';
 import { Settings } from '../../types';
+import { compressImage } from '../../utils/imageCompressor';
 import {
   Building2,
   Save,
@@ -12,12 +13,16 @@ import {
   Phone,
   FileText,
   Sparkles,
-  Image as ImageIcon,
+  Loader2,
+  Camera,
+  RotateCcw,
 } from 'lucide-react';
 
 export const ProfilSekolahView: React.FC = () => {
   const [settings, setSettings] = useState<Settings>(db.getSettings());
   const [successMsg, setSuccessMsg] = useState('');
+  const [isUploadingKS, setIsUploadingKS] = useState(false);
+  const [isUploadingLogo, setIsUploadingLogo] = useState(false);
 
   // Form fields
   const [namaSekolah, setNamaSekolah] = useState(settings.namaSekolah);
@@ -34,11 +39,7 @@ export const ProfilSekolahView: React.FC = () => {
   const [misi, setMisi] = useState(settings.misi.join('\n'));
   const [namaKepalaSekolah, setNamaKepalaSekolah] = useState(settings.namaKepalaSekolah);
   const [nipKepalaSekolah, setNipKepalaSekolah] = useState(settings.nipKepalaSekolah);
-  const [sambutanKepalaSekolah, setSambutanKepalaSekolah] = useState(
-    settings.sambutanKepalaSekolah
-  );
-  const [fotoKepalaSekolah, setFotoKepalaSekolah] = useState(settings.fotoKepalaSekolah);
-  const [fotoSekolah, setFotoSekolah] = useState(settings.fotoSekolah);
+  const [fotoKepalaSekolah, setFotoKepalaSekolah] = useState(settings.fotoKepalaSekolah || '');
   const [logoUrl, setLogoUrl] = useState(settings.logoUrl || '');
 
   const handleAlamatChange = (val: string) => {
@@ -73,52 +74,70 @@ export const ProfilSekolahView: React.FC = () => {
       misi: misi.split('\n').map((m) => m.trim()).filter(Boolean),
       namaKepalaSekolah,
       nipKepalaSekolah,
-      sambutanKepalaSekolah,
+      sambutanKepalaSekolah: '', // Bersih dari data landing page yang tidak digunakan lagi
       fotoKepalaSekolah,
-      fotoSekolah,
       logoUrl,
     };
 
     db.saveSettings(updated);
     setSettings(updated);
-    setSuccessMsg('Profil sekolah & alamat berhasil disimpan dan diperbarui di seluruh sistem!');
+    setSuccessMsg('Profil sekolah & identitas berhasil disimpan dan diperbarui di seluruh sistem!');
 
     setTimeout(() => {
       setSuccessMsg('');
     }, 3500);
   };
 
-  const handleUploadFotoKS = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleUploadFotoKS = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-      setFotoKepalaSekolah(evt.target?.result as string);
-    };
-    reader.readAsDataURL(file);
+    setIsUploadingKS(true);
+    try {
+      // Compress to lightweight, clean format to avoid QuotaExceededError
+      const compressed = await compressImage(file, 480, 480, 0.82);
+      if (compressed) {
+        setFotoKepalaSekolah(compressed);
+        db.updateSekolah({ fotoKepalaSekolah: compressed });
+        const current = db.getSettings();
+        db.saveSettings({ ...current, fotoKepalaSekolah: compressed });
+        setSuccessMsg('Foto Kepala Sekolah berhasil diperbarui dan disimpan!');
+        setTimeout(() => setSuccessMsg(''), 3000);
+      }
+    } catch (err) {
+      console.error('Foto KS upload error:', err);
+      alert('Gagal memproses foto. Silakan coba file foto lain.');
+    } finally {
+      setIsUploadingKS(false);
+      // Reset input value so re-selecting same file triggers change
+      e.target.value = '';
+    }
   };
 
-  const handleUploadLogo = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleUploadLogo = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-      setLogoUrl(evt.target?.result as string);
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const handleUploadFotoSekolah = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-      setFotoSekolah(evt.target?.result as string);
-    };
-    reader.readAsDataURL(file);
+    setIsUploadingLogo(true);
+    try {
+      const compressed = await compressImage(file, 360, 360, 0.88);
+      if (compressed) {
+        setLogoUrl(compressed);
+        db.updateSekolah({ logo: compressed });
+        db.updateSettings({ logoUrl: compressed });
+        const current = db.getSettings();
+        db.saveSettings({ ...current, logoUrl: compressed });
+        setSuccessMsg('Logo sekolah berhasil diperbarui di seluruh dokumen!');
+        setTimeout(() => setSuccessMsg(''), 3000);
+      }
+    } catch (err) {
+      console.error('Logo upload error:', err);
+      alert('Gagal memproses logo. Silakan coba file lain.');
+    } finally {
+      setIsUploadingLogo(false);
+      // Reset input value
+      e.target.value = '';
+    }
   };
 
   return (
@@ -130,7 +149,7 @@ export const ProfilSekolahView: React.FC = () => {
             Profil & Identitas Resmi Sekolah
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            Perubahan pada profil ini akan otomatis diperbarui pada Landing Page, Kartu Identitas, dan e-Rapor
+            Perubahan pada profil ini otomatis diperbarui pada Header Sistem, Kartu Identitas, Presensi, dan Dokumen e-Rapor.
           </p>
         </div>
       </div>
@@ -143,41 +162,44 @@ export const ProfilSekolahView: React.FC = () => {
       )}
 
       <form onSubmit={handleSave} className="space-y-6">
-        {/* Identitas Pokok */}
+        {/* Identitas Utama */}
         <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-xs space-y-4">
           <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2 border-b border-slate-100 pb-3">
             <Building2 className="w-4 h-4 text-blue-700" />
-            <span>Identitas Pokok Sekolah</span>
+            <span>Identitas Utama Sekolah</span>
           </h3>
 
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Nama Sekolah Resmi
+                Nama Resmi Sekolah
               </label>
               <input
                 type="text"
-                required
                 value={namaSekolah}
                 onChange={(e) => setNamaSekolah(e.target.value)}
                 className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:bg-white"
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">NPSN</label>
-              <input
-                type="text"
                 required
-                value={npsn}
-                onChange={(e) => setNpsn(e.target.value)}
-                className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:bg-white"
               />
             </div>
 
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Nomor Telepon / WhatsApp Sekolah
+                NPSN (Nomor Pokok Sekolah Nasional)
+              </label>
+              <input
+                type="text"
+                value={npsn}
+                onChange={(e) => setNpsn(e.target.value)}
+                className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:bg-white font-mono"
+                required
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1 flex items-center gap-1.5">
+                <Phone className="w-3.5 h-3.5 text-slate-500" />
+                <span>Nomor Telepon / Kontak</span>
               </label>
               <input
                 type="text"
@@ -188,8 +210,9 @@ export const ProfilSekolahView: React.FC = () => {
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Email Sekolah
+              <label className="block text-xs font-semibold text-slate-700 mb-1 flex items-center gap-1.5">
+                <Mail className="w-3.5 h-3.5 text-slate-500" />
+                <span>Email Resmi Sekolah</span>
               </label>
               <input
                 type="email"
@@ -198,10 +221,20 @@ export const ProfilSekolahView: React.FC = () => {
                 className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:bg-white"
               />
             </div>
+          </div>
+        </div>
 
+        {/* Alamat Lengkap & Wilayah */}
+        <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-xs space-y-4">
+          <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2 border-b border-slate-100 pb-3">
+            <MapPin className="w-4 h-4 text-blue-700" />
+            <span>Alamat & Wilayah Geografis</span>
+          </h3>
+
+          <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
             <div className="sm:col-span-2">
               <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Alamat Lengkap / Jalan / Dusun / RT-RW
+                Alamat Jalan / Dusun / Kampung
               </label>
               <textarea
                 rows={2}
@@ -211,7 +244,7 @@ export const ProfilSekolahView: React.FC = () => {
                 className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:bg-white"
               />
               <p className="text-[11px] text-slate-500 mt-1">
-                Alamat ini akan langsung tampil di Landing Page (bagian kontak, footer, dan peta) serta kop cetak dokumen.
+                Alamat ini akan langsung tampil pada kop resmi cetak dokumen, kartu pelajar, dan laporan akademik.
               </p>
             </div>
 
@@ -254,40 +287,39 @@ export const ProfilSekolahView: React.FC = () => {
               />
             </div>
 
-            <div className="grid grid-cols-2 gap-2">
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Provinsi
-                </label>
-                <input
-                  type="text"
-                  value={provinsi}
-                  onChange={(e) => setProvinsi(e.target.value)}
-                  placeholder="Contoh: Jawa Barat"
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:bg-white"
-                />
-              </div>
-              <div>
-                <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Kode Pos
-                </label>
-                <input
-                  type="text"
-                  value={kodePos}
-                  onChange={(e) => setKodePos(e.target.value)}
-                  placeholder="Contoh: 40381"
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:bg-white"
-                />
-              </div>
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Provinsi
+              </label>
+              <input
+                type="text"
+                value={provinsi}
+                onChange={(e) => setProvinsi(e.target.value)}
+                placeholder="Contoh: Jawa Barat"
+                className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:bg-white"
+              />
+            </div>
+
+            <div>
+              <label className="block text-xs font-semibold text-slate-700 mb-1">
+                Kode Pos
+              </label>
+              <input
+                type="text"
+                value={kodePos}
+                onChange={(e) => setKodePos(e.target.value)}
+                placeholder="Contoh: 40381"
+                className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:bg-white font-mono"
+              />
             </div>
           </div>
         </div>
 
-        {/* Visi dan Misi */}
+        {/* Visi & Misi */}
         <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-xs space-y-4">
           <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2 border-b border-slate-100 pb-3">
             <FileText className="w-4 h-4 text-blue-700" />
-            <span>Visi dan Misi Sekolah</span>
+            <span>Visi & Misi Satuan Pendidikan</span>
           </h3>
 
           <div className="space-y-4">
@@ -296,7 +328,7 @@ export const ProfilSekolahView: React.FC = () => {
                 Visi Sekolah
               </label>
               <textarea
-                rows={3}
+                rows={2}
                 value={visi}
                 onChange={(e) => setVisi(e.target.value)}
                 className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:bg-white"
@@ -305,10 +337,10 @@ export const ProfilSekolahView: React.FC = () => {
 
             <div>
               <label className="block text-xs font-semibold text-slate-700 mb-1">
-                Misi Sekolah (Tuliskan satu poin per baris)
+                Misi Sekolah (Pisahkan setiap poin dengan baris baru / Enter)
               </label>
               <textarea
-                rows={5}
+                rows={4}
                 value={misi}
                 onChange={(e) => setMisi(e.target.value)}
                 className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:bg-white leading-relaxed"
@@ -317,70 +349,28 @@ export const ProfilSekolahView: React.FC = () => {
           </div>
         </div>
 
-        {/* Foto Background Landing Page */}
-        <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-xs space-y-4">
-          <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2 border-b border-slate-100 pb-3">
-            <ImageIcon className="w-4 h-4 text-blue-700" />
-            <span>Foto Background Landing Page</span>
-          </h3>
-
-          <div className="flex flex-col sm:flex-row items-center gap-6">
-            <div className="w-48 h-32 rounded-2xl overflow-hidden bg-slate-100 border-2 border-slate-200 shadow-md flex items-center justify-center flex-shrink-0">
-              <img
-                src={fotoSekolah || 'https://via.placeholder.com/600x400'}
-                alt="Foto Gedung Sekolah"
-                className="w-full h-full object-cover"
-                referrerPolicy="no-referrer"
-              />
-            </div>
-
-            <div className="space-y-3 flex-1 text-center sm:text-left">
-              <p className="text-xs text-slate-500">
-                Foto ini akan digunakan sebagai gambar latar belakang (background) utama di halaman depan aplikasi.
-                Disarankan menggunakan foto gedung sekolah dengan orientasi landscape (mendatar) beresolusi tinggi.
-              </p>
-              <div>
-                <input
-                  type="file"
-                  id="upload-foto-sekolah"
-                  accept="image/*"
-                  onChange={handleUploadFotoSekolah}
-                  className="hidden"
-                />
-                <label
-                  htmlFor="upload-foto-sekolah"
-                  className="px-4 py-2 bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-bold rounded-xl cursor-pointer inline-flex items-center gap-2 transition-colors border border-blue-200"
-                >
-                  <Upload className="w-4 h-4" />
-                  Ganti Background
-                </label>
-              </div>
-            </div>
-          </div>
-        </div>
-
         {/* Logo Sekolah */}
         <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-xs space-y-4">
           <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2 border-b border-slate-100 pb-3">
             <Sparkles className="w-4 h-4 text-blue-700" />
-            <span>Logo Sekolah (Tampil di Landing Page & Header)</span>
+            <span>Logo Resmi Sekolah (Header & Kop Dokumen)</span>
           </h3>
 
           <div className="flex flex-col sm:flex-row items-center gap-6">
-            <div className="w-32 h-32 rounded-2xl overflow-hidden bg-slate-100 border-2 border-slate-200 shadow-md flex items-center justify-center p-2 flex-shrink-0">
+            <div className="w-32 h-32 rounded-2xl overflow-hidden bg-slate-50 border-2 border-slate-200 shadow-md flex items-center justify-center p-2 flex-shrink-0">
               <img
-                src={logoUrl || 'https://via.placeholder.com/150'}
+                src={logoUrl || '/logo.svg'}
                 alt="Logo Sekolah"
                 className="w-full h-full object-contain"
               />
             </div>
 
             <div className="space-y-3 flex-1 text-center sm:text-left">
-              <p className="text-xs text-slate-500">
-                Logo ini akan ditampilkan di pojok kiri atas aplikasi, halaman depan (landing page), dan dokumen cetak resmi. 
-                Gunakan gambar dengan format PNG (transparan) atau JPG dengan resolusi minimal 500x500px.
+              <p className="text-xs text-slate-500 leading-relaxed">
+                Logo resmi ini akan ditampilkan di pojok kiri atas aplikasi (header), kartu identitas (ID Card), presensi QR, serta kop seluruh dokumen resmi dan e-Rapor. 
+                Gunakan gambar dengan format PNG transparan atau JPG.
               </p>
-              <div>
+              <div className="flex flex-wrap items-center gap-2 justify-center sm:justify-start">
                 <input
                   type="file"
                   id="upload-logo-foto"
@@ -390,11 +380,24 @@ export const ProfilSekolahView: React.FC = () => {
                 />
                 <label
                   htmlFor="upload-logo-foto"
-                  className="px-4 py-2 bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-bold rounded-xl cursor-pointer inline-flex items-center gap-2 transition-colors border border-blue-200"
+                  className="px-4 py-2 bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold rounded-xl cursor-pointer inline-flex items-center gap-2 transition-colors shadow-xs"
                 >
                   <Upload className="w-4 h-4" />
-                  Upload Logo Sekolah
+                  Ganti Logo Sekolah
                 </label>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setLogoUrl('/logo.svg');
+                    db.updateSekolah({ logo: '/logo.svg' });
+                    db.updateSettings({ logoUrl: '/logo.svg' });
+                    setSuccessMsg('Logo dikembalikan ke logo default.');
+                    setTimeout(() => setSuccessMsg(''), 3000);
+                  }}
+                  className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold"
+                >
+                  Gunakan Logo Default
+                </button>
               </div>
             </div>
           </div>
@@ -404,20 +407,34 @@ export const ProfilSekolahView: React.FC = () => {
         <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-xs space-y-4">
           <h3 className="text-sm font-bold text-slate-900 flex items-center gap-2 border-b border-slate-100 pb-3">
             <User className="w-4 h-4 text-blue-700" />
-            <span>Kepala Sekolah & Sambutan</span>
+            <span>Kepala Sekolah (Penandatangan Dokumen Resmi & e-Rapor)</span>
           </h3>
 
-          <div className="grid grid-cols-1 sm:grid-cols-12 gap-6">
-            <div className="sm:col-span-4 flex flex-col items-center text-center space-y-3">
-              <div className="w-36 h-36 rounded-2xl overflow-hidden border-2 border-blue-600 shadow-md">
-                <img
-                  src={fotoKepalaSekolah}
-                  alt="Kepala Sekolah"
-                  className="w-full h-full object-cover"
-                />
+          <div className="grid grid-cols-1 sm:grid-cols-12 gap-6 items-start">
+            <div className="sm:col-span-4 flex flex-col items-center text-center space-y-3 p-4 bg-slate-50 rounded-2xl border border-slate-200">
+              <div className="w-36 h-36 rounded-2xl overflow-hidden border-2 border-blue-600 shadow-md bg-white flex items-center justify-center relative">
+                {fotoKepalaSekolah ? (
+                  <img
+                    src={fotoKepalaSekolah}
+                    alt="Kepala Sekolah"
+                    className="w-full h-full object-cover"
+                  />
+                ) : (
+                  <div className="w-full h-full flex flex-col items-center justify-center text-slate-400 bg-slate-100">
+                    <User className="w-12 h-12 text-slate-300 mb-1" />
+                    <span className="text-[10px]">Belum Ada Foto</span>
+                  </div>
+                )}
+
+                {isUploadingKS && (
+                  <div className="absolute inset-0 bg-blue-900/60 backdrop-blur-xs flex flex-col items-center justify-center text-white text-xs">
+                    <Loader2 className="w-6 h-6 animate-spin mb-1" />
+                    <span>Menyimpan...</span>
+                  </div>
+                )}
               </div>
 
-              <div>
+              <div className="w-full space-y-2">
                 <input
                   type="file"
                   id="upload-ks-foto"
@@ -427,11 +444,28 @@ export const ProfilSekolahView: React.FC = () => {
                 />
                 <label
                   htmlFor="upload-ks-foto"
-                  className="px-3 py-1.5 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-xl cursor-pointer flex items-center gap-1.5 transition-colors"
+                  className="w-full py-2 bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold rounded-xl cursor-pointer flex items-center justify-center gap-2 transition-colors shadow-xs"
                 >
-                  <Upload className="w-3.5 h-3.5 text-blue-700" />
-                  Ganti Foto Kepala Sekolah
+                  <Camera className="w-3.5 h-3.5" />
+                  <span>Pilih & Ganti Foto</span>
                 </label>
+
+                {fotoKepalaSekolah && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setFotoKepalaSekolah('');
+                      db.updateSekolah({ fotoKepalaSekolah: '' });
+                      const current = db.getSettings();
+                      db.saveSettings({ ...current, fotoKepalaSekolah: '' });
+                      setSuccessMsg('Foto Kepala Sekolah berhasil dihapus.');
+                      setTimeout(() => setSuccessMsg(''), 3000);
+                    }}
+                    className="w-full py-1.5 text-[11px] text-rose-600 hover:bg-rose-50 rounded-lg transition-colors font-medium"
+                  >
+                    Hapus Foto
+                  </button>
+                )}
               </div>
             </div>
 
@@ -446,6 +480,7 @@ export const ProfilSekolahView: React.FC = () => {
                     value={namaKepalaSekolah}
                     onChange={(e) => setNamaKepalaSekolah(e.target.value)}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:bg-white font-bold"
+                    placeholder="Contoh: H. Ahmad Fauzi, M.Pd."
                   />
                 </div>
 
@@ -458,20 +493,42 @@ export const ProfilSekolahView: React.FC = () => {
                     value={nipKepalaSekolah}
                     onChange={(e) => setNipKepalaSekolah(e.target.value)}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:bg-white font-mono"
+                    placeholder="Contoh: 19780512 200501 1 004"
                   />
                 </div>
               </div>
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Naskah Sambutan Kepala Sekolah (Tampil di Landing Page)
+                  Atau Tempel URL Foto (Opsional)
                 </label>
-                <textarea
-                  rows={4}
-                  value={sambutanKepalaSekolah}
-                  onChange={(e) => setSambutanKepalaSekolah(e.target.value)}
-                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:bg-white leading-relaxed"
-                />
+                <div className="flex gap-2">
+                  <input
+                    type="text"
+                    value={fotoKepalaSekolah}
+                    onChange={(e) => setFotoKepalaSekolah(e.target.value)}
+                    placeholder="https://images.unsplash.com/... atau link foto web"
+                    className="flex-1 px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:bg-white text-slate-700"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (fotoKepalaSekolah.trim()) {
+                        db.updateSekolah({ fotoKepalaSekolah });
+                        const current = db.getSettings();
+                        db.saveSettings({ ...current, fotoKepalaSekolah });
+                        setSuccessMsg('Foto Kepala Sekolah berhasil disimpan!');
+                        setTimeout(() => setSuccessMsg(''), 3000);
+                      }
+                    }}
+                    className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold rounded-xl"
+                  >
+                    Terapkan URL
+                  </button>
+                </div>
+                <p className="text-[11px] text-slate-400 mt-1">
+                  Foto ini ditampilkan pada data profil resmi dan cetak dokumen identitas pimpinan sekolah.
+                </p>
               </div>
             </div>
           </div>

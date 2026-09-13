@@ -3,6 +3,7 @@ import { db } from '../../services/database';
 import { Guru } from '../../types';
 import { exportToExcel, exportToCsv } from '../../utils/exportHelper';
 import { ConfirmModal } from '../common/ConfirmModal';
+import { compressImage } from '../../utils/imageCompressor';
 import {
   Plus,
   Search,
@@ -15,6 +16,9 @@ import {
   Phone,
   MapPin,
   Briefcase,
+  Loader2,
+  Upload,
+  User,
 } from 'lucide-react';
 
 interface DataGuruViewProps {
@@ -41,7 +45,11 @@ export const DataGuruView: React.FC<DataGuruViewProps> = ({ onNavigateToQr }) =>
   const [alamat, setAlamat] = useState('');
   const [nomorHp, setNomorHp] = useState('');
   const [foto, setFoto] = useState('');
+  const [kelasId, setKelasId] = useState('');
+  const [isUploadingPhoto, setIsUploadingPhoto] = useState(false);
   
+  const [kelasList, setKelasList] = useState(db.getKelasList());
+
   // Account Form
   const [accountUsername, setAccountUsername] = useState('');
   const [accountPassword, setAccountPassword] = useState('');
@@ -55,8 +63,15 @@ export const DataGuruView: React.FC<DataGuruViewProps> = ({ onNavigateToQr }) =>
   };
 
   useEffect(() => {
+    const handleClassUpdate = () => {
+      setKelasList(db.getKelasList());
+    };
     window.addEventListener('data_guru_changed', refreshData);
-    return () => window.removeEventListener('data_guru_changed', refreshData);
+    window.addEventListener('data_kelas_changed', handleClassUpdate);
+    return () => {
+      window.removeEventListener('data_guru_changed', refreshData);
+      window.removeEventListener('data_kelas_changed', handleClassUpdate);
+    };
   }, []);
 
   const openAddModal = () => {
@@ -68,6 +83,7 @@ export const DataGuruView: React.FC<DataGuruViewProps> = ({ onNavigateToQr }) =>
     setAlamat('');
     setNomorHp('');
     setFoto('');
+    setKelasId('');
     setAccountUsername('');
     setAccountPassword('');
     setIsModalOpen(true);
@@ -82,6 +98,7 @@ export const DataGuruView: React.FC<DataGuruViewProps> = ({ onNavigateToQr }) =>
     setAlamat(guru.alamat);
     setNomorHp(guru.nomorHp);
     setFoto(guru.foto || '');
+    setKelasId(guru.kelasId || '');
     
     if (isAdmin) {
       const users = db.getUsers();
@@ -130,6 +147,7 @@ export const DataGuruView: React.FC<DataGuruViewProps> = ({ onNavigateToQr }) =>
         alamat,
         nomorHp,
         foto: foto || editingGuru.foto,
+        kelasId: kelasId || undefined,
       };
       db.saveGuru(updated, accountData);
     } else {
@@ -146,6 +164,7 @@ export const DataGuruView: React.FC<DataGuruViewProps> = ({ onNavigateToQr }) =>
           foto ||
           'https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=400&q=80',
         createdAt: new Date().toISOString().split('T')[0],
+        kelasId: kelasId || undefined,
       };
       db.saveGuru(newGuru, accountData);
     }
@@ -415,6 +434,23 @@ export const DataGuruView: React.FC<DataGuruViewProps> = ({ onNavigateToQr }) =>
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
+                  Kelas yang Diampu
+                </label>
+                <select
+                  value={kelasId}
+                  onChange={(e) => setKelasId(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-blue-600 cursor-pointer"
+                >
+                  <option value="">-- Pilih Kelas --</option>
+                  {kelasList.map(kelas => (
+                    <option key={kelas.id} value={kelas.id}>{kelas.nama}</option>
+                  ))}
+                </select>
+                <p className="text-[10px] text-slate-500 mt-1">Pilih kelas yang akan dikelola oleh guru ini (jika Wali Kelas).</p>
+              </div>
+
+              <div>
+                <label className="block text-xs font-semibold text-slate-700 mb-1">
                   Alamat Rumah
                 </label>
                 <textarea
@@ -428,32 +464,63 @@ export const DataGuruView: React.FC<DataGuruViewProps> = ({ onNavigateToQr }) =>
 
               <div>
                 <label className="block text-xs font-semibold text-slate-700 mb-1">
-                  Foto Guru (Upload atau URL)
+                  Foto Profil Guru (Unggah Foto atau URL)
                 </label>
-                <div className="flex gap-2 items-center">
-                  <div className="w-12 h-12 rounded-xl overflow-hidden bg-slate-100 flex-shrink-0 border border-slate-200">
-                    <img 
-                      src={foto || 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=400&q=80'} 
-                      alt="Preview" 
-                      className="w-full h-full object-cover"
-                    />
+                <div className="flex gap-3 items-center">
+                  <div className="w-14 h-14 rounded-2xl overflow-hidden bg-slate-100 flex-shrink-0 border-2 border-blue-600 shadow-xs relative">
+                    {foto ? (
+                      <img 
+                        src={foto} 
+                        alt="Preview Foto" 
+                        className="w-full h-full object-cover"
+                      />
+                    ) : (
+                      <div className="w-full h-full flex items-center justify-center text-slate-400">
+                        <User className="w-6 h-6 text-slate-300" />
+                      </div>
+                    )}
+                    {isUploadingPhoto && (
+                      <div className="absolute inset-0 bg-blue-900/60 flex items-center justify-center text-white">
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      </div>
+                    )}
                   </div>
                   <div className="flex-1 space-y-2">
-                    <input
-                      type="file"
-                      accept="image/*"
-                      onChange={(e) => {
-                        const file = e.target.files?.[0];
-                        if (file) {
-                          const reader = new FileReader();
-                          reader.onloadend = () => {
-                            setFoto(reader.result as string);
-                          };
-                          reader.readAsDataURL(file);
-                        }
-                      }}
-                      className="block w-full text-xs text-slate-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100"
-                    />
+                    <div className="flex items-center gap-2">
+                      <input
+                        type="file"
+                        accept="image/*"
+                        id="input-foto-guru"
+                        onChange={async (e) => {
+                          const file = e.target.files?.[0];
+                          if (file) {
+                            setIsUploadingPhoto(true);
+                            try {
+                              const compressed = await compressImage(file, 480, 480, 0.82);
+                              if (compressed) {
+                                setFoto(compressed);
+                              }
+                            } catch (err) {
+                              console.error('Foto guru compression error:', err);
+                              alert('Gagal memproses foto.');
+                            } finally {
+                              setIsUploadingPhoto(false);
+                              e.target.value = '';
+                            }
+                          }
+                        }}
+                        className="block w-full text-xs text-slate-500 file:mr-3 file:py-1.5 file:px-3 file:rounded-xl file:border-0 file:text-xs file:font-semibold file:bg-blue-50 file:text-blue-700 hover:file:bg-blue-100 cursor-pointer"
+                      />
+                      {foto && (
+                        <button
+                          type="button"
+                          onClick={() => setFoto('')}
+                          className="text-[11px] text-rose-600 hover:text-rose-700 font-medium px-2 py-1 rounded hover:bg-rose-50 flex-shrink-0"
+                        >
+                          Hapus
+                        </button>
+                      )}
+                    </div>
                     <input
                       type="text"
                       placeholder="Atau masukkan URL gambar https://..."

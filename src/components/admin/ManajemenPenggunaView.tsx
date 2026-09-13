@@ -429,7 +429,7 @@ export const ManajemenPenggunaView: React.FC<ManajemenPenggunaViewProps> = ({ cu
                   <option value="">-- Pilih Nama Guru untuk Pengisian Otomatis --</option>
                   {guruList.map((g) => (
                     <option key={g.id} value={g.id}>
-                      {g.nama} {g.nip ? `(NIP: ${g.nip})` : ''} - {g.mapel || 'Guru'}
+                      {g.nama} {g.nip ? `(NIP: ${g.nip})` : ''} - {g.mataPelajaran || 'Guru'}
                     </option>
                   ))}
                 </select>

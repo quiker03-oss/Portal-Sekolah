@@ -55,32 +55,42 @@ export const QrCodeGuruView: React.FC<QrCodeGuruViewProps> = ({ initialGuruId })
     if (!dataUrl) return;
 
     const canvas = document.createElement("canvas");
-    canvas.width = 300;
-    canvas.height = 360;
+    canvas.width = 480;
+    canvas.height = 540;
     const ctx = canvas.getContext("2d");
     if (!ctx) return;
     ctx.fillStyle = "#ffffff";
-    ctx.fillRect(0, 0, 300, 360);
+    ctx.fillRect(0, 0, 480, 540);
     
     const img = new Image();
     img.crossOrigin = "anonymous";
     img.src = dataUrl;
     img.onload = () => {
-      ctx.drawImage(img, 20, 20, 260, 260);
+      const qrBoxSize = 360;
+      const qrBoxX = (480 - qrBoxSize) / 2;
+      const qrBoxY = 40;
+      ctx.drawImage(img, qrBoxX, qrBoxY, qrBoxSize, qrBoxSize);
+
       ctx.fillStyle = "#0f172a";
-      ctx.font = "bold 16px sans-serif";
+      let fontSize = 24;
+      ctx.font = `bold ${fontSize}px sans-serif`;
       ctx.textAlign = "center";
-      ctx.fillText(guru.nama.toUpperCase(), 150, 310);
-      ctx.fillStyle = "#64748b";
-      ctx.font = "12px monospace";
-      ctx.fillText(guru.qrId, 150, 330);
+      ctx.textBaseline = "middle";
+
+      const displayName = guru.nama.toUpperCase();
+      while (ctx.measureText(displayName).width > 440 && fontSize > 14) {
+        fontSize -= 1.5;
+        ctx.font = `bold ${fontSize}px sans-serif`;
+      }
+      ctx.fillText(displayName, 240, 465);
       
       const link = document.createElement("a");
       link.href = canvas.toDataURL("image/png");
-      link.download = `QR_${guru.qrId}_${guru.nama.replace(/\s+/g, '_')}.png`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+      const cleanName = guru.nama.replace(/[^a-zA-Z0-9]/g, '_');
+      link.download = `QR_${cleanName}.png`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
     };
   };
 
@@ -97,7 +107,7 @@ export const QrCodeGuruView: React.FC<QrCodeGuruViewProps> = ({ initialGuruId })
             Kartu & QR Code Guru
           </h2>
           <p className="text-xs text-slate-500 mt-0.5">
-            QR Code khusus presensi kehadiran mandiri Guru (Scan 1: Masuk, Scan 2: Pulang). Kartu hanya menampilkan QR Code dan Nama Guru.
+            QR Code khusus presensi kehadiran mandiri Guru. Gambar hasil unduhan hanya memuat kode QR dan Nama Guru.
           </p>
         </div>
 
@@ -115,20 +125,13 @@ export const QrCodeGuruView: React.FC<QrCodeGuruViewProps> = ({ initialGuruId })
         <div className="lg:col-span-5 space-y-4">
           <h3 className="text-sm font-bold text-slate-800 flex items-center gap-2">
             <QrCode className="w-4 h-4 text-blue-700" />
-            <span>Format Resmi Kartu QR Guru</span>
+            <span>Pratinjau Unduh QR Guru</span>
           </h3>
 
           {selectedGuru && (
-            <div className="bg-white rounded-3xl p-6 border-2 border-blue-600 shadow-lg space-y-5 flex flex-col items-center text-center relative overflow-hidden">
-              <div className="w-full flex justify-between items-center pb-3 border-b border-slate-100 text-xs text-slate-500">
-                <span className="font-semibold text-blue-700">SATUAN PENDIDIKAN</span>
-                <span className="font-mono bg-blue-50 px-2 py-0.5 rounded text-blue-800 font-bold text-[11px]">
-                  {selectedGuru.qrId}
-                </span>
-              </div>
-
-              {/* Exact requirement: [ QR CODE ] NAMA GURU */}
-              <div className="p-3 bg-white border-2 border-slate-800 rounded-2xl shadow-inner">
+            <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-5 flex flex-col items-center text-center relative overflow-hidden">
+              {/* Clean QR code box */}
+              <div className="p-3 bg-white border border-slate-200 rounded-2xl shadow-xs">
                 {qrCache[selectedGuru.id] ? (
                   <img
                     src={qrCache[selectedGuru.id]}
@@ -143,7 +146,7 @@ export const QrCodeGuruView: React.FC<QrCodeGuruViewProps> = ({ initialGuruId })
               </div>
 
               {/* STRICTLY TEACHER NAME */}
-              <div>
+              <div className="w-full px-2">
                 <h4 className="text-lg sm:text-xl font-extrabold text-slate-900 tracking-tight uppercase leading-snug">
                   {selectedGuru.nama}
                 </h4>
@@ -152,14 +155,14 @@ export const QrCodeGuruView: React.FC<QrCodeGuruViewProps> = ({ initialGuruId })
               <div className="w-full pt-4 border-t border-slate-100 flex gap-2">
                 <button
                   onClick={() => handleDownloadSingle(selectedGuru)}
-                  className="flex-1 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
+                  className="flex-1 py-2 rounded-xl bg-blue-600 hover:bg-blue-700 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer shadow-xs"
                 >
                   <Download className="w-3.5 h-3.5" />
-                  <span>Unduh PNG</span>
+                  <span>Unduh PNG (Hanya Nama)</span>
                 </button>
                 <button
                   onClick={handlePrintCards}
-                  className="flex-1 py-2 rounded-xl bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors"
+                  className="flex-1 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-semibold flex items-center justify-center gap-1.5 transition-colors cursor-pointer"
                 >
                   <Printer className="w-3.5 h-3.5" />
                   <span>Cetak Kartu</span>
@@ -256,7 +259,7 @@ export const QrCodeGuruView: React.FC<QrCodeGuruViewProps> = ({ initialGuruId })
               <div
                 key={guru.id}
                 style={{
-                  border: '2px solid #1e3a8a',
+                  border: '1.5px solid #cbd5e1',
                   borderRadius: '12px',
                   padding: '14px',
                   textAlign: 'center',
@@ -264,19 +267,6 @@ export const QrCodeGuruView: React.FC<QrCodeGuruViewProps> = ({ initialGuruId })
                   pageBreakInside: 'avoid',
                 }}
               >
-                <div
-                  style={{
-                    fontSize: '10px',
-                    fontWeight: 'bold',
-                    color: '#1e40af',
-                    marginBottom: '8px',
-                    borderBottom: '1px solid #e2e8f0',
-                    paddingBottom: '4px',
-                  }}
-                >
-                  SATUAN PENDIDIKAN
-                </div>
-
                 <div
                   style={{
                     display: 'flex',

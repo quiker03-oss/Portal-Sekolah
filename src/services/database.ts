@@ -21,6 +21,9 @@ import {
   SuperAdminUser,
   SuperAdminLog,
   NilaiHarianItem,
+  NaskahUjianAI,
+  ModulAjarAI,
+  BahanAjarAI,
 } from '../types';
 
 const STORAGE_KEYS = {
@@ -47,6 +50,9 @@ const STORAGE_KEYS = {
   SUPERADMIN_LOGS: 'sdn2_superadmin_logs',
   SUPERADMIN_AUTH: 'sdn2_superadmin_auth_session',
   ACTIVE_SCHOOL_ID: 'sdn2_active_school_id',
+  AI_SOAL: 'sdn2_ai_soal',
+  AI_MODUL: 'sdn2_ai_modul',
+  AI_MATERI: 'sdn2_ai_materi',
 };
 
 // Default school emblem
@@ -825,7 +831,8 @@ const INITIAL_SUPERADMIN_LOGS: SuperAdminLog[] = [
 class DatabaseService {
   
   private cache: Map<string, unknown> = new Map();
-  private firestoreUnsubs: (() => void)[] = [];
+  private firestoreSchoolUnsubs: (() => void)[] = [];
+  private firestoreSuperAdminUnsubs: (() => void)[] = [];
 
   private async syncToFirestore(schoolId: string, collectionName: string, item: any) {
     try {
@@ -844,11 +851,44 @@ class DatabaseService {
   }
 
   initFirestore(schoolId: string) {
-    // Clear old listeners
-    this.firestoreUnsubs.forEach(unsub => unsub());
-    this.firestoreUnsubs = [];
+    if (schoolId === 'superadmin') {
+      // Clear previous superadmin listener
+      this.firestoreSuperAdminUnsubs.forEach(unsub => {
+        try { unsub(); } catch {}
+      });
+      this.firestoreSuperAdminUnsubs = [];
 
-    
+      try {
+        const qSchools = query(collection(firestoreDb, `schools/superadmin/school_accounts`));
+        const unsubSchools = onSnapshot(
+          qSchools,
+          (snapshot) => {
+            const list = snapshot.docs.map(d => d.data());
+            this.cache.set(STORAGE_KEYS.SCHOOL_ACCOUNTS, list);
+            try {
+              localStorage.setItem(STORAGE_KEYS.SCHOOL_ACCOUNTS, JSON.stringify(list));
+            } catch (e) {
+              console.error('Storage error:', e);
+            }
+            window.dispatchEvent(new Event('school_accounts_changed'));
+          },
+          (err) => {
+            console.warn('Firestore snapshot error for school_accounts:', err);
+          }
+        );
+        this.firestoreSuperAdminUnsubs.push(unsubSchools);
+      } catch (err) {
+        console.warn('Failed to listen to school_accounts:', err);
+      }
+      return;
+    }
+
+    // Clear old school listeners
+    this.firestoreSchoolUnsubs.forEach(unsub => {
+      try { unsub(); } catch {}
+    });
+    this.firestoreSchoolUnsubs = [];
+
     const collectionsMap: Record<string, string> = {
       [STORAGE_KEYS.SISWA]: 'siswa',
       [STORAGE_KEYS.GURU]: 'guru',
@@ -864,35 +904,77 @@ class DatabaseService {
       [STORAGE_KEYS.GALERI]: 'galeri',
       [STORAGE_KEYS.KAS]: 'kas',
       [STORAGE_KEYS.USERS]: 'users',
-      [STORAGE_KEYS.SETTINGS]: 'settings'
+      [STORAGE_KEYS.SETTINGS]: 'settings',
+      [STORAGE_KEYS.SEKOLAH]: 'sekolah',
+      [STORAGE_KEYS.LANDING_CONFIG]: 'landing_config',
     };
 
     Object.entries(collectionsMap).forEach(([storageKey, colName]) => {
-      const q = query(collection(firestoreDb, `schools/${schoolId}/${colName}`));
-      const unsub = onSnapshot(q, (snapshot) => {
-        const list = snapshot.docs.map(d => d.data());
-        const actualKey = this.getSchoolScopedKey(schoolId, storageKey);
-        this.cache.set(actualKey, list);
-        localStorage.setItem(actualKey, JSON.stringify(list));
-        window.dispatchEvent(new Event(`data_${colName}_changed`));
-      });
-      this.firestoreUnsubs.push(unsub);
+      try {
+        const q = query(collection(firestoreDb, `schools/${schoolId}/${colName}`));
+        const unsub = onSnapshot(
+          q,
+          (snapshot) => {
+            if (colName === 'sekolah' || colName === 'settings' || colName === 'landing_config') {
+              if (snapshot.docs.length > 0) {
+                const data = snapshot.docs[0].data();
+                const { id, ...cleanData } = data;
+                const actualKey = this.getSchoolScopedKey(schoolId, storageKey);
+                
+                // Protect against reverting locally updated photos or settings with older data
+                const current = (this.cache.get(actualKey) || {}) as Record<string, any>;
+                if (current && typeof current === 'object') {
+                  if (current.updatedAt && cleanData.updatedAt && cleanData.updatedAt < current.updatedAt) {
+                    return;
+                  }
+                  if (current.logo && !cleanData.logo) {
+                    cleanData.logo = current.logo;
+                  }
+                  if (current.logoUrl && !cleanData.logoUrl) {
+                    cleanData.logoUrl = current.logoUrl;
+                  }
+                  if (current.fotoKepalaSekolah && !cleanData.fotoKepalaSekolah) {
+                    cleanData.fotoKepalaSekolah = current.fotoKepalaSekolah;
+                  }
+                }
+
+                this.cache.set(actualKey, cleanData);
+                try {
+                  localStorage.setItem(actualKey, JSON.stringify(cleanData));
+                } catch (e) {
+                  console.error('Storage error:', e);
+                }
+                window.dispatchEvent(new Event(`data_${colName}_changed`));
+                if (colName === 'sekolah') {
+                  window.dispatchEvent(new Event('sekolah_updated'));
+                }
+                if (colName === 'settings') {
+                  window.dispatchEvent(new Event('settings_updated'));
+                }
+              }
+              return;
+            }
+
+            const list = snapshot.docs.map(d => d.data());
+            const actualKey = this.getSchoolScopedKey(schoolId, storageKey);
+            this.cache.set(actualKey, list);
+            try {
+              localStorage.setItem(actualKey, JSON.stringify(list));
+            } catch (e) {
+              console.error('Storage error:', e);
+            }
+            window.dispatchEvent(new Event(`data_${colName}_changed`));
+          },
+          (err) => {
+            console.warn(`Firestore snapshot error for ${colName}:`, err);
+          }
+        );
+        this.firestoreSchoolUnsubs.push(unsub);
+      } catch (err) {
+        console.warn(`Failed to attach listener for ${colName}:`, err);
+      }
     });
-
-    // Special global listeners for SuperAdmin data
-    if (schoolId === 'superadmin') {
-       const qSchools = query(collection(firestoreDb, `schools/superadmin/school_accounts`));
-       const unsubSchools = onSnapshot(qSchools, (snapshot) => {
-         const list = snapshot.docs.map(d => d.data());
-         this.cache.set(STORAGE_KEYS.SCHOOL_ACCOUNTS, list);
-         localStorage.setItem(STORAGE_KEYS.SCHOOL_ACCOUNTS, JSON.stringify(list));
-         window.dispatchEvent(new Event('school_accounts_changed'));
-       });
-       this.firestoreUnsubs.push(unsubSchools);
-    }
-
   }
-
 
   getActiveSchoolId(): string {
     return localStorage.getItem(STORAGE_KEYS.ACTIVE_SCHOOL_ID) || 'sch-1';
@@ -1077,7 +1159,7 @@ class DatabaseService {
            }
         });
       }
-    } else if (colName === 'settings' || colName === 'landing_config') {
+    } else if (colName === 'settings' || colName === 'landing_config' || colName === 'sekolah') {
        this.syncToFirestore(schoolId, colName, { ...(value as any), id: 'default' });
     }
 
@@ -1165,7 +1247,7 @@ class DatabaseService {
         currentSekolah.sejarah = currentSekolah.sejarah?.replace(/Nama Sekolah Anda/gi, 'Satuan Pendidikan') || '';
         updated = true;
       }
-      if (!currentSekolah.logo || currentSekolah.logo.includes('xmlns') || currentSekolah.logo.includes('data:image')) {
+      if (!currentSekolah.logo) {
         currentSekolah.logo = '/logo.svg';
         updated = true;
       }
@@ -1217,7 +1299,7 @@ class DatabaseService {
 
   updateSekolah(data: Partial<SekolahInfo>): SekolahInfo {
     const current = this.getSekolah();
-    const updated = { ...current, ...data };
+    const updated = { ...current, ...data, updatedAt: Date.now() };
     this.setItem(STORAGE_KEYS.SEKOLAH, updated);
     window.dispatchEvent(new CustomEvent('sekolah_updated', { detail: updated }));
     return updated;
@@ -1267,26 +1349,30 @@ class DatabaseService {
   }
 
   getCurrentUser(): User | null {
-    const user = this.getItem<User | null>(STORAGE_KEYS.AUTH_USER, null);
-    if (user) return user;
-    
-    // Graceful fallback to active school operator
-    const activeId = this.getActiveSchoolId();
-    const account = this.getSchoolAccountById(activeId);
-    if (account) {
-      return {
-        id: `usr-${account.id}-admin`,
-        username: account.username,
-        password: account.password,
-        name: `Operator ${account.namaSekolah}`,
-        role: 'admin',
-      };
+    try {
+      const sessionData = sessionStorage.getItem(STORAGE_KEYS.AUTH_USER);
+      if (sessionData) {
+        return JSON.parse(sessionData);
+      }
+    } catch (e) {
+      console.error('SessionStorage read error:', e);
     }
     return null;
   }
 
   setCurrentUser(user: User | null): void {
-    this.setItem(STORAGE_KEYS.AUTH_USER, user);
+    try {
+      if (user) {
+        sessionStorage.setItem(STORAGE_KEYS.AUTH_USER, JSON.stringify(user));
+        localStorage.setItem(STORAGE_KEYS.AUTH_USER, JSON.stringify(user));
+      } else {
+        sessionStorage.removeItem(STORAGE_KEYS.AUTH_USER);
+        localStorage.removeItem(STORAGE_KEYS.AUTH_USER);
+      }
+    } catch (e) {
+      console.error('Storage error:', e);
+    }
+    this.cache.set(STORAGE_KEYS.AUTH_USER, user);
     window.dispatchEvent(new CustomEvent('auth_changed', { detail: user }));
     window.dispatchEvent(new Event('auth_state_changed'));
   }
@@ -1297,6 +1383,25 @@ class DatabaseService {
 
   // Siswa
   getSiswaList(): Siswa[] {
+    const list = this.getItem<Siswa[]>(STORAGE_KEYS.SISWA, INITIAL_SISWA);
+    const user = this.getCurrentUser();
+    if (user?.role === 'guru' && user.kelasId) {
+      const kelasList = this.getAllKelasListUnfiltered();
+      const userClass = kelasList.find(k => k.id === user.kelasId);
+      if (userClass) {
+        const normUserClass = userClass.nama.toLowerCase().replace(/[^a-z0-9]/g, '');
+        return list.filter(s => {
+          if (!s.kelas) return false;
+          if (s.kelas === userClass.nama) return true;
+          return s.kelas.toLowerCase().replace(/[^a-z0-9]/g, '') === normUserClass;
+        });
+      }
+    }
+    return list;
+  }
+  
+  getAllSiswaListUnfiltered(): Siswa[] {
+    // Digunakan internal oleh backend untuk hal-hal khusus jika perlu
     return this.getItem<Siswa[]>(STORAGE_KEYS.SISWA, INITIAL_SISWA);
   }
 
@@ -1304,8 +1409,38 @@ class DatabaseService {
     return this.getSiswaList().find((s) => s.id === id || s.qrId === id);
   }
 
+  ensureClassesExist(classNames: string[]): void {
+    const list = this.getAllKelasListUnfiltered();
+    let changed = false;
+    classNames.forEach((name) => {
+      const trimmed = name?.trim();
+      if (!trimmed) return;
+      const norm = trimmed.toLowerCase().replace(/[^a-z0-9]/g, '');
+      const exists = list.some(
+        (k) =>
+          k.nama.trim().toLowerCase() === trimmed.toLowerCase() ||
+          k.nama.toLowerCase().replace(/[^a-z0-9]/g, '') === norm
+      );
+      if (!exists) {
+        const numMatch = trimmed.match(/\d+/);
+        const tingkat = numMatch ? parseInt(numMatch[0], 10) : 1;
+        list.push({
+          id: `cls-auto-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+          nama: trimmed,
+          tingkat: tingkat >= 1 && tingkat <= 12 ? tingkat : 1,
+          waliKelas: '',
+        });
+        changed = true;
+      }
+    });
+    if (changed) {
+      this.setItem(STORAGE_KEYS.KELAS, list);
+      window.dispatchEvent(new Event('data_kelas_changed'));
+    }
+  }
+
   saveSiswa(siswa: Siswa): Siswa {
-    const list = this.getSiswaList();
+    const list = this.getAllSiswaListUnfiltered();
     const idx = list.findIndex((s) => s.id === siswa.id);
     if (idx >= 0) {
       list[idx] = siswa;
@@ -1313,19 +1448,29 @@ class DatabaseService {
       list.unshift(siswa);
     }
     this.setItem(STORAGE_KEYS.SISWA, list);
+    if (siswa.kelas) {
+      this.ensureClassesExist([siswa.kelas]);
+    }
     window.dispatchEvent(new Event('data_siswa_changed'));
     return siswa;
   }
 
   saveManySiswa(newSiswaList: Siswa[]): void {
-    const list = this.getSiswaList();
+    const list = this.getAllSiswaListUnfiltered();
     const updated = [...newSiswaList, ...list];
     this.setItem(STORAGE_KEYS.SISWA, updated);
+
+    // Otomatis sinkronisasi rombel kelas baru ke master data kelas
+    const classes = Array.from(new Set(newSiswaList.map((s) => s.kelas).filter(Boolean)));
+    if (classes.length > 0) {
+      this.ensureClassesExist(classes);
+    }
+
     window.dispatchEvent(new Event('data_siswa_changed'));
   }
 
   deleteSiswa(id: string): void {
-    const list = this.getSiswaList().filter((s) => s.id !== id);
+    const list = this.getAllSiswaListUnfiltered().filter((s) => s.id !== id);
     this.setItem(STORAGE_KEYS.SISWA, list);
     window.dispatchEvent(new Event('data_siswa_changed'));
   }
@@ -1358,6 +1503,7 @@ class DatabaseService {
         ...users[userIdx], 
         name: guru.nama, 
         nip: guru.nip,
+        kelasId: guru.kelasId,
         ...(account?.username ? { username: account.username } : {}),
         ...(account?.password ? { password: account.password } : {})
       };
@@ -1372,6 +1518,7 @@ class DatabaseService {
         role: 'guru',
         nip: guru.nip,
         guruId: guru.id,
+        kelasId: guru.kelasId,
       });
     }
     this.setItem(STORAGE_KEYS.USERS, users);
@@ -1393,11 +1540,20 @@ class DatabaseService {
 
   // Kelas & Mapel
   getKelasList(): Kelas[] {
+    const list = this.getItem<Kelas[]>(STORAGE_KEYS.KELAS, INITIAL_KELAS);
+    const user = this.getCurrentUser();
+    if (user?.role === 'guru' && user.kelasId) {
+      return list.filter(k => k.id === user.kelasId);
+    }
+    return list;
+  }
+  
+  getAllKelasListUnfiltered(): Kelas[] {
     return this.getItem<Kelas[]>(STORAGE_KEYS.KELAS, INITIAL_KELAS);
   }
 
   saveKelas(kelas: Kelas): void {
-    const list = this.getKelasList();
+    const list = this.getAllKelasListUnfiltered();
     const idx = list.findIndex((k) => k.id === kelas.id);
     if (idx >= 0) list[idx] = kelas;
     else list.push(kelas);
@@ -1406,7 +1562,7 @@ class DatabaseService {
   }
 
   deleteKelas(id: string): void {
-    const list = this.getKelasList().filter((k) => k.id !== id);
+    const list = this.getAllKelasListUnfiltered().filter((k) => k.id !== id);
     this.setItem(STORAGE_KEYS.KELAS, list);
     window.dispatchEvent(new Event('data_kelas_changed'));
   }
@@ -1432,11 +1588,25 @@ class DatabaseService {
 
   // Absensi Siswa
   getAbsensiSiswaList(): AbsensiSiswa[] {
+    const list = this.getItem<AbsensiSiswa[]>(STORAGE_KEYS.ABSENSI_SISWA, INITIAL_ABSENSI_SISWA);
+    const user = this.getCurrentUser();
+    if (user?.role === 'guru' && user.kelasId) {
+      // Find the class name from kelasId since AbsensiSiswa stores "kelas" name or relies on siswa matching
+      const kelasList = this.getAllKelasListUnfiltered();
+      const userClass = kelasList.find(k => k.id === user.kelasId);
+      if (userClass) {
+         return list.filter(a => a.kelas === userClass.nama);
+      }
+    }
+    return list;
+  }
+  
+  getAllAbsensiSiswaListUnfiltered(): AbsensiSiswa[] {
     return this.getItem<AbsensiSiswa[]>(STORAGE_KEYS.ABSENSI_SISWA, INITIAL_ABSENSI_SISWA);
   }
 
   recordAbsensiSiswa(record: Omit<AbsensiSiswa, 'id'>): { success: boolean; message: string; data?: AbsensiSiswa } {
-    const list = this.getAbsensiSiswaList();
+    const list = this.getAllAbsensiSiswaListUnfiltered();
     // Rule: Jangan mencatat absensi ganda pada hari yang sama
     const existing = list.find((a) => a.siswaId === record.siswaId && a.tanggal === record.tanggal);
     if (existing) {
@@ -1463,7 +1633,7 @@ class DatabaseService {
   }
 
   deleteAbsensiSiswa(id: string): void {
-    const list = this.getAbsensiSiswaList().filter((a) => a.id !== id);
+    const list = this.getAllAbsensiSiswaListUnfiltered().filter((a) => a.id !== id);
     this.setItem(STORAGE_KEYS.ABSENSI_SISWA, list);
     window.dispatchEvent(new Event('absensi_siswa_updated'));
   }
@@ -1565,11 +1735,27 @@ class DatabaseService {
   }
 
   getCatatanRaporList(): CatatanRapor[] {
+    const list = this.getItem<CatatanRapor[]>(STORAGE_KEYS.CATATAN_RAPOR, INITIAL_CATATAN_RAPOR);
+    const user = this.getCurrentUser();
+    if (user?.role === 'guru' && user.kelasId) {
+      const kelasList = this.getAllKelasListUnfiltered();
+      const userClass = kelasList.find(k => k.id === user.kelasId);
+      if (userClass) {
+         // Get students in this class
+         const studentsInClass = this.getAllSiswaListUnfiltered().filter(s => s.kelas === userClass.nama);
+         const studentIds = new Set(studentsInClass.map(s => s.id));
+         return list.filter(c => studentIds.has(c.siswaId));
+      }
+    }
+    return list;
+  }
+  
+  getAllCatatanRaporListUnfiltered(): CatatanRapor[] {
     return this.getItem<CatatanRapor[]>(STORAGE_KEYS.CATATAN_RAPOR, INITIAL_CATATAN_RAPOR);
   }
 
   saveCatatanRapor(catatan: CatatanRapor): void {
-    const list = this.getCatatanRaporList();
+    const list = this.getAllCatatanRaporListUnfiltered();
     const idx = list.findIndex(
       (c) =>
         c.siswaId === catatan.siswaId &&
@@ -1644,11 +1830,20 @@ class DatabaseService {
 
   // Uang Kas
   getKasList(): TransaksiKas[] {
+    const list = this.getItem<TransaksiKas[]>(STORAGE_KEYS.KAS, []);
+    const user = this.getCurrentUser();
+    if (user?.role === 'guru' && user.kelasId) {
+      return list.filter(k => k.kelasId === user.kelasId);
+    }
+    return list;
+  }
+  
+  getAllKasListUnfiltered(): TransaksiKas[] {
     return this.getItem<TransaksiKas[]>(STORAGE_KEYS.KAS, []);
   }
 
   saveKas(item: TransaksiKas): void {
-    const list = [...this.getKasList()];
+    const list = [...this.getAllKasListUnfiltered()];
     const idx = list.findIndex((k) => k.id === item.id);
     if (idx >= 0) list[idx] = item;
     else list.unshift(item);
@@ -1657,18 +1852,27 @@ class DatabaseService {
   }
 
   deleteKas(id: string): void {
-    const list = this.getKasList().filter((k) => k.id !== id);
+    const list = this.getAllKasListUnfiltered().filter((k) => k.id !== id);
     this.setItem(STORAGE_KEYS.KAS, list);
     window.dispatchEvent(new Event('kas_updated'));
   }
 
   // Nilai Harian (Penilaian Harian Guru)
   getNilaiHarianList(): NilaiHarianItem[] {
+    const list = this.getItem<NilaiHarianItem[]>(STORAGE_KEYS.NILAI_HARIAN, []);
+    const user = this.getCurrentUser();
+    if (user?.role === 'guru' && user.kelasId) {
+      return list.filter(n => n.kelasId === user.kelasId);
+    }
+    return list;
+  }
+  
+  getAllNilaiHarianListUnfiltered(): NilaiHarianItem[] {
     return this.getItem<NilaiHarianItem[]>(STORAGE_KEYS.NILAI_HARIAN, []);
   }
 
   saveNilaiHarian(item: NilaiHarianItem): void {
-    const list = this.getNilaiHarianList();
+    const list = this.getAllNilaiHarianListUnfiltered();
     const idx = list.findIndex((n) => n.id === item.id);
     if (idx >= 0) list[idx] = item;
     else list.unshift(item);
@@ -1677,7 +1881,7 @@ class DatabaseService {
   }
 
   saveBulkNilaiHarian(items: NilaiHarianItem[]): void {
-    const list = this.getNilaiHarianList();
+    const list = [...this.getAllNilaiHarianListUnfiltered()];
     items.forEach((item) => {
       const idx = list.findIndex((n) => n.id === item.id);
       if (idx >= 0) list[idx] = item;
@@ -1688,7 +1892,71 @@ class DatabaseService {
   }
 
   deleteNilaiHarian(id: string): void {
-    const list = this.getNilaiHarianList().filter((n) => n.id !== id);
+    const list = this.getAllNilaiHarianListUnfiltered().filter((n) => n.id !== id);
+    this.setItem(STORAGE_KEYS.NILAI_HARIAN, list);
+    window.dispatchEvent(new Event('nilai_harian_updated'));
+  }
+
+  deleteNilaiHarianAssessment(filter: {
+    kelasId: string;
+    mapelId: string;
+    assessmentId?: string;
+    tanggal?: string;
+    materi?: string;
+    semester?: string;
+    tahunAjaran?: string;
+  }): void {
+    const list = this.getAllNilaiHarianListUnfiltered().filter((n) => {
+      if (filter.assessmentId && n.assessmentId) {
+        return n.assessmentId !== filter.assessmentId;
+      }
+      const match =
+        n.kelasId === filter.kelasId &&
+        n.mapelId === filter.mapelId &&
+        (!filter.tanggal || n.tanggal === filter.tanggal) &&
+        (!filter.materi || n.materi === filter.materi) &&
+        (!filter.semester || n.semester === filter.semester) &&
+        (!filter.tahunAjaran || n.tahunAjaran === filter.tahunAjaran);
+      return !match;
+    });
+    this.setItem(STORAGE_KEYS.NILAI_HARIAN, list);
+    window.dispatchEvent(new Event('nilai_harian_updated'));
+  }
+
+  updateNilaiHarianAssessmentInfo(
+    filter: {
+      kelasId: string;
+      mapelId: string;
+      assessmentId?: string;
+      tanggal?: string;
+      materi?: string;
+      semester?: string;
+      tahunAjaran?: string;
+    },
+    newInfo: { tanggal: string; materi: string; jenisPenilaian: string; keterangan?: string }
+  ): void {
+    const list = this.getAllNilaiHarianListUnfiltered().map((n) => {
+      const match =
+        filter.assessmentId && n.assessmentId
+          ? n.assessmentId === filter.assessmentId
+          : n.kelasId === filter.kelasId &&
+            n.mapelId === filter.mapelId &&
+            (!filter.tanggal || n.tanggal === filter.tanggal) &&
+            (!filter.materi || n.materi === filter.materi) &&
+            (!filter.semester || n.semester === filter.semester) &&
+            (!filter.tahunAjaran || n.tahunAjaran === filter.tahunAjaran);
+
+      if (match) {
+        return {
+          ...n,
+          tanggal: newInfo.tanggal,
+          materi: newInfo.materi,
+          jenisPenilaian: newInfo.jenisPenilaian,
+          keterangan: newInfo.keterangan !== undefined ? newInfo.keterangan : n.keterangan,
+        };
+      }
+      return n;
+    });
     this.setItem(STORAGE_KEYS.NILAI_HARIAN, list);
     window.dispatchEvent(new Event('nilai_harian_updated'));
   }
@@ -1760,6 +2028,8 @@ class DatabaseService {
       logo: settings.logoUrl,
     });
     this.updateSettings({
+      namaSekolah: settings.namaSekolah,
+      logoUrl: settings.logoUrl,
       tahunAjaranAktif: settings.tahunAjaranAktif,
       semesterAktif: settings.semesterAktif,
     });
@@ -1790,8 +2060,9 @@ class DatabaseService {
 
   updateSettings(settings: Partial<AppSettings>): AppSettings {
     const current = this.getItem<AppSettings>(STORAGE_KEYS.SETTINGS, INITIAL_SETTINGS);
-    const updated = { ...current, ...settings };
+    const updated = { ...current, ...settings, updatedAt: Date.now() };
     this.setItem(STORAGE_KEYS.SETTINGS, updated);
+    window.dispatchEvent(new CustomEvent('settings_updated', { detail: updated }));
     return updated;
   }
 
@@ -2415,6 +2686,85 @@ class DatabaseService {
     };
     const updated = [newLog, ...logs].slice(0, 200); // keep last 200 logs
     this.setItem(STORAGE_KEYS.SUPERADMIN_LOGS, updated);
+  }
+
+  // ==================== ASISTEN AI GURU (BANK SOAL & MODUL) ====================
+  getNaskahSoalList(): NaskahUjianAI[] {
+    return this.getItem<NaskahUjianAI[]>(STORAGE_KEYS.AI_SOAL, []);
+  }
+
+  saveNaskahSoal(item: NaskahUjianAI): NaskahUjianAI {
+    const list = this.getNaskahSoalList();
+    const existingIndex = list.findIndex((s) => s.id === item.id);
+    let updated: NaskahUjianAI[];
+    if (existingIndex >= 0) {
+      updated = [...list];
+      updated[existingIndex] = item;
+    } else {
+      updated = [item, ...list];
+    }
+    this.setItem(STORAGE_KEYS.AI_SOAL, updated);
+    window.dispatchEvent(new CustomEvent('ai_soal_updated', { detail: updated }));
+    return item;
+  }
+
+  deleteNaskahSoal(id: string): void {
+    const list = this.getNaskahSoalList();
+    const updated = list.filter((s) => s.id !== id);
+    this.setItem(STORAGE_KEYS.AI_SOAL, updated);
+    window.dispatchEvent(new CustomEvent('ai_soal_updated', { detail: updated }));
+  }
+
+  getModulAjarList(): ModulAjarAI[] {
+    return this.getItem<ModulAjarAI[]>(STORAGE_KEYS.AI_MODUL, []);
+  }
+
+  saveModulAjar(item: ModulAjarAI): ModulAjarAI {
+    const list = this.getModulAjarList();
+    const existingIndex = list.findIndex((m) => m.id === item.id);
+    let updated: ModulAjarAI[];
+    if (existingIndex >= 0) {
+      updated = [...list];
+      updated[existingIndex] = item;
+    } else {
+      updated = [item, ...list];
+    }
+    this.setItem(STORAGE_KEYS.AI_MODUL, updated);
+    window.dispatchEvent(new CustomEvent('ai_modul_updated', { detail: updated }));
+    return item;
+  }
+
+  deleteModulAjar(id: string): void {
+    const list = this.getModulAjarList();
+    const updated = list.filter((m) => m.id !== id);
+    this.setItem(STORAGE_KEYS.AI_MODUL, updated);
+    window.dispatchEvent(new CustomEvent('ai_modul_updated', { detail: updated }));
+  }
+
+  getBahanAjarList(): BahanAjarAI[] {
+    return this.getItem<BahanAjarAI[]>(STORAGE_KEYS.AI_MATERI, []);
+  }
+
+  saveBahanAjar(item: BahanAjarAI): BahanAjarAI {
+    const list = this.getBahanAjarList();
+    const existingIndex = list.findIndex((m) => m.id === item.id);
+    let updated: BahanAjarAI[];
+    if (existingIndex >= 0) {
+      updated = [...list];
+      updated[existingIndex] = item;
+    } else {
+      updated = [item, ...list];
+    }
+    this.setItem(STORAGE_KEYS.AI_MATERI, updated);
+    window.dispatchEvent(new CustomEvent('ai_materi_updated', { detail: updated }));
+    return item;
+  }
+
+  deleteBahanAjar(id: string): void {
+    const list = this.getBahanAjarList();
+    const updated = list.filter((m) => m.id !== id);
+    this.setItem(STORAGE_KEYS.AI_MATERI, updated);
+    window.dispatchEvent(new CustomEvent('ai_materi_updated', { detail: updated }));
   }
 }
 

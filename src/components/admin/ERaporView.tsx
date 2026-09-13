@@ -219,17 +219,23 @@ export const ERaporView: React.FC = () => {
             <label className="block text-[11px] font-semibold text-slate-500 mb-1">
               Pilih Rombel / Kelas
             </label>
-            <select
-              value={selectedKelas}
-              onChange={(e) => setSelectedKelas(e.target.value)}
-              className="py-1.5 px-3 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 focus:bg-white"
-            >
-              {kelasList.map((k) => (
-                <option key={k.id} value={k.nama}>
-                  {k.nama} ({db.getSiswaList().filter((s) => s.kelas === k.nama).length} Siswa)
-                </option>
-              ))}
-            </select>
+            {kelasList.length <= 1 ? (
+              <div className="py-1.5 px-3 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800">
+                {kelasList[0]?.nama || 'Belum ada kelas'}
+              </div>
+            ) : (
+              <select
+                value={selectedKelas}
+                onChange={(e) => setSelectedKelas(e.target.value)}
+                className="py-1.5 px-3 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 focus:bg-white"
+              >
+                {kelasList.map((k) => (
+                  <option key={k.id} value={k.nama}>
+                    {k.nama} ({db.getSiswaList().filter((s) => s.kelas === k.nama).length} Siswa)
+                  </option>
+                ))}
+              </select>
+            )}
           </div>
 
           <div>

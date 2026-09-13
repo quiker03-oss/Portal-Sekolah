@@ -7,7 +7,10 @@ interface ConfirmModalProps {
   message: string;
   confirmLabel?: string;
   cancelLabel?: string;
+  confirmText?: string;
+  cancelText?: string;
   isDestructive?: boolean;
+  isDanger?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
 }
@@ -16,13 +19,20 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
   isOpen,
   title,
   message,
-  confirmLabel = 'Hapus',
-  cancelLabel = 'Batal',
-  isDestructive = true,
+  confirmLabel,
+  cancelLabel,
+  confirmText,
+  cancelText,
+  isDestructive,
+  isDanger,
   onConfirm,
   onCancel,
 }) => {
   if (!isOpen) return null;
+
+  const actualConfirm = confirmText || confirmLabel || 'Hapus';
+  const actualCancel = cancelText || cancelLabel || 'Batal';
+  const destructive = isDanger !== undefined ? isDanger : (isDestructive !== undefined ? isDestructive : true);
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/60 backdrop-blur-xs animate-in fade-in duration-150">
@@ -58,18 +68,18 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
             onClick={onCancel}
             className="px-3.5 py-2 text-xs font-semibold text-slate-700 hover:bg-slate-100 rounded-xl transition-colors cursor-pointer"
           >
-            {cancelLabel}
+            {actualCancel}
           </button>
           <button
             type="button"
             onClick={onConfirm}
             className={`px-4 py-2 text-xs font-bold text-white rounded-xl shadow-xs transition-colors cursor-pointer ${
-              isDestructive
+              destructive
                 ? 'bg-rose-600 hover:bg-rose-700 active:bg-rose-800'
                 : 'bg-blue-600 hover:bg-blue-700 active:bg-blue-800'
             }`}
           >
-            {confirmLabel}
+            {actualConfirm}
           </button>
         </div>
       </div>

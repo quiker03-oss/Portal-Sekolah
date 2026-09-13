@@ -20,16 +20,16 @@ interface QrCodeSiswaViewProps {
   initialSiswaId?: string;
 }
 
-// Helper to render high-resolution QR card with student's name on canvas
+// Helper to render clean QR code image with ONLY student's name on canvas
 export const renderStudentQrCanvas = (
   siswa: Siswa,
   qrDataUrl: string,
-  schoolName: string = 'SATUAN PENDIDIKAN',
-  tahunAjaran: string = ''
+  _schoolName: string = '',
+  _tahunAjaran: string = ''
 ): Promise<Blob> => {
   return new Promise((resolve, reject) => {
-    const width = 600;
-    const height = 760;
+    const width = 480;
+    const height = 540;
     const canvas = document.createElement('canvas');
     canvas.width = width;
     canvas.height = height;
@@ -43,98 +43,30 @@ export const renderStudentQrCanvas = (
     ctx.fillStyle = '#ffffff';
     ctx.fillRect(0, 0, width, height);
 
-    // 2. Outer primary frame
-    ctx.strokeStyle = '#2563eb'; // blue-600
-    ctx.lineWidth = 6;
-    ctx.strokeRect(16, 16, width - 32, height - 32);
-
-    // 3. Inner border
-    ctx.strokeStyle = '#e2e8f0';
-    ctx.lineWidth = 1.5;
-    ctx.strokeRect(26, 26, width - 52, height - 52);
-
-    // 4. Header banner
-    ctx.fillStyle = '#f8fafc';
-    ctx.fillRect(28, 28, width - 56, 80);
-    ctx.fillStyle = '#2563eb';
-    ctx.fillRect(28, 106, width - 56, 3);
-
-    // 5. School name & header text
-    ctx.fillStyle = '#1e3a8a';
-    ctx.font = 'bold 22px sans-serif';
-    ctx.textAlign = 'center';
-    ctx.textBaseline = 'middle';
-    ctx.fillText((schoolName || 'SATUAN PENDIDIKAN').toUpperCase(), width / 2, 58);
-
-    ctx.fillStyle = '#64748b';
-    ctx.font = 'bold 13px sans-serif';
-    const subText = tahunAjaran ? `KARTU PRESENSI QR • T.A. ${tahunAjaran}` : 'KARTU PRESENSI QR SISWA';
-    ctx.fillText(subText, width / 2, 86);
-
-    // 6. Draw QR Code
+    // 2. Draw QR Code centered
     const img = new Image();
     img.crossOrigin = 'anonymous';
     img.onload = () => {
-      const qrBoxSize = 380;
+      const qrBoxSize = 360;
       const qrBoxX = (width - qrBoxSize) / 2;
-      const qrBoxY = 125;
+      const qrBoxY = 40;
 
-      ctx.fillStyle = '#ffffff';
-      ctx.strokeStyle = '#cbd5e1';
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(qrBoxX, qrBoxY, qrBoxSize, qrBoxSize);
-      ctx.drawImage(img, qrBoxX + 15, qrBoxY + 15, qrBoxSize - 30, qrBoxSize - 30);
+      ctx.drawImage(img, qrBoxX, qrBoxY, qrBoxSize, qrBoxSize);
 
-      // 7. Student Name (Nama Siswa)
-      const nameBoxY = 538;
+      // 3. ONLY Student Name (Hanya nama siswa saja)
       ctx.fillStyle = '#0f172a';
-      let fontSize = 26;
+      let fontSize = 24;
       ctx.font = `bold ${fontSize}px sans-serif`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'middle';
 
       const displayName = siswa.namaLengkap.toUpperCase();
-      while (ctx.measureText(displayName).width > width - 70 && fontSize > 16) {
-        fontSize -= 2;
+      // Auto-scale font size if student's name is long so it fits nicely
+      while (ctx.measureText(displayName).width > width - 40 && fontSize > 14) {
+        fontSize -= 1.5;
         ctx.font = `bold ${fontSize}px sans-serif`;
       }
-      ctx.fillText(displayName, width / 2, nameBoxY);
-
-      // 8. Kelas & NISN
-      ctx.fillStyle = '#2563eb';
-      ctx.font = 'bold 18px sans-serif';
-      const detailText = siswa.nisn
-        ? `${siswa.kelas}  •  NISN: ${siswa.nisn}`
-        : `${siswa.kelas}  •  NI: ${siswa.nomorInduk || '-'}`;
-      ctx.fillText(detailText, width / 2, nameBoxY + 36);
-
-      // 9. QR ID Badge
-      ctx.fillStyle = '#f1f5f9';
-      const pillW = 160;
-      const pillH = 30;
-      const pillX = (width - pillW) / 2;
-      const pillY = nameBoxY + 62;
-
-      ctx.beginPath();
-      if (typeof ctx.roundRect === 'function') {
-        ctx.roundRect(pillX, pillY, pillW, pillH, 15);
-      } else {
-        ctx.rect(pillX, pillY, pillW, pillH);
-      }
-      ctx.fill();
-
-      ctx.fillStyle = '#334155';
-      ctx.font = 'bold 13px monospace';
-      ctx.fillText(`ID: ${siswa.qrId}`, width / 2, pillY + 15);
-
-      // 10. Footer note
-      ctx.fillStyle = '#94a3b8';
-      ctx.font = 'italic 11px sans-serif';
-      ctx.fillText(
-        'Pindai kode QR ini pada kamera scanner untuk absensi kehadiran.',
-        width / 2,
-        height - 42
-      );
+      ctx.fillText(displayName, width / 2, 465);
 
       canvas.toBlob((blob) => {
         if (blob) {
@@ -229,14 +161,13 @@ export const QrCodeSiswaView: React.FC<QrCodeSiswaViewProps> = ({ initialSiswaId
       const link = document.createElement('a');
       link.href = url;
       const cleanName = siswa.namaLengkap.replace(/[^a-zA-Z0-9]/g, '_');
-      const cleanKelas = siswa.kelas.replace(/[^a-zA-Z0-9]/g, '_');
-      link.download = `QR_${cleanName}_${cleanKelas}.png`;
+      link.download = `QR_${cleanName}.png`;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
 
-      setSuccessMsg(`QR Siswa "${siswa.namaLengkap}" berhasil diunduh dengan nama lengkap!`);
+      setSuccessMsg(`QR Siswa "${siswa.namaLengkap}" berhasil diunduh (QR & Nama Siswa)!`);
       setTimeout(() => setSuccessMsg(''), 3500);
     } catch (err) {
       console.error('Error downloading QR:', err);
@@ -277,8 +208,7 @@ export const QrCodeSiswaView: React.FC<QrCodeSiswaViewProps> = ({ initialSiswaId
 
         const padNum = String(i + 1).padStart(2, '0');
         const cleanName = siswa.namaLengkap.replace(/[^a-zA-Z0-9]/g, '_');
-        const cleanKelas = siswa.kelas.replace(/[^a-zA-Z0-9]/g, '_');
-        const fileName = `${padNum}_${cleanName}_${cleanKelas}.png`;
+        const fileName = `${padNum}_${cleanName}.png`;
 
         zip.file(fileName, blob);
       }
@@ -329,7 +259,7 @@ export const QrCodeSiswaView: React.FC<QrCodeSiswaViewProps> = ({ initialSiswaId
                 Unduh QR Code Siswa
               </h2>
               <p className="text-xs text-slate-500 mt-0.5">
-                Setiap gambar QR yang diunduh otomatis memuat <strong>Nama Lengkap Siswa</strong>, Kelas, NISN, dan Nama Sekolah.
+                Setiap gambar QR yang diunduh diformat bersih hanya memuat <strong>Kode QR</strong> dan <strong>Nama Siswa</strong> saja.
               </p>
             </div>
           </div>
@@ -411,23 +341,25 @@ export const QrCodeSiswaView: React.FC<QrCodeSiswaViewProps> = ({ initialSiswaId
           />
         </div>
 
-        <div className="flex items-center gap-3 w-full sm:w-auto">
-          <div className="flex items-center gap-2 text-xs text-slate-600">
-            <Filter className="w-3.5 h-3.5 text-slate-400" />
-            <span className="font-semibold text-xs whitespace-nowrap">Filter Kelas:</span>
-            <select
-              value={filterKelas}
-              onChange={(e) => setFilterKelas(e.target.value)}
-              className="py-1.5 px-3 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700 focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-blue-600 cursor-pointer"
-            >
-              <option value="">Semua Kelas ({siswaList.length})</option>
-              {kelasList.map((k) => (
-                <option key={k.id} value={k.nama}>
-                  {k.nama}
-                </option>
-              ))}
-            </select>
-          </div>
+          <div className="flex items-center gap-3 w-full sm:w-auto">
+            {kelasList.length > 1 && (
+              <div className="flex items-center gap-2 text-xs text-slate-600">
+                <Filter className="w-3.5 h-3.5 text-slate-400" />
+                <span className="font-semibold text-xs whitespace-nowrap">Filter Kelas:</span>
+                <select
+                  value={filterKelas}
+                  onChange={(e) => setFilterKelas(e.target.value)}
+                  className="py-1.5 px-3 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-700 focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-blue-600 cursor-pointer"
+                >
+                  <option value="">Semua Kelas ({siswaList.length})</option>
+                  {kelasList.map((k) => (
+                    <option key={k.id} value={k.nama}>
+                      {k.nama}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            )}
         </div>
       </div>
 
@@ -440,49 +372,31 @@ export const QrCodeSiswaView: React.FC<QrCodeSiswaViewProps> = ({ initialSiswaId
               <Sparkles className="w-4 h-4 text-blue-600" />
               <span>Pratinjau Hasil Unduh Gambar QR</span>
             </h3>
-            <span className="text-[11px] font-semibold text-slate-400">Format PNG (600×760px)</span>
+            <span className="text-[11px] font-semibold text-slate-400">Hanya QR & Nama Siswa</span>
           </div>
 
           {selectedSiswa ? (
-            <div className="bg-white rounded-3xl p-6 border-2 border-blue-600 shadow-md space-y-4 flex flex-col items-center text-center relative overflow-hidden">
-              {/* Header inside card preview */}
-              <div className="w-full pb-3 border-b border-slate-100 text-center">
-                <span className="text-xs font-extrabold text-blue-900 uppercase tracking-wide block">
-                  {settings.namaSekolah || 'SATUAN PENDIDIKAN'}
-                </span>
-                <span className="text-[10px] font-semibold text-slate-400 mt-0.5 block">
-                  KARTU PRESENSI QR • T.A. {settings.tahunAjaranAktif}
-                </span>
-              </div>
-
+            <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-4 flex flex-col items-center text-center relative overflow-hidden">
               {/* QR Image */}
               <div className="p-3 bg-white border border-slate-200 rounded-2xl shadow-xs">
                 {qrCache[selectedSiswa.id] ? (
                   <img
                     src={qrCache[selectedSiswa.id]}
                     alt={`QR Code ${selectedSiswa.namaLengkap}`}
-                    className="w-48 h-48 sm:w-56 sm:h-56 object-contain"
+                    className="w-52 h-52 sm:w-60 sm:h-60 object-contain"
                   />
                 ) : (
-                  <div className="w-48 h-48 flex items-center justify-center bg-slate-100 text-slate-400 text-xs">
+                  <div className="w-52 h-52 flex items-center justify-center bg-slate-100 text-slate-400 text-xs">
                     Membuat QR...
                   </div>
                 )}
               </div>
 
               {/* Student Name prominently displayed */}
-              <div className="space-y-1">
-                <h4 className="text-lg sm:text-xl font-black text-slate-900 tracking-tight uppercase leading-snug">
+              <div className="w-full px-2">
+                <h4 className="text-lg sm:text-xl font-extrabold text-slate-900 tracking-tight uppercase leading-snug">
                   {selectedSiswa.namaLengkap}
                 </h4>
-                <p className="text-xs text-blue-700 font-bold">
-                  {selectedSiswa.kelas} {selectedSiswa.nisn ? `• NISN: ${selectedSiswa.nisn}` : ''}
-                </p>
-                <div className="inline-block mt-1">
-                  <span className="font-mono bg-slate-100 px-3 py-1 rounded-full text-slate-700 font-bold text-[11px]">
-                    ID: {selectedSiswa.qrId}
-                  </span>
-                </div>
               </div>
 
               {/* Single Download Button */}

@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { db } from '../../services/database';
 import { User, Settings } from '../../types';
+import { ErrorBoundary } from '../common/ErrorBoundary';
 import { BellRing,
   LayoutDashboard,
   Building2,
@@ -28,10 +29,12 @@ import { BellRing,
   Cloud,
   Wallet,
   LayoutTemplate,
+  Sparkles,
 } from 'lucide-react';
 
 // Subviews
 import { DashboardView } from './DashboardView';
+import { AsistenAiGuruView } from './AsistenAiGuruView';
 import { DataSiswaView } from './DataSiswaView';
 import { ImportSiswaView } from './ImportSiswaView';
 import { QrCodeSiswaView } from './QrCodeSiswaView';
@@ -47,18 +50,15 @@ import { PengaturanView } from './PengaturanView';
 import { BelOtomatisView } from './BelOtomatisView';
 import { ManajemenPenggunaView } from './ManajemenPenggunaView';
 import { UangKasView } from './UangKasView';
-import { AturLandingView } from './AturLandingView';
 
 interface AdminLayoutProps {
   currentUser: User;
   onLogout: () => void;
-  onViewLandingPage?: () => void;
 }
 
 export const AdminLayout: React.FC<AdminLayoutProps> = ({
   currentUser,
   onLogout,
-  onViewLandingPage,
 }) => {
   const [activeTab, setActiveTab] = useState<string>('dashboard');
   const [settings, setSettings] = useState<Settings>(db.getSettings());
@@ -66,13 +66,16 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
   const [targetQrId, setTargetQrId] = useState<string | undefined>();
 
   useEffect(() => {
-    let lastPlayedMinute = "";
+    let lastCheckedMinute = "";
     const interval = setInterval(() => {
       const now = new Date();
       const currentMinute = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-      if (currentMinute !== lastPlayedMinute) {
+      if (currentMinute !== lastCheckedMinute) {
+        lastCheckedMinute = currentMinute;
         try {
-          const jadwal = JSON.parse(localStorage.getItem("bel_otomatis") || "[]");
+          const raw = localStorage.getItem("bel_otomatis");
+          if (!raw) return;
+          const jadwal = JSON.parse(raw);
           const matches = jadwal.filter((j: any) => j.aktif && j.waktu === currentMinute);
           if (matches.length > 0) {
             import("../../services/audio").then(m => {
@@ -82,11 +85,10 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
                 m.sound.speak(msg);
               }
             });
-            lastPlayedMinute = currentMinute;
           }
         } catch { }
       }
-    }, 1000);
+    }, 10000);
     return () => clearInterval(interval);
   }, []);
 
@@ -95,7 +97,11 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
       setSettings(db.getSettings());
     };
     window.addEventListener('sekolah_updated', handleSettingsUpdate);
-    return () => window.removeEventListener('sekolah_updated', handleSettingsUpdate);
+    window.addEventListener('settings_updated', handleSettingsUpdate);
+    return () => {
+      window.removeEventListener('sekolah_updated', handleSettingsUpdate);
+      window.removeEventListener('settings_updated', handleSettingsUpdate);
+    };
   }, []);
 
   const navigateToQrSiswa = (siswaId?: string) => {
@@ -109,23 +115,29 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
   };
 
   // Nav item definitions based on user request (17 menu items)
-  const isAdmin = currentUser.role === 'admin';
+  const isAdmin = currentUser.role === 'admin' || currentUser.role === 'superadmin';
 
   const menuSections = [
     {
       label: 'Utama',
       items: [
         { id: 'dashboard', label: 'Dashboard', icon: LayoutDashboard, visible: true },
-        { id: 'profil-sekolah', label: 'Profil Sekolah', icon: Building2, visible: isAdmin || currentUser.role === 'superadmin' },
+        { id: 'profil-sekolah', label: 'Profil Sekolah', icon: Building2, visible: isAdmin },
+      ],
+    },
+    {
+      label: 'Guru & Pembelajaran AI',
+      items: [
+        { id: 'asisten-ai-guru', label: 'Asisten AI Guru (Soal & RPP)', icon: Sparkles, visible: true },
       ],
     },
     {
       label: 'Kesiswaan & Guru',
       items: [
         { id: 'data-siswa', label: 'Data Siswa', icon: GraduationCap, visible: true },
-        { id: 'import-siswa', label: 'Import Siswa', icon: Upload, visible: isAdmin || currentUser.role === 'superadmin' },
+        { id: 'import-siswa', label: 'Import Siswa', icon: Upload, visible: isAdmin },
         { id: 'uang-kas', label: 'Uang Kas Kelas', icon: Wallet, visible: true },
-        { id: 'data-guru', label: 'Data Guru', icon: Users, visible: isAdmin || currentUser.role === 'superadmin' },
+        { id: 'data-guru', label: 'Data Guru', icon: Users, visible: isAdmin },
       ],
     },
     {
@@ -134,16 +146,16 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
         { id: 'kelas-mapel', label: 'Kelas & Mapel', icon: BookOpen, visible: true },
         { id: 'nilai-harian', label: 'Nilai Harian Siswa', icon: FileSpreadsheet, visible: true },
         { id: 'absensi-siswa', label: 'Presensi Siswa', icon: CalendarCheck, visible: true },
-        { id: 'absensi-guru', label: 'Presensi Guru', icon: UserCheck, visible: isAdmin || currentUser.role === 'superadmin' },
+        { id: 'absensi-guru', label: 'Presensi Guru', icon: UserCheck, visible: isAdmin },
         { id: 'e-rapor', label: 'e-Rapor Digital', icon: FileText, visible: true },
       ],
     },
     {
       label: 'Informasi & Sistem',
       items: [
-        { id: 'bel-otomatis', label: 'Bel Sekolah Otomatis', icon: BellRing, visible: isAdmin || currentUser.role === 'superadmin' },
-        { id: 'pengaturan', label: 'Pengaturan Sistem', icon: SettingsIcon, visible: isAdmin || currentUser.role === 'superadmin' },
-        { id: 'manajemen-pengguna', label: 'Manajemen Pengguna', icon: Users, visible: isAdmin || currentUser.role === 'superadmin' },
+        { id: 'bel-otomatis', label: 'Bel Sekolah Otomatis', icon: BellRing, visible: isAdmin },
+        { id: 'pengaturan', label: 'Pengaturan Sistem', icon: SettingsIcon, visible: isAdmin },
+        { id: 'manajemen-pengguna', label: 'Manajemen Pengguna', icon: Users, visible: isAdmin },
       ],
     },
   ];
@@ -236,17 +248,17 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
                           setActiveTab(item.id);
                           setIsSidebarOpenMobile(false);
                         }}
-                        className={`w-full flex items-center justify-between px-3 py-2 rounded-xl text-xs font-semibold transition-all cursor-pointer ${
+                        className={`w-full flex items-center justify-between px-3 py-2.5 rounded-xl text-xs font-bold transition-all cursor-pointer ${
                           isActive
-                            ? 'bg-blue-700 text-white shadow-xs'
-                            : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'
+                            ? 'bg-blue-50 text-blue-800 shadow-[inset_0_0_0_1px_rgba(37,99,235,0.2)]'
+                            : 'text-slate-600 hover:bg-slate-100/80 hover:text-slate-900'
                         }`}
                       >
                         <div className="flex items-center gap-2.5">
-                          <Icon className={`w-4 h-4 ${isActive ? 'text-white' : 'text-slate-500'}`} />
+                          <Icon className={`w-4 h-4 ${isActive ? 'text-blue-600' : 'text-slate-400'}`} />
                           <span>{item.label}</span>
                         </div>
-                        {isActive && <ChevronRight className="w-3.5 h-3.5 text-blue-200" />}
+                        {isActive && <ChevronRight className="w-3.5 h-3.5 text-blue-400" />}
                       </button>
                     );
                   })}
@@ -271,48 +283,60 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
         {/* Content View Panel */}
         <main className="flex-1 overflow-y-auto p-4 sm:p-6 lg:p-8">
           <div className="max-w-7xl mx-auto">
-            {activeTab === 'dashboard' && (
-              <DashboardView currentUser={currentUser} onNavigate={(tab) => setActiveTab(tab)} />
-            )}
+            <ErrorBoundary fallbackTitle="Kendala pada Halaman Ini" onReset={() => setActiveTab('dashboard')}>
+              {currentUser.role === 'guru' && !currentUser.kelasId && activeTab !== 'dashboard' && (
+                 <div className="bg-amber-50 border border-amber-200 text-amber-800 p-4 rounded-2xl mb-6 shadow-xs flex gap-3 items-start animate-in fade-in">
+                   <Shield className="w-5 h-5 flex-shrink-0 mt-0.5 text-amber-600" />
+                   <div>
+                     <h3 className="text-sm font-bold">Kelas mengajar belum ditentukan</h3>
+                     <p className="text-xs mt-1 text-amber-700">Akun Anda belum dikaitkan dengan kelas mana pun oleh Admin Sekolah. Anda tidak akan dapat melihat atau mengelola data siswa sampai Admin menetapkan kelas Anda di menu Data Guru.</p>
+                   </div>
+                 </div>
+              )}
 
-            {activeTab === 'data-siswa' && (
-              <DataSiswaView
-                onNavigateToImport={() => setActiveTab('import-siswa')}
-                onNavigateToQr={navigateToQrSiswa}
-              />
-            )}
+              {activeTab === 'dashboard' && (
+                <DashboardView currentUser={currentUser} onNavigate={(tab) => setActiveTab(tab)} />
+              )}
 
-            {activeTab === 'import-siswa' && (
-              <ImportSiswaView onSuccess={() => setActiveTab('data-siswa')} />
-            )}
+              {activeTab === 'asisten-ai-guru' && <AsistenAiGuruView currentUser={currentUser} />}
 
-            {activeTab === 'qr-siswa' && <QrCodeSiswaView initialSiswaId={targetQrId} />}
+              {activeTab === 'data-siswa' && (
+                <DataSiswaView
+                  onNavigateToImport={() => setActiveTab('import-siswa')}
+                  onNavigateToQr={navigateToQrSiswa}
+                />
+              )}
 
-            {activeTab === 'uang-kas' && <UangKasView />}
+              {activeTab === 'import-siswa' && (
+                <ImportSiswaView onSuccess={() => setActiveTab('data-siswa')} />
+              )}
 
-            {activeTab === 'data-guru' && <DataGuruView onNavigateToQr={navigateToQrGuru} />}
+              {activeTab === 'qr-siswa' && <QrCodeSiswaView initialSiswaId={targetQrId} />}
 
-            {activeTab === 'qr-guru' && <QrCodeGuruView initialGuruId={targetQrId} />}
+              {activeTab === 'uang-kas' && <UangKasView />}
 
-            {activeTab === 'kelas-mapel' && <DataKelasMapelView />}
+              {activeTab === 'data-guru' && <DataGuruView onNavigateToQr={navigateToQrGuru} />}
 
-            {activeTab === 'nilai-harian' && <NilaiHarianView />}
+              {activeTab === 'qr-guru' && <QrCodeGuruView initialGuruId={targetQrId} />}
 
-            {activeTab === 'absensi-siswa' && <AbsensiSiswaView />}
+              {activeTab === 'kelas-mapel' && <DataKelasMapelView />}
 
-            {activeTab === 'absensi-guru' && <AbsensiGuruView />}
+              {activeTab === 'nilai-harian' && <NilaiHarianView />}
 
-            {activeTab === 'e-rapor' && <ERaporView />}
+              {activeTab === 'absensi-siswa' && <AbsensiSiswaView />}
 
-            {activeTab === 'profil-sekolah' && <ProfilSekolahView />}
+              {activeTab === 'absensi-guru' && <AbsensiGuruView />}
 
-            {activeTab === 'atur-landing' && <AturLandingView onViewLandingPage={onViewLandingPage} />}
+              {activeTab === 'e-rapor' && <ERaporView />}
 
-            {activeTab === 'bel-otomatis' && <BelOtomatisView />}
+              {activeTab === 'profil-sekolah' && <ProfilSekolahView />}
 
-            {activeTab === 'pengaturan' && <PengaturanView />}
+              {activeTab === 'bel-otomatis' && <BelOtomatisView />}
 
-            {activeTab === 'manajemen-pengguna' && <ManajemenPenggunaView currentUser={currentUser} />}
+              {activeTab === 'pengaturan' && <PengaturanView />}
+
+              {activeTab === 'manajemen-pengguna' && <ManajemenPenggunaView currentUser={currentUser} />}
+            </ErrorBoundary>
           </div>
         </main>
       </div>

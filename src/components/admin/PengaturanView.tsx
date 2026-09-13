@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { db } from '../../services/database';
 import { Settings } from '../../types';
+import { compressImage } from '../../utils/imageCompressor';
 import {
   Settings as SettingsIcon,
   Save,
@@ -12,11 +13,13 @@ import {
   Image as ImageIcon,
   Database,
   FileJson,
+  Loader2,
 } from 'lucide-react';
 
 export const PengaturanView: React.FC = () => {
   const [settings, setSettings] = useState<Settings>(db.getSettings());
   const [successMsg, setSuccessMsg] = useState('');
+  const [isUploadingLogo, setIsUploadingLogo] = useState(false);
 
   // Form states
   const [logoUrl, setLogoUrl] = useState(settings.logoUrl);
@@ -24,16 +27,29 @@ export const PengaturanView: React.FC = () => {
   const [tahunAjaran, setTahunAjaran] = useState(settings.tahunAjaranAktif);
   const [semester, setSemester] = useState<'Ganjil' | 'Genap'>(settings.semesterAktif);
 
-  const handleUploadLogo = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleUploadLogo = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
-    const reader = new FileReader();
-    reader.onload = (evt) => {
-      const dataUrl = evt.target?.result as string;
-      setLogoUrl(dataUrl);
-    };
-    reader.readAsDataURL(file);
+    setIsUploadingLogo(true);
+    try {
+      const compressed = await compressImage(file, 360, 360, 0.88);
+      if (compressed) {
+        setLogoUrl(compressed);
+        db.updateSekolah({ logo: compressed });
+        db.updateSettings({ logoUrl: compressed });
+        setSuccessMsg('Logo sekolah berhasil diperbarui di seluruh sistem!');
+        setTimeout(() => {
+          setSuccessMsg('');
+        }, 3500);
+      }
+    } catch (err) {
+      console.error('Logo upload error:', err);
+      alert('Gagal memproses logo. Silakan pilih berkas lain.');
+    } finally {
+      setIsUploadingLogo(false);
+      e.target.value = '';
+    }
   };
 
   const handleSave = (e: React.FormEvent) => {
@@ -139,8 +155,13 @@ export const PengaturanView: React.FC = () => {
 
           <div className="grid grid-cols-1 sm:grid-cols-12 gap-6 items-center">
             <div className="sm:col-span-4 flex flex-col items-center justify-center p-5 bg-slate-50 rounded-2xl border border-slate-200 text-center space-y-3">
-              <div className="w-28 h-28 p-2 bg-white rounded-2xl border border-slate-300 shadow-xs flex items-center justify-center">
-                <img src={logoUrl} alt="Logo Sekolah" className="w-full h-full object-contain" />
+              <div className="w-28 h-28 p-2 bg-white rounded-2xl border border-slate-300 shadow-xs flex items-center justify-center relative overflow-hidden">
+                <img src={logoUrl || '/logo.svg'} alt="Logo Sekolah" className="w-full h-full object-contain" />
+                {isUploadingLogo && (
+                  <div className="absolute inset-0 bg-blue-900/60 backdrop-blur-xs flex items-center justify-center text-white">
+                    <Loader2 className="w-6 h-6 animate-spin" />
+                  </div>
+                )}
               </div>
               <span className="text-[11px] font-semibold text-slate-600">Pratinjau Logo Aktif</span>
             </div>
@@ -152,8 +173,7 @@ export const PengaturanView: React.FC = () => {
                 </span>
                 <p className="text-[11px] text-slate-500 mb-3 leading-relaxed">
                   Logo ini bersifat <strong>dinamis</strong> dan akan langsung menggantikan logo di:{' '}
-                  <strong>Navbar atas</strong>, <strong>Landing Page</strong>,{' '}
-                  <strong>Cetak e-Rapor</strong>, dan <strong>Kartu QR Absensi</strong>.
+                  <strong>Header aplikasi</strong>, <strong>Cetak e-Rapor</strong>, dan <strong>Kartu Presensi Siswa & Guru</strong>.
                 </p>
 
                 <div className="flex flex-wrap items-center gap-2">
@@ -174,7 +194,13 @@ export const PengaturanView: React.FC = () => {
 
                   <button
                     type="button"
-                    onClick={() => setLogoUrl('/logo.svg')}
+                    onClick={() => {
+                      setLogoUrl('/logo.svg');
+                      db.updateSekolah({ logo: '/logo.svg' });
+                      db.updateSettings({ logoUrl: '/logo.svg' });
+                      setSuccessMsg('Logo sekolah dikembalikan ke logo default.');
+                      setTimeout(() => setSuccessMsg(''), 3000);
+                    }}
                     className="px-3 py-2 bg-blue-50 hover:bg-blue-100 text-blue-700 rounded-xl text-xs font-semibold"
                   >
                     Gunakan Logo Resmi Satuan Pendidikan
