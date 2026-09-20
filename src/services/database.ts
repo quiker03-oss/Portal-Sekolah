@@ -1272,6 +1272,9 @@ class DatabaseService {
         this.setItem(STORAGE_KEYS.SCHOOL_ACCOUNTS, accounts);
       }
     }
+
+    // Auto-repair any duplicate student QR codes from past imports
+    this.repairDuplicateSiswaQrIds();
   }
 
   // Sekolah Profile
@@ -2146,7 +2149,7 @@ class DatabaseService {
 
   // ID Generators
   generateNextSiswaQrId(): string {
-    const list = this.getSiswaList();
+    const list = this.getAllSiswaListUnfiltered();
     let max = 0;
     for (const s of list) {
       if (s.qrId && s.qrId.startsWith('STU-')) {
@@ -2156,6 +2159,67 @@ class DatabaseService {
     }
     const next = max + 1;
     return `STU-${String(next).padStart(5, '0')}`;
+  }
+
+  // Generate batch of sequential, strictly unique QR IDs for bulk student import
+  generateBatchSiswaQrIds(count: number): string[] {
+    const list = this.getAllSiswaListUnfiltered();
+    let max = 0;
+    for (const s of list) {
+      if (s.qrId && s.qrId.startsWith('STU-')) {
+        const num = parseInt(s.qrId.replace('STU-', ''), 10);
+        if (!isNaN(num) && num > max) max = num;
+      }
+    }
+    const ids: string[] = [];
+    for (let i = 1; i <= count; i++) {
+      ids.push(`STU-${String(max + i).padStart(5, '0')}`);
+    }
+    return ids;
+  }
+
+  // Self-healing function to detect and repair any duplicate QR IDs in existing data
+  repairDuplicateSiswaQrIds(): number {
+    const all = this.getAllSiswaListUnfiltered();
+    if (!all || all.length === 0) return 0;
+
+    let max = 0;
+    const seen = new Set<string>();
+    let hasDuplicates = false;
+
+    for (const s of all) {
+      if (s.qrId && s.qrId.startsWith('STU-')) {
+        const num = parseInt(s.qrId.replace('STU-', ''), 10);
+        if (!isNaN(num) && num > max) max = num;
+      }
+      if (s.qrId && seen.has(s.qrId)) {
+        hasDuplicates = true;
+      } else if (s.qrId) {
+        seen.add(s.qrId);
+      } else {
+        hasDuplicates = true;
+      }
+    }
+
+    if (!hasDuplicates) return 0;
+
+    const assigned = new Set<string>();
+    let repairedCount = 0;
+    const updated = all.map((s) => {
+      if (!s.qrId || assigned.has(s.qrId)) {
+        max++;
+        const newQr = `STU-${String(max).padStart(5, '0')}`;
+        assigned.add(newQr);
+        repairedCount++;
+        return { ...s, qrId: newQr };
+      }
+      assigned.add(s.qrId);
+      return s;
+    });
+
+    this.setItem(STORAGE_KEYS.SISWA, updated);
+    window.dispatchEvent(new CustomEvent('data_siswa_changed'));
+    return repairedCount;
   }
 
   generateNextGuruQrId(): string {

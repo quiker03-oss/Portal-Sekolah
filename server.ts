@@ -304,7 +304,7 @@ Format output WAJIB JSON yang valid sesuai skema berikut tanpa teks tambahan di 
     }
   });
 
-  // 3. Endpoint: Pembuat Bahan Ajar, Ringkasan Materi, & LKPD
+  // 3. Endpoint: Pembuat Bahan Ajar, Ringkasan Materi, & LKPD (dengan Gambar Edukatif)
   app.post("/api/ai/buat-materi", async (req, res) => {
     try {
       const {
@@ -313,38 +313,103 @@ Format output WAJIB JSON yang valid sesuai skema berikut tanpa teks tambahan di 
         topikMateri = "",
         tipe = "ringkasan", // 'ringkasan' | 'lkpd' | 'remedial'
         instruksiTambahan = "",
+        sertakanGambar = true,
       } = req.body;
 
       const ai = getGeminiClient();
 
       let tipeDeskripsi = "Ringkasan Materi & Panduan Guru Mengajar";
       if (tipe === "lkpd") {
-        tipeDeskripsi = "Lembar Kerja Peserta Didik (LKPD) Interaktif dan Berdiferensiasi";
+        tipeDeskripsi = "Lembar Kerja Peserta Didik (LKPD) Interaktif Bergambar dan Berdiferensiasi";
       } else if (tipe === "remedial") {
         tipeDeskripsi = "Materi Pengayaan & Remedial untuk Siswa yang Membutuhkan Pendampingan";
       }
 
-      const prompt = `Anda adalah asisten guru berpengalaman di sekolah dasar/menengah di Indonesia.
-Buatlah materi pembelajaran berkualitas tinggi dalam format Markdown yang rapi dan mudah dibaca:
+      // Default curated educational illustration for fallback/reference
+      const getSubjectIllustration = (sub: string, top: string) => {
+        const query = (sub + ' ' + top).toLowerCase();
+        if (query.includes('matematika') || query.includes('hitung') || query.includes('geometri') || query.includes('pecahan')) {
+          return {
+            url: 'https://images.unsplash.com/photo-1635070041078-e363dbe005cb?auto=format&fit=crop&w=700&q=80',
+            caption: 'Ilustrasi Konsep Pola dan Geometri Matematika'
+          };
+        } else if (query.includes('tumbuhan') || query.includes('flora') || query.includes('daun') || query.includes('pohon')) {
+          return {
+            url: 'https://images.unsplash.com/photo-1530595467537-0b5996c41f2d?auto=format&fit=crop&w=700&q=80',
+            caption: 'Pengamatan Morfologi Tumbuhan dan Bagian-Bagian Tanaman'
+          };
+        } else if (query.includes('hewan') || query.includes('fauna') || query.includes('satwa') || query.includes('rantai makanan')) {
+          return {
+            url: 'https://images.unsplash.com/photo-1535083783855-76ae62b2914e?auto=format&fit=crop&w=700&q=80',
+            caption: 'Pengamatan Keanekaragaman Hewan dan Ekosistem'
+          };
+        } else if (query.includes('ipa') || query.includes('sains') || query.includes('percobaan') || query.includes('eksperimen')) {
+          return {
+            url: 'https://images.unsplash.com/photo-1532094349884-543bc11b234d?auto=format&fit=crop&w=700&q=80',
+            caption: 'Eksplorasi Sains dan Penyelidikan Ilmiah'
+          };
+        } else if (query.includes('bumi') || query.includes('tata surya') || query.includes('planet') || query.includes('cuaca')) {
+          return {
+            url: 'https://images.unsplash.com/photo-1614728894747-a83421e2b9c9?auto=format&fit=crop&w=700&q=80',
+            caption: 'Eksplorasi Ruang Angkasa dan Fenomena Bumi'
+          };
+        } else if (query.includes('seni') || query.includes('sbdp') || query.includes('gambar') || query.includes('rupa')) {
+          return {
+            url: 'https://images.unsplash.com/photo-1513364776144-60967b0f800f?auto=format&fit=crop&w=700&q=80',
+            caption: 'Aktivitas Seni Rupa dan Kreativitas Siswa'
+          };
+        }
+        return {
+          url: 'https://images.unsplash.com/photo-1497633762265-9d179a990aa6?auto=format&fit=crop&w=700&q=80',
+          caption: 'Media Belajar dan Penyelidikan Peserta Didik'
+        };
+      };
+
+      const illustration = getSubjectIllustration(mataPelajaran, topikMateri);
+
+      const prompt = `Anda adalah asisten guru profesional sekolah dasar dan menengah di Indonesia yang ahli dalam Kurikulum Merdeka.
+Buatlah materi pembelajaran berkualitas tinggi dalam format Markdown yang rapi, lengkap, dan siap dicetak:
 - Jenis Dokumen: ${tipeDeskripsi}
 - Mata Pelajaran: ${mataPelajaran}
 - Kelas: ${kelas}
 - Topik / Materi: ${topikMateri}
-${instruksiTambahan ? `- Catatan Guru: ${instruksiTambahan}` : ""}
+${instruksiTambahan ? `- Catatan Khusus Guru: ${instruksiTambahan}` : ""}
 
-Panduan Pembuatan:
-1. Gunakan Bahasa Indonesia yang baik, edukatif, dan mudah dipahami siswa sesuai usianya.
-2. Gunakan heading (#, ##, ###), poin-poin (bullet points), tabel jika diperlukan, dan kotak sorot (tips/fakta menarik).
-3. Berikan contoh konkret yang dekat dengan keseharian siswa.
-4. Sajikan secara lengkap, siap cetak atau dibagikan ke siswa.`;
+PANDUAN KHUSUS LKPD & BAHAN AJAR BERGAMBAR:
+1. SERTAKAN GAMBAR & ILUSTRASI VISUAL:
+   Untuk LKPD atau bahan ajar bergambar, sertakan gambar pendukung menggunakan format Markdown:
+   ![${illustration.caption}](${illustration.url})
+   Berikan keterangan gambar yang jelas, ajak siswa mengamati gambar tersebut ("Amati gambar di atas: apa yang kamu temukan?").
+2. AKTIVITAS SISWA BERGAMBAR / LEMBAR PENGAMATAN:
+   Sertakan bagian aktivitas visual untuk anak, seperti:
+   - "🖼️ Lembar Pengamatan & Analisis Gambar"
+   - "🎨 Ruang Menggambar / Diagram Siswa" (berupa instruksi menggambar konsep/bagian yang dipelajari)
+   - Tabel lembar kerja siswa yang siap diisi langsung
+3. FORMAT KONTEN:
+   Gunakan heading (#, ##, ###), daftar bernomor, kotak perhatian/tips, dan petunjuk langkah pengerjaan yang ramah anak.
+4. Sajikan naskah lengkap dari identitas lembar kerja sampai rubrik penilaian sederhana.`;
 
       const responseText = await generateContentWithFallback(ai, {
         contents: prompt,
       });
 
+      let finalMarkdown = responseText || "";
+
+      // Ensure at least one educational illustration is embedded if not already present
+      if (sertakanGambar && !finalMarkdown.includes("![")) {
+        const imgMarkdown = `\n\n![${illustration.caption}](${illustration.url})\n*Gambar: ${illustration.caption}*\n\n`;
+        // Insert after the first header if possible
+        const firstHeadingIndex = finalMarkdown.indexOf("\n## ");
+        if (firstHeadingIndex !== -1) {
+          finalMarkdown = finalMarkdown.slice(0, firstHeadingIndex) + imgMarkdown + finalMarkdown.slice(firstHeadingIndex);
+        } else {
+          finalMarkdown = imgMarkdown + finalMarkdown;
+        }
+      }
+
       res.json({
         success: true,
-        markdown: responseText || "",
+        markdown: finalMarkdown,
       });
     } catch (err: any) {
       console.error("API /api/ai/buat-materi error:", err);

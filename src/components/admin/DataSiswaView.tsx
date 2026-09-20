@@ -320,7 +320,7 @@ export const DataSiswaView: React.FC<DataSiswaViewProps> = ({
         <div className="flex flex-wrap items-center gap-2">
           <button
             id="btn-nav-import-siswa"
-            onClick={onNavigateToImport}
+            onClick={() => onNavigateToImport?.(filterKelas !== 'Semua Kelas' ? filterKelas : undefined)}
             className="px-3.5 py-2 rounded-xl bg-white border border-slate-200 hover:bg-slate-50 text-slate-700 text-xs font-bold flex items-center gap-1.5 transition-all shadow-[0_1px_2px_rgba(0,0,0,0.02)] cursor-pointer"
           >
             <Upload className="w-3.5 h-3.5 text-blue-600" />

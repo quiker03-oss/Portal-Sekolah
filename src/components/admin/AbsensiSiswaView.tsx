@@ -24,10 +24,14 @@ import {
   Sparkles,
   Trash2,
   FileImage,
+  Scan,
 } from 'lucide-react';
+import { usePhysicalScanner } from '../../hooks/usePhysicalScanner';
+import { PhysicalScannerPanel } from '../common/PhysicalScannerPanel';
 
 export const AbsensiSiswaView: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'scan' | 'rekap'>('scan');
+  const [scannerMode, setScannerMode] = useState<'physical' | 'camera'>('physical');
   const [kelasList] = useState<Kelas[]>(db.getKelasList());
   const [absensiList, setAbsensiList] = useState<AbsensiSiswa[]>(db.getAbsensiSiswaList());
 
@@ -254,6 +258,18 @@ export const AbsensiSiswaView: React.FC = () => {
     setManualInputId('');
   };
 
+  // Dedicated Hardware Barcode / QR Scanner Listener
+  const {
+    lastScannedCode,
+    lastScannedAt,
+    totalPhysicalScans,
+  } = usePhysicalScanner({
+    onScan: (code) => {
+      processQrCode(code);
+    },
+    enabled: activeTab === 'scan',
+  });
+
   // REKAP FILTERING
   const filteredRekap = absensiList.filter((item) => {
     // 1. Period filter
@@ -358,145 +374,195 @@ export const AbsensiSiswaView: React.FC = () => {
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           {/* Left: Camera & Scanner View */}
           <div className="lg:col-span-7 space-y-4">
-            <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-5">
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <div className="w-8 h-8 rounded-lg bg-blue-100 text-blue-700 flex items-center justify-center">
-                    <QrCode className="w-4 h-4" />
-                  </div>
-                  <div>
-                    <h3 className="text-sm font-bold text-slate-900">Pemindai QR Code Kamera</h3>
-                    <p className="text-[11px] text-slate-500">Arahkan kamera ke kartu QR siswa</p>
-                  </div>
-                </div>
+            {/* Mode Pemindai Switcher */}
+            <div className="flex bg-slate-100 p-1.5 rounded-2xl border border-slate-200">
+              <button
+                type="button"
+                onClick={() => {
+                  setScannerMode('physical');
+                  stopCamera();
+                }}
+                className={`flex-1 py-2.5 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                  scannerMode === 'physical'
+                    ? 'bg-gradient-to-r from-blue-700 to-indigo-700 text-white shadow-md shadow-blue-500/20'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/60'
+                }`}
+              >
+                <Scan className="w-4 h-4" />
+                <span>Scanner Fisik (Barcode Gun / USB)</span>
+                <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
+              </button>
 
-                <div className="flex items-center gap-2">
-                  <label className="text-[11px] font-semibold text-slate-500">Status:</label>
-                  <select
-                    value={selectedStatus}
-                    onChange={(e) => setSelectedStatus(e.target.value as StatusAbsensi)}
-                    className="py-1 px-2.5 bg-slate-50 border border-slate-300 rounded-lg text-xs font-semibold text-slate-800"
-                  >
-                    <option value="Hadir">Hadir</option>
-                    <option value="Izin">Izin</option>
-                    <option value="Sakit">Sakit</option>
-                    <option value="Alpa">Alpa</option>
-                    <option value="Terlambat">Terlambat</option>
-                  </select>
-                </div>
-              </div>
+              <button
+                type="button"
+                onClick={() => setScannerMode('camera')}
+                className={`flex-1 py-2.5 px-3 rounded-xl text-xs font-bold flex items-center justify-center gap-2 transition-all cursor-pointer ${
+                  scannerMode === 'camera'
+                    ? 'bg-white text-blue-800 shadow-xs border border-slate-200'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/60'
+                }`}
+              >
+                <Camera className="w-4 h-4" />
+                <span>Kamera Web / HP</span>
+              </button>
+            </div>
 
-              {/* Viewfinder Frame */}
-              <div className="relative aspect-4/3 w-full bg-slate-950 rounded-2xl overflow-hidden flex items-center justify-center border-4 border-slate-800 shadow-inner">
-                <video
-                  ref={videoRef}
-                  className={`w-full h-full object-cover ${isCameraActive ? 'block' : 'hidden'}`}
-                />
-                <canvas ref={canvasRef} className="hidden" />
-
-                {/* Laser scan animation overlay */}
-                {isCameraActive && (
-                  <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center p-8">
-                    <div className="w-56 h-56 sm:w-64 sm:h-64 border-2 border-blue-400 rounded-2xl relative shadow-[0_0_15px_rgba(59,130,246,0.5)]">
-                      <div className="absolute top-0 left-0 w-6 h-6 border-t-4 border-l-4 border-amber-400 rounded-tl" />
-                      <div className="absolute top-0 right-0 w-6 h-6 border-t-4 border-r-4 border-amber-400 rounded-tr" />
-                      <div className="absolute bottom-0 left-0 w-6 h-6 border-b-4 border-l-4 border-amber-400 rounded-bl" />
-                      <div className="absolute bottom-0 right-0 w-6 h-6 border-b-4 border-r-4 border-amber-400 rounded-br" />
-                      <div className="w-full h-0.5 bg-gradient-to-r from-transparent via-red-500 to-transparent absolute top-1/2 -translate-y-1/2 animate-pulse" />
-                    </div>
-                    <span className="text-[11px] text-white/80 bg-black/50 px-3 py-1 rounded-full mt-4 backdrop-blur-xs">
-                      Mendeteksi QR Code Siswa...
-                    </span>
-                  </div>
-                )}
-
-                {/* Inactive overlay */}
-                {!isCameraActive && (
-                  <div className="text-center p-6 space-y-3 text-slate-400">
-                    <CameraOff className="w-12 h-12 mx-auto text-slate-500" />
-                    <p className="text-xs max-w-xs mx-auto">
-                      Kamera sedang tidak aktif. Tekan tombol di bawah untuk mengaktifkan kamera laptop / HP.
-                    </p>
-                    <button
-                      id="btn-aktifkan-kamera"
-                      onClick={startCamera}
-                      className="px-5 py-2.5 bg-blue-700 hover:bg-blue-800 text-white rounded-xl text-xs font-semibold shadow-xs flex items-center gap-2 mx-auto transition-colors cursor-pointer"
-                    >
-                      <Camera className="w-4 h-4" />
-                      <span>Aktifkan Kamera Sekarang</span>
-                    </button>
-                  </div>
-                )}
-              </div>
-
-              {cameraError && (
-                <div className="p-3 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl text-xs flex items-start gap-2">
-                  <AlertCircle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
-                  <span>{cameraError}</span>
-                </div>
-              )}
-
-              {/* Camera Controls & Alternatives */}
-              <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
-                {isCameraActive ? (
-                  <button
-                    onClick={stopCamera}
-                    className="px-4 py-2 bg-rose-50 text-rose-700 hover:bg-rose-100 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors"
-                  >
-                    <CameraOff className="w-4 h-4" />
-                    Matikan Kamera
-                  </button>
-                ) : (
-                  <button
-                    onClick={startCamera}
-                    className="px-4 py-2 bg-blue-700 text-white hover:bg-blue-800 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors"
-                  >
-                    <Camera className="w-4 h-4" />
-                    Aktifkan Kamera
-                  </button>
-                )}
-
-                <div className="flex items-center gap-2">
-                  <input
-                    type="file"
-                    id="input-qr-image"
-                    accept="image/*"
-                    onChange={handleUploadQrImage}
-                    className="hidden"
-                  />
-                  <label
-                    htmlFor="input-qr-image"
-                    className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
-                  >
-                    <FileImage className="w-3.5 h-3.5 text-blue-700" />
-                    Unggah Gambar QR
-                  </label>
-                </div>
-              </div>
-
-              {/* Manual Input Alternative */}
-              <div className="pt-4 border-t border-slate-100 space-y-2">
-                <span className="block text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
-                  Atau Input Manual ID Siswa (Contoh: STU-00001):
-                </span>
-                <form onSubmit={handleManualSubmit} className="flex gap-2">
-                  <input
-                    id="input-manual-id"
-                    type="text"
-                    placeholder="Ketik ID Siswa (misal: STU-00001)..."
-                    value={manualInputId}
-                    onChange={(e) => setManualInputId(e.target.value)}
-                    className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-blue-600"
-                  />
-                  <button
-                    type="submit"
-                    className="px-4 py-2 bg-blue-700 hover:bg-blue-800 text-white rounded-xl text-xs font-semibold shadow-xs"
-                  >
-                    Proses
-                  </button>
-                </form>
+            {/* Status Kehadiran Selector */}
+            <div className="flex items-center justify-between px-4 py-3 bg-white rounded-2xl border border-slate-200 shadow-xs">
+              <span className="text-xs font-semibold text-slate-700">Status Absen Otomatis:</span>
+              <div className="flex items-center gap-2">
+                <select
+                  value={selectedStatus}
+                  onChange={(e) => setSelectedStatus(e.target.value as StatusAbsensi)}
+                  className="py-1 px-3 bg-slate-50 border border-slate-300 rounded-lg text-xs font-bold text-slate-800 cursor-pointer"
+                >
+                  <option value="Hadir">Hadir</option>
+                  <option value="Izin">Izin</option>
+                  <option value="Sakit">Sakit</option>
+                  <option value="Alpa">Alpa</option>
+                  <option value="Terlambat">Terlambat</option>
+                </select>
               </div>
             </div>
+
+            {/* MODE 1: PHYSICAL SCANNER (GUN / USB) */}
+            {scannerMode === 'physical' && (
+              <PhysicalScannerPanel
+                onScan={processQrCode}
+                lastScannedCode={lastScannedCode}
+                lastScannedAt={lastScannedAt}
+                totalScans={totalPhysicalScans}
+                placeholderText="Tembakkan scanner fisik ke QR Code siswa (misal: STU-00001)..."
+              />
+            )}
+
+            {/* MODE 2: WEBCAM SCANNER */}
+            {scannerMode === 'camera' && (
+              <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-sm space-y-5">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <div className="w-8 h-8 rounded-lg bg-blue-100 text-blue-700 flex items-center justify-center">
+                      <QrCode className="w-4 h-4" />
+                    </div>
+                    <div>
+                      <h3 className="text-sm font-bold text-slate-900">Pemindai QR Code Kamera</h3>
+                      <p className="text-[11px] text-slate-500">Arahkan kamera ke kartu QR siswa</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* Viewfinder Frame */}
+                <div className="relative aspect-4/3 w-full bg-slate-950 rounded-2xl overflow-hidden flex items-center justify-center border-4 border-slate-800 shadow-inner">
+                  <video
+                    ref={videoRef}
+                    className={`w-full h-full object-cover ${isCameraActive ? 'block' : 'hidden'}`}
+                  />
+                  <canvas ref={canvasRef} className="hidden" />
+
+                  {/* Laser scan animation overlay */}
+                  {isCameraActive && (
+                    <div className="absolute inset-0 pointer-events-none flex flex-col items-center justify-center p-8">
+                      <div className="w-56 h-56 sm:w-64 sm:h-64 border-2 border-blue-400 rounded-2xl relative shadow-[0_0_15px_rgba(59,130,246,0.5)]">
+                        <div className="absolute top-0 left-0 w-6 h-6 border-t-4 border-l-4 border-amber-400 rounded-tl" />
+                        <div className="absolute top-0 right-0 w-6 h-6 border-t-4 border-r-4 border-amber-400 rounded-tr" />
+                        <div className="absolute bottom-0 left-0 w-6 h-6 border-b-4 border-l-4 border-amber-400 rounded-bl" />
+                        <div className="absolute bottom-0 right-0 w-6 h-6 border-b-4 border-r-4 border-amber-400 rounded-br" />
+                        <div className="w-full h-0.5 bg-gradient-to-r from-transparent via-red-500 to-transparent absolute top-1/2 -translate-y-1/2 animate-pulse" />
+                      </div>
+                      <span className="text-[11px] text-white/80 bg-black/50 px-3 py-1 rounded-full mt-4 backdrop-blur-xs">
+                        Mendeteksi QR Code Siswa...
+                      </span>
+                    </div>
+                  )}
+
+                  {/* Inactive overlay */}
+                  {!isCameraActive && (
+                    <div className="text-center p-6 space-y-3 text-slate-400">
+                      <CameraOff className="w-12 h-12 mx-auto text-slate-500" />
+                      <p className="text-xs max-w-xs mx-auto">
+                        Kamera sedang tidak aktif. Tekan tombol di bawah untuk mengaktifkan kamera laptop / HP.
+                      </p>
+                      <button
+                        id="btn-aktifkan-kamera"
+                        onClick={startCamera}
+                        className="px-5 py-2.5 bg-blue-700 hover:bg-blue-800 text-white rounded-xl text-xs font-semibold shadow-xs flex items-center gap-2 mx-auto transition-colors cursor-pointer"
+                      >
+                        <Camera className="w-4 h-4" />
+                        <span>Aktifkan Kamera Sekarang</span>
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                {cameraError && (
+                  <div className="p-3 bg-amber-50 border border-amber-200 text-amber-800 rounded-xl text-xs flex items-start gap-2">
+                    <AlertCircle className="w-4 h-4 text-amber-600 flex-shrink-0 mt-0.5" />
+                    <span>{cameraError}</span>
+                  </div>
+                )}
+
+                {/* Camera Controls & Alternatives */}
+                <div className="flex flex-wrap items-center justify-between gap-3 pt-1">
+                  {isCameraActive ? (
+                    <button
+                      onClick={stopCamera}
+                      className="px-4 py-2 bg-rose-50 text-rose-700 hover:bg-rose-100 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                    >
+                      <CameraOff className="w-4 h-4" />
+                      Matikan Kamera
+                    </button>
+                  ) : (
+                    <button
+                      onClick={startCamera}
+                      className="px-4 py-2 bg-blue-700 text-white hover:bg-blue-800 rounded-xl text-xs font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
+                    >
+                      <Camera className="w-4 h-4" />
+                      Aktifkan Kamera
+                    </button>
+                  )}
+
+                  <div className="flex items-center gap-2">
+                    <input
+                      type="file"
+                      id="input-qr-image"
+                      accept="image/*"
+                      onChange={handleUploadQrImage}
+                      className="hidden"
+                    />
+                    <label
+                      htmlFor="input-qr-image"
+                      className="px-3 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
+                    >
+                      <FileImage className="w-3.5 h-3.5 text-blue-700" />
+                      Unggah Gambar QR
+                    </label>
+                  </div>
+                </div>
+
+                {/* Manual Input Alternative */}
+                <div className="pt-4 border-t border-slate-100 space-y-2">
+                  <span className="block text-[11px] font-semibold text-slate-500 uppercase tracking-wider">
+                    Atau Input Manual ID Siswa (Contoh: STU-00001):
+                  </span>
+                  <form onSubmit={handleManualSubmit} className="flex gap-2">
+                    <input
+                      id="input-manual-id"
+                      type="text"
+                      placeholder="Ketik ID Siswa (misal: STU-00001)..."
+                      value={manualInputId}
+                      onChange={(e) => setManualInputId(e.target.value)}
+                      className="flex-1 px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl text-xs focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-blue-600"
+                    />
+                    <button
+                      type="submit"
+                      className="px-4 py-2 bg-blue-700 hover:bg-blue-800 text-white rounded-xl text-xs font-semibold shadow-xs cursor-pointer"
+                    >
+                      Proses
+                    </button>
+                  </form>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* Right: Scan Feedback Result Card & Quick Logs */}

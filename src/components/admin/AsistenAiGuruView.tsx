@@ -33,7 +33,9 @@ import {
   FolderKanban,
   Layers,
   Search,
+  Image as ImageIcon,
 } from 'lucide-react';
+import { printElement } from '../../utils/exportHelper';
 
 interface AsistenAiGuruViewProps {
   currentUser: User;
@@ -79,8 +81,16 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
   const [materiTopik, setMateriTopik] = useState<string>('Menemukan Ide Pokok dan Kalimat Pendukung dalam Paragraf');
   const [materiTipe, setMateriTipe] = useState<'ringkasan' | 'lkpd' | 'remedial'>('ringkasan');
   const [materiCatatan, setMateriCatatan] = useState<string>('');
+  const [materiSertakanGambar, setMateriSertakanGambar] = useState<boolean>(true);
   const [isGeneratingMateri, setIsGeneratingMateri] = useState<boolean>(false);
   const [hasilMateri, setHasilMateri] = useState<BahanAjarAI | null>(null);
+
+  // Modal konfirmasi hapus dokumen di bank data
+  const [deleteConfirm, setDeleteConfirm] = useState<{
+    type: 'soal' | 'modul' | 'materi';
+    id: string;
+    title: string;
+  } | null>(null);
 
   // ==================== BANK DATA ====================
   const [savedSoalList, setSavedSoalList] = useState<NaskahUjianAI[]>(db.getNaskahSoalList());
@@ -306,6 +316,7 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
           topikMateri: materiTopik,
           tipe: materiTipe,
           instruksiTambahan: materiCatatan,
+          sertakanGambar: materiSertakanGambar,
         }),
       });
 
@@ -338,8 +349,42 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
     }
   };
 
-  const handlePrint = () => {
-    window.print();
+  // Cetak Dokumen Terisolasi & Rapi
+  const handlePrintSoal = () => {
+    if (!hasilSoal) return;
+    printElement('naskah-soal-print', `${hasilSoal.judul} - ${settings.namaSekolah}`);
+  };
+
+  const handlePrintModul = () => {
+    if (!hasilModul) return;
+    printElement('modul-ajar-print', `${hasilModul.judul} - ${settings.namaSekolah}`);
+  };
+
+  const handlePrintMateri = () => {
+    if (!hasilMateri) return;
+    printElement('bahan-ajar-print', `${hasilMateri.judul} - ${settings.namaSekolah}`);
+  };
+
+  // Eksekusi Hapus Dokumen Bank Data
+  const executeDelete = () => {
+    if (!deleteConfirm) return;
+    if (deleteConfirm.type === 'soal') {
+      db.deleteNaskahSoal(deleteConfirm.id);
+      setSavedSoalList((prev) => prev.filter((s) => s.id !== deleteConfirm.id));
+      if (hasilSoal?.id === deleteConfirm.id) setHasilSoal(null);
+      showNotification('success', `Naskah soal "${deleteConfirm.title}" berhasil dihapus.`);
+    } else if (deleteConfirm.type === 'modul') {
+      db.deleteModulAjar(deleteConfirm.id);
+      setSavedModulList((prev) => prev.filter((m) => m.id !== deleteConfirm.id));
+      if (hasilModul?.id === deleteConfirm.id) setHasilModul(null);
+      showNotification('success', `Modul ajar "${deleteConfirm.title}" berhasil dihapus.`);
+    } else if (deleteConfirm.type === 'materi') {
+      db.deleteBahanAjar(deleteConfirm.id);
+      setSavedMateriList((prev) => prev.filter((mat) => mat.id !== deleteConfirm.id));
+      if (hasilMateri?.id === deleteConfirm.id) setHasilMateri(null);
+      showNotification('success', `Bahan ajar/LKPD "${deleteConfirm.title}" berhasil dihapus.`);
+    }
+    setDeleteConfirm(null);
   };
 
   const toggleProfil = (dim: string) => {
@@ -737,7 +782,7 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
 
                     <button
                       type="button"
-                      onClick={handlePrint}
+                      onClick={handlePrintSoal}
                       className="px-3.5 py-1.5 bg-blue-700 hover:bg-blue-800 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer"
                     >
                       <Printer className="w-3.5 h-3.5" />
@@ -1107,8 +1152,8 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
 
                     <button
                       type="button"
-                      onClick={handlePrint}
-                      className="px-3.5 py-1.5 bg-blue-700 hover:bg-blue-800 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer"
+                      onClick={handlePrintModul}
+                      className="px-3.5 py-1.5 bg-indigo-700 hover:bg-indigo-800 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer"
                     >
                       <Printer className="w-3.5 h-3.5" />
                       <span>Cetak / PDF</span>
@@ -1117,7 +1162,27 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
                 </div>
 
                 {/* Modul View Container */}
-                <div id="modul-ajar-print" className="space-y-6 text-xs text-slate-800 leading-relaxed">
+                <div id="modul-ajar-print" className="space-y-6 text-xs text-slate-800 leading-relaxed p-4 bg-slate-50/40 rounded-2xl border border-slate-200">
+                  {/* Kop Sekolah */}
+                  <div className="flex items-center gap-4 border-b-2 border-slate-800 pb-4 text-center sm:text-left">
+                    <img
+                      src={settings.logoUrl || '/logo.svg'}
+                      alt="Logo"
+                      className="w-16 h-16 object-contain flex-shrink-0"
+                    />
+                    <div className="flex-1">
+                      <h4 className="text-sm sm:text-base font-bold text-slate-900 uppercase tracking-tight">
+                        {settings.namaSekolah}
+                      </h4>
+                      <p className="text-[11px] text-slate-600">
+                        {settings.alamat} {settings.desa ? `Desa ${settings.desa}` : ''} {settings.kecamatan ? `Kec. ${settings.kecamatan}` : ''} {settings.kabupaten ? `${settings.kabupaten}` : ''}
+                      </p>
+                      <p className="text-[10px] text-slate-500 mt-0.5">
+                        NPSN: {settings.npsn} | Tahun Ajaran: {settings.tahunAjaranAktif || '2025/2026'} ({settings.semesterAktif || 'Ganjil'})
+                      </p>
+                    </div>
+                  </div>
+
                   {/* Profil Pancasila Badge */}
                   <div className="bg-slate-50 p-4 rounded-xl border border-slate-200 space-y-2">
                     <span className="font-bold text-slate-900 block">Profil Pelajar Pancasila yang Dituju:</span>
@@ -1371,6 +1436,19 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
                   />
                 </div>
 
+                <label className="flex items-center gap-2.5 p-2.5 bg-blue-50/70 border border-blue-200/80 rounded-xl cursor-pointer text-xs font-semibold text-blue-950 hover:bg-blue-50 transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={materiSertakanGambar}
+                    onChange={(e) => setMateriSertakanGambar(e.target.checked)}
+                    className="w-4 h-4 text-blue-600 rounded border-slate-300 focus:ring-blue-500 cursor-pointer"
+                  />
+                  <span className="flex items-center gap-1.5">
+                    <ImageIcon className="w-4 h-4 text-blue-600" />
+                    <span>Sertakan Gambar Edukatif & Ruang Observasi LKPD</span>
+                  </span>
+                </label>
+
                 <button
                   type="submit"
                   disabled={isGeneratingMateri}
@@ -1415,17 +1493,40 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
 
                     <button
                       type="button"
-                      onClick={handlePrint}
+                      onClick={handlePrintMateri}
                       className="px-3.5 py-1.5 bg-blue-700 hover:bg-blue-800 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer"
                     >
                       <Printer className="w-3.5 h-3.5" />
-                      <span>Cetak</span>
+                      <span>Cetak / PDF</span>
                     </button>
                   </div>
                 </div>
 
-                <div className="p-6 bg-slate-50/60 rounded-2xl border border-slate-200 leading-relaxed text-xs text-slate-800 prose prose-slate max-w-none">
-                  <Markdown>{hasilMateri.isiMarkdown}</Markdown>
+                {/* Printable Material & LKPD Container */}
+                <div id="bahan-ajar-print" className="p-4 sm:p-6 bg-slate-50/50 rounded-2xl border border-slate-200/80 space-y-5 text-slate-800">
+                  {/* Kop Sekolah */}
+                  <div className="flex items-center gap-4 border-b-2 border-slate-800 pb-4 text-center sm:text-left">
+                    <img
+                      src={settings.logoUrl || '/logo.svg'}
+                      alt="Logo"
+                      className="w-16 h-16 object-contain flex-shrink-0"
+                    />
+                    <div className="flex-1">
+                      <h4 className="text-sm sm:text-base font-bold text-slate-900 uppercase tracking-tight">
+                        {settings.namaSekolah}
+                      </h4>
+                      <p className="text-[11px] text-slate-600">
+                        {settings.alamat} {settings.desa ? `Desa ${settings.desa}` : ''} {settings.kecamatan ? `Kec. ${settings.kecamatan}` : ''} {settings.kabupaten ? `${settings.kabupaten}` : ''}
+                      </p>
+                      <p className="text-[10px] text-slate-500 mt-0.5">
+                        NPSN: {settings.npsn} | Tahun Ajaran: {settings.tahunAjaranAktif || '2025/2026'} ({settings.semesterAktif || 'Ganjil'})
+                      </p>
+                    </div>
+                  </div>
+
+                  <div className="p-5 sm:p-6 bg-white rounded-xl border border-slate-200 leading-relaxed text-xs text-slate-800 prose prose-slate max-w-none [&_img]:rounded-2xl [&_img]:shadow-md [&_img]:mx-auto [&_img]:my-4 [&_img]:max-h-80 [&_img]:object-cover [&_img]:border [&_img]:border-slate-200">
+                    <Markdown>{hasilMateri.isiMarkdown}</Markdown>
+                  </div>
                 </div>
               </div>
             ) : (
@@ -1538,15 +1639,11 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
 
                           <button
                             type="button"
-                            onClick={() => {
-                              if (confirm(`Hapus naskah soal "${soal.judul}"?`)) {
-                                db.deleteNaskahSoal(soal.id);
-                                showNotification('success', 'Naskah soal dihapus.');
-                              }
-                            }}
-                            className="text-slate-400 hover:text-rose-600 p-1 rounded-lg transition-colors cursor-pointer"
+                            onClick={() => setDeleteConfirm({ type: 'soal', id: soal.id, title: soal.judul })}
+                            className="text-slate-400 hover:text-rose-600 p-1.5 rounded-lg hover:bg-rose-50 transition-colors cursor-pointer"
+                            title="Hapus Naskah Soal"
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
+                            <Trash2 className="w-4 h-4" />
                           </button>
                         </div>
                       </div>
@@ -1612,15 +1709,11 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
 
                           <button
                             type="button"
-                            onClick={() => {
-                              if (confirm(`Hapus modul ajar "${modul.judul}"?`)) {
-                                db.deleteModulAjar(modul.id);
-                                showNotification('success', 'Modul ajar dihapus.');
-                              }
-                            }}
-                            className="text-slate-400 hover:text-rose-600 p-1 rounded-lg transition-colors cursor-pointer"
+                            onClick={() => setDeleteConfirm({ type: 'modul', id: modul.id, title: modul.judul })}
+                            className="text-slate-400 hover:text-rose-600 p-1.5 rounded-lg hover:bg-rose-50 transition-colors cursor-pointer"
+                            title="Hapus Modul Ajar"
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
+                            <Trash2 className="w-4 h-4" />
                           </button>
                         </div>
                       </div>
@@ -1686,15 +1779,11 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
 
                           <button
                             type="button"
-                            onClick={() => {
-                              if (confirm(`Hapus bahan ajar "${materi.judul}"?`)) {
-                                db.deleteBahanAjar(materi.id);
-                                showNotification('success', 'Bahan ajar dihapus.');
-                              }
-                            }}
-                            className="text-slate-400 hover:text-rose-600 p-1 rounded-lg transition-colors cursor-pointer"
+                            onClick={() => setDeleteConfirm({ type: 'materi', id: materi.id, title: materi.judul })}
+                            className="text-slate-400 hover:text-rose-600 p-1.5 rounded-lg hover:bg-rose-50 transition-colors cursor-pointer"
+                            title="Hapus Bahan Ajar / LKPD"
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
+                            <Trash2 className="w-4 h-4" />
                           </button>
                         </div>
                       </div>
@@ -1703,6 +1792,39 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
               )}
             </div>
           )}
+        </div>
+      )}
+
+      {/* Modal Dialog Konfirmasi Hapus Dokumen */}
+      {deleteConfirm && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in duration-150">
+          <div className="bg-white rounded-2xl max-w-md w-full p-6 shadow-2xl border border-slate-200 space-y-4">
+            <div className="w-12 h-12 rounded-2xl bg-rose-100 text-rose-600 flex items-center justify-center mx-auto">
+              <Trash2 className="w-6 h-6" />
+            </div>
+            <div className="text-center space-y-1.5">
+              <h4 className="text-base font-bold text-slate-900">Konfirmasi Hapus Dokumen</h4>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                Apakah Anda yakin ingin menghapus <strong>"{deleteConfirm.title}"</strong> dari Bank Data? Dokumen yang telah dihapus tidak dapat dipulihkan kembali.
+              </p>
+            </div>
+            <div className="flex items-center gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setDeleteConfirm(null)}
+                className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold text-xs rounded-xl transition-colors cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={executeDelete}
+                className="flex-1 py-2.5 bg-rose-600 hover:bg-rose-700 text-white font-bold text-xs rounded-xl shadow-xs transition-colors cursor-pointer"
+              >
+                Ya, Hapus Dokumen
+              </button>
+            </div>
+          </div>
         </div>
       )}
     </div>

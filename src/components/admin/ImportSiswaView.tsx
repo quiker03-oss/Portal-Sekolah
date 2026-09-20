@@ -24,6 +24,7 @@ interface ParsedRow {
   namaLengkap: string;
   nisn: string;
   nomorInduk: string;
+  qrId: string;
   kelas: string;
   jenisKelamin: 'L' | 'P';
   tempatLahir: string;
@@ -347,6 +348,7 @@ export const ImportSiswaView: React.FC<ImportSiswaViewProps> = ({ onSuccess, ini
     const existingNoInduk = new Set(existingSiswa.map((s) => s.nomorInduk.trim()));
 
     const seenFileNisn = new Set<string>();
+    const batchQrIds = db.generateBatchSiswaQrIds(rawItems.length);
 
     const parsed: ParsedRow[] = rawItems.map((item, idx) => {
       // 1. Flexible key matching for student names
@@ -478,6 +480,7 @@ export const ImportSiswaView: React.FC<ImportSiswaViewProps> = ({ onSuccess, ini
         namaLengkap: nama,
         nisn: nisnVal,
         nomorInduk: noIndukVal || `NI-${Math.floor(1000 + Math.random() * 9000)}`,
+        qrId: batchQrIds[idx] || `STU-${String(idx + 1).padStart(5, '0')}`,
         kelas: finalKelas,
         jenisKelamin: jkVal,
         tempatLahir: tmpLahir,
@@ -566,11 +569,13 @@ export const ImportSiswaView: React.FC<ImportSiswaViewProps> = ({ onSuccess, ini
       return;
     }
 
-    // Auto-generate sequential QR Code ID STU-xxxxx
-    const newStudents: Siswa[] = validRows.map((row) => {
-      const nextQrId = db.generateNextSiswaQrId();
+    // Generate strictly unique sequential QR IDs for each student in the import batch
+    const uniqueQrIds = db.generateBatchSiswaQrIds(validRows.length);
+
+    const newStudents: Siswa[] = validRows.map((row, idx) => {
+      const nextQrId = uniqueQrIds[idx] || row.qrId;
       return {
-        id: `stu-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+        id: `stu-${Date.now()}-${idx}-${Math.random().toString(36).substring(2, 7)}`,
         qrId: nextQrId,
         nomorInduk: row.nomorInduk,
         nisn: row.nisn,
@@ -924,6 +929,7 @@ export const ImportSiswaView: React.FC<ImportSiswaViewProps> = ({ onSuccess, ini
                     <th className="px-4 py-3 text-center w-12">Baris</th>
                     <th className="px-4 py-3">Status Verifikasi</th>
                     <th className="px-4 py-3">Nama Lengkap</th>
+                    <th className="px-4 py-3">Kode QR Siswa</th>
                     <th className="px-4 py-3">NISN</th>
                     <th className="px-4 py-3">Nomor Induk</th>
                     <th className="px-4 py-3">Kelas / Rombel</th>
@@ -961,6 +967,11 @@ export const ImportSiswaView: React.FC<ImportSiswaViewProps> = ({ onSuccess, ini
                       </td>
                       <td className="px-4 py-3 font-semibold text-slate-900">
                         {row.namaLengkap || <span className="text-rose-500 italic">Kosong</span>}
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="px-2 py-0.5 font-mono text-[11px] font-bold bg-blue-50 text-blue-800 rounded-md border border-blue-200/80 inline-block">
+                          {row.qrId}
+                        </span>
                       </td>
                       <td className="px-4 py-3 font-mono">
                         {row.nisn || <span className="text-rose-500 italic">Kosong</span>}

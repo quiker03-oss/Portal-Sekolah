@@ -40,6 +40,26 @@ class SoundService {
     }
   }
 
+  playScannerBeep() {
+    try {
+      this.initCtx();
+      if (!this.ctx) return;
+      const now = this.ctx.currentTime;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(1760, now); // A6 crisp scanner gun beep
+      gain.gain.setValueAtTime(0.25, now);
+      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.09);
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.09);
+    } catch {
+      // Audio playback might be restricted
+    }
+  }
+
   speak(text: string) {
     if ("speechSynthesis" in window) {
       window.speechSynthesis.cancel();
