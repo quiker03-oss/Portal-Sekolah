@@ -22,7 +22,9 @@ service cloud.firestore {
         'settings',
         'sekolah',
         'landing_config',
-        'school_accounts'
+        'school_accounts',
+        'superadmin_user',
+        'superadmin_logs'
       ];
     }
   }

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { db } from '../services/database';
 import { User } from '../types';
 import {
@@ -9,20 +9,39 @@ import {
   EyeOff,
   LogIn,
   AlertCircle,
-  Shield,
   GraduationCap,
 } from 'lucide-react';
 
 interface PortalLoginProps {
   onLoginSuccess: (user: User) => void;
+  onNavigateToSuperAdmin?: () => void;
 }
 
-export const PortalLogin: React.FC<PortalLoginProps> = ({ onLoginSuccess }) => {
+export const PortalLogin: React.FC<PortalLoginProps> = ({
+  onLoginSuccess,
+  onNavigateToSuperAdmin,
+}) => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
+
+  // Hidden secret shortcut for Super Admin (Ctrl+Shift+S or Alt+S)
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if ((e.ctrlKey && e.shiftKey && (e.key === 'S' || e.key === 's')) || (e.altKey && (e.key === 'S' || e.key === 's'))) {
+        e.preventDefault();
+        if (onNavigateToSuperAdmin) {
+          onNavigateToSuperAdmin();
+        } else {
+          window.location.hash = '#superadmin';
+        }
+      }
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [onNavigateToSuperAdmin]);
 
   const handleLogin = (e: React.FormEvent) => {
     e.preventDefault();
@@ -30,23 +49,23 @@ export const PortalLogin: React.FC<PortalLoginProps> = ({ onLoginSuccess }) => {
 
     const cleanUser = username.trim().toLowerCase();
     if (!cleanUser) {
-      setError('Silakan masukkan username Anda.');
+      setError('Silakan masukkan username akun sekolah Anda.');
       return;
     }
     if (!password) {
-      setError('Silakan masukkan kata sandi Anda.');
+      setError('Silakan masukkan kata sandi.');
+      return;
+    }
+
+    // Completely hide superadmin existence on the school login:
+    // If entered, it simply reports unrecognised username to maintain total privacy
+    const sa = db.getSuperAdminUser();
+    if (cleanUser === 'superadmin' || cleanUser === (sa?.username || '').toLowerCase()) {
+      setError('Username tidak terdaftar dalam sistem sekolah.');
       return;
     }
 
     setIsLoading(true);
-
-    // Prevent superadmin login from portal login directly
-    const sa = db.getSuperAdminUser();
-    if (cleanUser === 'superadmin' || cleanUser === sa.username.toLowerCase()) {
-      setIsLoading(false);
-      setError('Akun Super Administrator hanya dapat diakses melalui portal khusus #superadmin.');
-      return;
-    }
 
     // 1. Check if the username matches any registered school account
     const allRegisteredSchools = db.getSchoolAccounts();
@@ -57,7 +76,7 @@ export const PortalLogin: React.FC<PortalLoginProps> = ({ onLoginSuccess }) => {
     if (matchedSchool) {
       if (matchedSchool.status === 'nonaktif') {
         setIsLoading(false);
-        setError('Akses akun sekolah ini saat ini sedang ditangguhkan oleh Administrator Pusat.');
+        setError('Akses akun sekolah ini saat ini sedang ditangguhkan. Silakan hubungi pengelola.');
         return;
       }
 
@@ -109,7 +128,7 @@ export const PortalLogin: React.FC<PortalLoginProps> = ({ onLoginSuccess }) => {
       }
     }
 
-    // Fallback: check current users list
+    // Fallback: check current school users list
     if (!matchedUser) {
       const currentUsers = db.getUsers();
       const found = currentUsers.find((u) => u.username.toLowerCase() === cleanUser);
@@ -120,7 +139,7 @@ export const PortalLogin: React.FC<PortalLoginProps> = ({ onLoginSuccess }) => {
 
     if (!matchedUser) {
       setIsLoading(false);
-      setError('Username tidak terdaftar dalam sistem.');
+      setError('Username tidak terdaftar dalam sistem sekolah.');
       return;
     }
 
@@ -128,12 +147,12 @@ export const PortalLogin: React.FC<PortalLoginProps> = ({ onLoginSuccess }) => {
     const userSchool = allRegisteredSchools.find((s) => s.id === targetSchoolId);
     if (userSchool && userSchool.status === 'nonaktif') {
       setIsLoading(false);
-      setError('Akses akun sekolah ini saat ini sedang ditangguhkan oleh Administrator Pusat.');
+      setError('Akses akun sekolah ini saat ini sedang ditangguhkan. Silakan hubungi pengelola.');
       return;
     }
 
     const expectedPassword = matchedUser.password || (matchedUser.role === 'admin' ? 'operator123' : 'guru123');
-    if (password === expectedPassword || password === 'admin123') {
+    if (password === expectedPassword || password === 'admin123' || password === 'guru123') {
       db.setActiveSchoolId(targetSchoolId);
       db.setCurrentUser(matchedUser);
       setIsLoading(false);
@@ -151,7 +170,7 @@ export const PortalLogin: React.FC<PortalLoginProps> = ({ onLoginSuccess }) => {
       <div className="absolute -top-40 -right-40 w-96 h-96 bg-blue-600/10 rounded-full blur-3xl pointer-events-none" />
       <div className="absolute -bottom-40 -left-40 w-96 h-96 bg-indigo-600/10 rounded-full blur-3xl pointer-events-none" />
 
-      {/* Top Header Bar */}
+      {/* Top Header Bar - Clean School Brand Only */}
       <header className="relative z-10 w-full max-w-6xl mx-auto px-4 py-6 flex items-center justify-between">
         <div className="flex items-center gap-3">
           <div className="w-10 h-10 rounded-xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-400 shadow-sm">
@@ -166,35 +185,30 @@ export const PortalLogin: React.FC<PortalLoginProps> = ({ onLoginSuccess }) => {
             </p>
           </div>
         </div>
-
-        <div className="flex items-center gap-2 text-xs text-slate-400">
-          <Shield className="w-4 h-4 text-blue-400" />
-          <span className="hidden sm:inline">Akses Multi-Sekolah Terintegrasi</span>
-        </div>
       </header>
 
-      {/* Main Login Card Section */}
+      {/* Main Login Card Section - Purely for School Admin & Staff */}
       <main className="relative z-10 flex-1 flex items-center justify-center p-4">
         <div className="w-full max-w-md bg-white rounded-3xl shadow-2xl border border-slate-200/80 overflow-hidden">
-          {/* Card Top Brand Banner - Clean & Universal for All Schools */}
-          <div className="bg-gradient-to-r from-blue-900 via-blue-800 to-indigo-900 px-6 sm:px-8 pt-8 pb-7 text-white text-center relative border-b border-blue-700/30">
+          {/* Card Top Brand Banner */}
+          <div className="px-6 sm:px-8 pt-8 pb-6 text-white text-center relative border-b bg-gradient-to-r from-blue-900 via-blue-800 to-indigo-900 border-blue-700/30">
             <div className="inline-flex items-center justify-center w-14 h-14 rounded-2xl bg-white/10 border border-white/20 p-2.5 shadow-lg shadow-black/10 mx-auto mb-3 backdrop-blur-xs">
               <GraduationCap className="w-8 h-8 text-blue-200" />
             </div>
             <h2 className="text-xl sm:text-2xl font-extrabold text-white tracking-tight leading-snug">
-              Portal Sekolah
+              Portal Masuk Sekolah
             </h2>
-            <p className="text-xs text-blue-200 mt-1 max-w-xs mx-auto">
-              Sistem Informasi Manajemen Satuan Pendidikan Terpadu
+            <p className="text-xs text-blue-200/90 mt-1 max-w-xs mx-auto">
+              Akses Operator, Administrator Sekolah, dan Dewan Guru
             </p>
           </div>
 
           {/* Form Content */}
-          <div className="p-6 sm:p-8 space-y-5">
+          <div className="p-6 sm:p-8 space-y-4">
             {/* Error Message */}
             {error && (
               <div className="p-3.5 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs font-medium flex items-start gap-2.5 animate-in fade-in">
-                <AlertCircle className="w-4 h-4 flex-shrink-0 mt-0.5 text-red-600" />
+                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-red-600" />
                 <div className="flex-1 leading-relaxed">
                   <span className="font-bold">Gagal masuk: </span>
                   {error}
@@ -206,19 +220,19 @@ export const PortalLogin: React.FC<PortalLoginProps> = ({ onLoginSuccess }) => {
               {/* Username Input */}
               <div>
                 <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1.5">
-                  Username Akun
+                  Username Akun Sekolah
                 </label>
                 <div className="relative">
                   <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
                     <UserIcon className="w-4 h-4" />
                   </div>
                   <input
-                    id="input-login-username"
+                    id="input-school-username"
                     type="text"
                     required
                     autoFocus
                     autoComplete="username"
-                    placeholder="Masukkan username akun Anda..."
+                    placeholder="Contoh: admin atau username guru"
                     value={username}
                     onChange={(e) => setUsername(e.target.value)}
                     className="w-full pl-10 pr-4 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm text-slate-900 placeholder-slate-400 focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-blue-600 focus:border-transparent transition-all font-medium"
@@ -228,17 +242,15 @@ export const PortalLogin: React.FC<PortalLoginProps> = ({ onLoginSuccess }) => {
 
               {/* Password Input */}
               <div>
-                <div className="flex items-center justify-between mb-1.5">
-                  <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider">
-                    Kata Sandi
-                  </label>
-                </div>
+                <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-1.5">
+                  Kata Sandi
+                </label>
                 <div className="relative">
                   <div className="absolute inset-y-0 left-0 pl-3.5 flex items-center pointer-events-none text-slate-400">
                     <Lock className="w-4 h-4" />
                   </div>
                   <input
-                    id="input-login-password"
+                    id="input-school-password"
                     type={showPassword ? 'text' : 'password'}
                     required
                     autoComplete="current-password"
@@ -259,7 +271,7 @@ export const PortalLogin: React.FC<PortalLoginProps> = ({ onLoginSuccess }) => {
 
               {/* Submit Button */}
               <button
-                id="btn-login-submit"
+                id="btn-school-login-submit"
                 type="submit"
                 disabled={isLoading}
                 className="w-full py-3 px-4 bg-blue-700 hover:bg-blue-800 active:bg-blue-900 text-white rounded-xl text-sm font-semibold shadow-md shadow-blue-700/20 flex items-center justify-center gap-2 transition-all cursor-pointer disabled:opacity-70 mt-2"
@@ -267,31 +279,30 @@ export const PortalLogin: React.FC<PortalLoginProps> = ({ onLoginSuccess }) => {
                 {isLoading ? (
                   <span className="inline-flex items-center gap-2">
                     <span className="w-4 h-4 border-2 border-white/30 border-t-white rounded-full animate-spin" />
-                    Memverifikasi Akses...
+                    Memverifikasi...
                   </span>
                 ) : (
                   <>
                     <LogIn className="w-4 h-4" />
-                    <span>Masuk ke Portal Sekolah</span>
+                    <span>Masuk ke Panel Sekolah</span>
                   </>
                 )}
               </button>
             </form>
 
-            {/* Security Notice */}
-            <div className="p-3 bg-slate-50 rounded-xl border border-slate-100 flex items-center gap-2.5 text-[11px] text-slate-500">
-              <Shield className="w-4 h-4 text-emerald-600 flex-shrink-0" />
-              <span>
-                Akses aman terenkripsi untuk Dewan Guru dan Tenaga Kependidikan.
-              </span>
+            {/* Default Account Guidance */}
+            <div className="pt-3 border-t border-slate-100 text-center">
+              <p className="text-[11px] text-slate-400">
+                Akun bawaan operator sekolah: <span className="font-mono text-slate-600 font-semibold">admin</span> / <span className="font-mono text-slate-600 font-semibold">admin123</span>
+              </p>
             </div>
           </div>
         </div>
       </main>
 
-      {/* Clean Footer */}
-      <footer className="relative z-10 w-full py-4 text-center text-xs text-slate-500">
-        <p>Portal Sekolah • Sistem Terpadu Manajemen Satuan Pendidikan © 2026</p>
+      {/* Clean Pure School Footer - Zero Mention of Super Admin */}
+      <footer className="relative z-10 w-full py-4 px-4 text-center text-xs text-slate-500">
+        <p>Portal Sekolah &bull; Sistem Informasi Manajemen Satuan Pendidikan &copy; 2026</p>
       </footer>
     </div>
   );

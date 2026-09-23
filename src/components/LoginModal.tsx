@@ -29,11 +29,20 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
     const cleanUser = username.trim().toLowerCase();
 
-    // Prevent Super Admin login from school portal
+    // Check if Super Admin login
     const sa = db.getSuperAdminUser();
-    if (cleanUser === 'superadmin' || cleanUser === sa.username.toLowerCase()) {
-      setError('Akun Super Admin hanya dapat login melalui portal khusus Super Admin.');
-      return;
+    if (cleanUser === 'superadmin' || cleanUser === (sa?.username || '').toLowerCase()) {
+      const saRes = db.verifySuperAdminLogin(cleanUser, password);
+      if (saRes.success && saRes.user) {
+        db.setSuperAdminSession(saRes.user);
+        window.location.hash = '#superadmin';
+        window.dispatchEvent(new CustomEvent('superadmin_auth_changed', { detail: saRes.user }));
+        onClose();
+        return;
+      } else {
+        setError(saRes.error || 'Kata sandi Super Admin salah. Kredensial default: superadmin123');
+        return;
+      }
     }
 
     // Check if matching any registered school account

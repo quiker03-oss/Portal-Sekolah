@@ -267,7 +267,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
             })}
           </div>
 
-          {/* Bottom Sidebar Logout Button */}
+          {/* Bottom Sidebar Action Buttons */}
           <div className="p-3 border-t border-slate-100 bg-slate-50/50">
             <button
               id="btn-logout"
