@@ -3,6 +3,11 @@ import QRCode from 'qrcode';
 import * as XLSX from 'xlsx';
 import { db } from '../../services/database';
 import {
+  safeFetchJson,
+  extractDocxInBrowser,
+  parseQuestionsWithRegex,
+} from '../../utils/apiHelper';
+import {
   User,
   UjianOnline,
   SoalUjian,
@@ -437,17 +442,44 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
         throw new Error('Hanya mendukung berkas Microsoft Word (.docx) atau Dokumen PDF (.pdf).');
       }
 
-      // Convert to Base64
+      // Check file size warning for Vercel
+      const maxVercelBytes = 4.5 * 1024 * 1024; // 4.5 MB Vercel Serverless limit
+      if (file.size > maxVercelBytes && isPdf) {
+        throw new Error(
+          `Ukuran berkas PDF Anda (${(file.size / (1024 * 1024)).toFixed(1)} MB) melebihi batas unggah Vercel (4.5 MB). Silakan kompres berkas PDF atau bagi dokumen menjadi beberapa lembar.`
+        );
+      }
+
+      // Pre-extract docx in browser for maximum resilience
+      let docxBrowserData: { text: string; mediaImages: Record<string, string> } | null = null;
+      if (isDocx) {
+        try {
+          docxBrowserData = await extractDocxInBrowser(file);
+        } catch (docxErr: any) {
+          console.warn('[DOCX Browser Pre-Extract Warn]:', docxErr);
+        }
+      }
+
+      // Convert file to Base64
       const reader = new FileReader();
       const base64Promise = new Promise<string>((resolve, reject) => {
         reader.onload = () => resolve(reader.result as string);
-        reader.onerror = () => reject(new Error('Gagal membaca berkas.'));
+        reader.onerror = () => reject(new Error('Gagal membaca berkas dari perangkat Anda.'));
       });
       reader.readAsDataURL(file);
       const base64Data = await base64Promise;
 
       const endpoint = isDocx ? '/api/ujian/parse-docx' : '/api/ujian/parse-pdf';
-      const response = await fetch(endpoint, {
+      const apiRes = await safeFetchJson<{
+        success: boolean;
+        judul?: string;
+        mataPelajaran?: string;
+        kelas?: string;
+        soalList: SoalUjian[];
+        totalSoal: number;
+        rawText?: string;
+        error?: string;
+      }>(endpoint, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -456,28 +488,105 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
         }),
       });
 
-      const result = await response.json();
-      if (!result.success) {
-        throw new Error(result.error || 'Gagal memproses dokumen.');
+      if (apiRes.ok && apiRes.data?.success && apiRes.data.soalList?.length) {
+        const result = apiRes.data;
+        setImportResult({
+          judul: result.judul,
+          mataPelajaran: result.mataPelajaran,
+          kelas: result.kelas,
+          soalList: result.soalList,
+          totalSoal: result.totalSoal || result.soalList.length,
+          rawText: result.rawText,
+          fileBase64: base64Data,
+          fileName: file.name,
+        });
+        setImportStep('preview');
+        return;
       }
 
-      setImportResult({
-        judul: result.judul,
-        mataPelajaran: result.mataPelajaran,
-        kelas: result.kelas,
-        soalList: result.soalList,
-        totalSoal: result.totalSoal,
-        rawText: result.rawText,
-        fileBase64: base64Data,
-        fileName: file.name,
-      });
+      // If docx failed on server (e.g. 413 payload too large or 404 endpoint or timeout),
+      // attempt fallback: send pure extracted text to /api/ujian/parse-text-soal
+      if (isDocx && docxBrowserData && docxBrowserData.text) {
+        console.info('[DOCX Fallback] Attempting text-based parser fallback...');
+        const textFallbackRes = await safeFetchJson<{
+          success: boolean;
+          soalList: SoalUjian[];
+        }>('/api/ujian/parse-text-soal', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ text: docxBrowserData.text }),
+        });
 
-      setImportStep('preview');
+        if (textFallbackRes.ok && textFallbackRes.data?.soalList?.length) {
+          const list = textFallbackRes.data.soalList;
+          setImportResult({
+            judul: file.name.replace(/\.[^/.]+$/, ''),
+            soalList: list,
+            totalSoal: list.length,
+            rawText: docxBrowserData.text,
+            fileBase64: base64Data,
+            fileName: file.name,
+          });
+          setImportStep('preview');
+          return;
+        }
+
+        // Emergency local rule-based regex fallback (works 100% offline without any server)
+        const localQuestions = parseQuestionsWithRegex(docxBrowserData.text);
+        if (localQuestions.length > 0) {
+          setImportResult({
+            judul: file.name.replace(/\.[^/.]+$/, ''),
+            soalList: localQuestions,
+            totalSoal: localQuestions.length,
+            rawText: docxBrowserData.text,
+            fileBase64: base64Data,
+            fileName: file.name,
+          });
+          setImportStep('preview');
+          return;
+        }
+      }
+
+      // If we reach here, show the specific diagnostic error
+      throw new Error(
+        apiRes.error ||
+          'Gagal mengekstrak soal dari dokumen. Pastikan dokumen memiliki teks butir soal yang jelas.'
+      );
     } catch (err: any) {
+      console.error('[Import Error Handler]:', err);
       setImportError(err?.message || 'Terjadi kesalahan saat memproses dokumen.');
     } finally {
       setImportLoading(false);
+      // Reset input value so user can re-select the same file if needed
+      if (e.target) {
+        e.target.value = '';
+      }
     }
+  };
+
+  // Delete a question from import preview before applying
+  const handleDeleteImportQuestion = (idxToDelete: number) => {
+    if (!importResult) return;
+    const filtered = importResult.soalList.filter((_, idx) => idx !== idxToDelete);
+    const reindexed = filtered.map((q, idx) => ({ ...q, nomor: idx + 1 }));
+    setImportResult({
+      ...importResult,
+      soalList: reindexed,
+      totalSoal: reindexed.length,
+    });
+  };
+
+  // Change answer key directly from preview
+  const handleChangeImportKey = (idx: number, newKey: string) => {
+    if (!importResult) return;
+    const updated = [...importResult.soalList];
+    updated[idx] = {
+      ...updated[idx],
+      kunciJawaban: newKey,
+      perluVerifikasi: false,
+      catatanVerifikasi: undefined,
+    };
+    setImportResult({ ...importResult, soalList: updated });
   };
 
   // Apply imported questions to active exam
@@ -2284,9 +2393,26 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
                 )}
 
                 {importError && (
-                  <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xl text-xs flex items-center gap-2">
-                    <AlertCircle className="w-4 h-4 shrink-0" />
-                    <span>{importError}</span>
+                  <div className="p-4 bg-red-50 border border-red-200 text-red-800 rounded-2xl text-xs space-y-2">
+                    <div className="flex items-start gap-2.5">
+                      <AlertCircle className="w-5 h-5 text-red-600 shrink-0 mt-0.5" />
+                      <div className="space-y-1 flex-1">
+                        <strong className="font-bold text-red-900 block">Gagal Memproses Dokumen:</strong>
+                        <p className="leading-relaxed text-red-700">{importError}</p>
+                      </div>
+                    </div>
+                    <div className="pt-2 border-t border-red-100 flex items-center justify-between">
+                      <span className="text-[11px] text-red-500">
+                        Pastikan berkas tidak rusak dan berformat .docx atau .pdf
+                      </span>
+                      <button
+                        type="button"
+                        onClick={() => setImportError(null)}
+                        className="px-3 py-1 bg-white border border-red-200 text-red-700 hover:bg-red-50 rounded-lg text-xs font-semibold cursor-pointer"
+                      >
+                        Tutup Pesan
+                      </button>
+                    </div>
                   </div>
                 )}
               </div>
@@ -2295,50 +2421,96 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
             {/* Preview Step */}
             {importStep === 'preview' && importResult && (
               <div className="flex-1 flex flex-col min-h-0 space-y-4">
-                <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200 text-xs flex items-center justify-between">
+                <div className="bg-slate-50 p-3.5 rounded-xl border border-slate-200 text-xs flex flex-wrap items-center justify-between gap-2">
                   <div>
                     <span className="text-slate-500">Hasil Analisis Berkas:</span>
                     <strong className="text-slate-800 ml-1.5">{importResult.fileName}</strong>
                   </div>
                   <span className="bg-emerald-100 text-emerald-800 font-bold px-2.5 py-0.5 rounded-md">
-                    {importResult.totalSoal} Butir Soal Berhasil Dikenali
+                    {importResult.totalSoal} Butir Soal Teridentifikasi
                   </span>
                 </div>
 
                 {/* Question Preview List */}
                 <div className="flex-1 overflow-y-auto space-y-3 pr-1">
-                  {importResult.soalList.map((soal) => (
+                  {importResult.soalList.map((soal, idx) => (
                     <div
-                      key={soal.id}
-                      className={`p-3.5 rounded-xl border text-xs ${
+                      key={soal.id || idx}
+                      className={`p-3.5 rounded-xl border text-xs space-y-2 ${
                         soal.perluVerifikasi ? 'bg-amber-50/70 border-amber-300' : 'bg-white border-slate-200'
                       }`}
                     >
-                      <div className="flex items-center justify-between mb-1.5">
-                        <span className="font-bold text-slate-800">
-                          Soal #{soal.nomor} ({soal.tipe})
-                        </span>
-                        <span className="font-bold text-emerald-600">
-                          Kunci: {soal.kunciJawaban || 'Belum terdeteksi'}
-                        </span>
+                      <div className="flex items-center justify-between">
+                        <div className="flex items-center gap-2">
+                          <span className="w-6 h-6 rounded-lg bg-slate-800 text-white font-bold text-xs flex items-center justify-center">
+                            {soal.nomor || idx + 1}
+                          </span>
+                          <span className="font-semibold text-slate-700 uppercase text-[11px]">
+                            {soal.tipe.replace('_', ' ')}
+                          </span>
+                        </div>
+
+                        <div className="flex items-center gap-2">
+                          {/* Quick Key Selection */}
+                          <div className="flex items-center gap-1.5 bg-emerald-50 border border-emerald-200 px-2 py-0.5 rounded-lg">
+                            <span className="text-[11px] font-bold text-emerald-800">Kunci:</span>
+                            {soal.tipe === 'pilihan_ganda' ? (
+                              <select
+                                value={soal.kunciJawaban || ''}
+                                onChange={(e) => handleChangeImportKey(idx, e.target.value)}
+                                className="bg-transparent font-bold text-emerald-700 text-xs focus:outline-hidden cursor-pointer"
+                              >
+                                <option value="">Pilih</option>
+                                <option value="A">A</option>
+                                <option value="B">B</option>
+                                <option value="C">C</option>
+                                <option value="D">D</option>
+                                <option value="E">E</option>
+                              </select>
+                            ) : (
+                              <span className="font-bold text-emerald-700">{soal.kunciJawaban || 'Belum diisi'}</span>
+                            )}
+                          </div>
+
+                          {/* Delete question from preview */}
+                          <button
+                            type="button"
+                            title="Hapus butir soal ini dari hasil impor"
+                            onClick={() => handleDeleteImportQuestion(idx)}
+                            className="p-1 text-slate-400 hover:text-red-600 rounded hover:bg-slate-100 transition cursor-pointer"
+                          >
+                            <Trash2 className="w-4 h-4" />
+                          </button>
+                        </div>
                       </div>
-                      <p className="text-slate-700 mb-2 leading-relaxed">{soal.pertanyaan}</p>
+
+                      <p className="text-slate-800 leading-relaxed font-medium">{soal.pertanyaan}</p>
+
                       {soal.gambar && (
-                        <div className="mb-2">
+                        <div className="my-2">
                           <img src={soal.gambar} alt="Soal" className="max-h-36 rounded-lg border border-slate-200" />
                         </div>
                       )}
+
                       {soal.pilihan && (
-                        <div className="grid grid-cols-2 gap-1.5 text-slate-600 bg-slate-50 p-2 rounded-lg">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5 text-slate-700 bg-slate-50 p-2.5 rounded-lg border border-slate-100">
                           {Object.entries(soal.pilihan).map(([k, v]) => (
-                            <div key={k}>
-                              <strong>{k}.</strong> {v}
+                            <div
+                              key={k}
+                              className={`p-1 rounded ${
+                                soal.kunciJawaban === k ? 'bg-emerald-100/70 font-semibold text-emerald-900' : ''
+                              }`}
+                            >
+                              <strong className="mr-1">{k}.</strong> {v}
                             </div>
                           ))}
                         </div>
                       )}
+
                       {soal.catatanVerifikasi && (
-                        <p className="text-amber-700 italic mt-1.5 text-[11px]">* {soal.catatanVerifikasi}</p>
+                        <p className="text-amber-700 italic text-[11px] bg-amber-100/50 p-1.5 rounded">
+                          * {soal.catatanVerifikasi}
+                        </p>
                       )}
                     </div>
                   ))}

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { db } from '../../services/database';
+import { safeFetchJson } from '../../utils/apiHelper';
 import {
   User,
   NaskahUjianAI,
@@ -176,7 +177,11 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
     setStatusMsg(null);
 
     try {
-      const res = await fetch('/api/ai/buat-soal', {
+      const apiRes = await safeFetchJson<{
+        success: boolean;
+        data: any;
+        error?: string;
+      }>('/api/ai/buat-soal', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -192,10 +197,11 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
         }),
       });
 
-      const json = await res.json();
-      if (!res.ok || !json.success) {
-        throw new Error(json.error || 'Gagal menghasilkan soal. Periksa koneksi atau API Key server.');
+      if (!apiRes.ok || !apiRes.data?.success) {
+        throw new Error(apiRes.error || apiRes.data?.error || 'Gagal menghasilkan soal. Periksa koneksi atau API Key server.');
       }
+
+      const json = apiRes.data;
 
       const generatedData: NaskahUjianAI = {
         id: `soal-${Date.now()}`,
@@ -240,7 +246,11 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
     setStatusMsg(null);
 
     try {
-      const res = await fetch('/api/ai/buat-modul', {
+      const apiRes = await safeFetchJson<{
+        success: boolean;
+        data: any;
+        error?: string;
+      }>('/api/ai/buat-modul', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -253,10 +263,11 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
         }),
       });
 
-      const json = await res.json();
-      if (!res.ok || !json.success) {
-        throw new Error(json.error || 'Gagal menyusun modul ajar. Periksa koneksi atau API Key server.');
+      if (!apiRes.ok || !apiRes.data?.success) {
+        throw new Error(apiRes.error || apiRes.data?.error || 'Gagal menyusun modul ajar. Periksa koneksi atau API Key server.');
       }
+
+      const json = apiRes.data;
 
       const generatedModul: ModulAjarAI = {
         id: `modul-${Date.now()}`,
@@ -307,7 +318,11 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
     setStatusMsg(null);
 
     try {
-      const res = await fetch('/api/ai/buat-materi', {
+      const apiRes = await safeFetchJson<{
+        success: boolean;
+        markdown?: string;
+        error?: string;
+      }>('/api/ai/buat-materi', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -320,10 +335,11 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
         }),
       });
 
-      const json = await res.json();
-      if (!res.ok || !json.success) {
-        throw new Error(json.error || 'Gagal membuat bahan ajar. Periksa koneksi atau API Key server.');
+      if (!apiRes.ok || !apiRes.data?.success) {
+        throw new Error(apiRes.error || apiRes.data?.error || 'Gagal membuat bahan ajar. Periksa koneksi atau API Key server.');
       }
+
+      const json = apiRes.data;
 
       const generatedMateri: BahanAjarAI = {
         id: `materi-${Date.now()}`,
@@ -334,7 +350,7 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
         kelas: materiKelas,
         topikMateri: materiTopik,
         tipe: materiTipe,
-        isiMarkdown: json.markdown || '',
+        isiMarkdown: json?.markdown || '',
         createdAt: new Date().toISOString(),
       };
 
