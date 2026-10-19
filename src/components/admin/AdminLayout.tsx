@@ -30,11 +30,13 @@ import { BellRing,
   Wallet,
   LayoutTemplate,
   Sparkles,
+  FileQuestion,
 } from 'lucide-react';
 
 // Subviews
 import { DashboardView } from './DashboardView';
 import { AsistenAiGuruView } from './AsistenAiGuruView';
+import { UjianOnlineAdmin } from './UjianOnlineAdmin';
 import { DataSiswaView } from './DataSiswaView';
 import { ImportSiswaView } from './ImportSiswaView';
 import { QrCodeSiswaView } from './QrCodeSiswaView';
@@ -129,6 +131,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
       label: 'Guru & Pembelajaran AI',
       items: [
         { id: 'asisten-ai-guru', label: 'Asisten AI Guru (Soal & RPP)', icon: Sparkles, visible: true },
+        { id: 'ujian-online', label: 'Ujian Online (CBT)', icon: FileQuestion, visible: true },
       ],
     },
     {
@@ -299,6 +302,8 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
               )}
 
               {activeTab === 'asisten-ai-guru' && <AsistenAiGuruView currentUser={currentUser} />}
+
+              {activeTab === 'ujian-online' && <UjianOnlineAdmin currentUser={currentUser} />}
 
               {activeTab === 'data-siswa' && (
                 <DataSiswaView

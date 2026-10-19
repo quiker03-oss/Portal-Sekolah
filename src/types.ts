@@ -389,3 +389,130 @@ export interface BahanAjarAI {
   isiMarkdown: string;
   createdAt: string;
 }
+
+// ==================== UJIAN ONLINE / CBT MODULE ====================
+export type JenisSoal = 'pilihan_ganda' | 'benar_salah' | 'isian' | 'esai';
+export type StatusUjian = 'draf' | 'terjadwal' | 'aktif' | 'selesai' | 'diarsipkan';
+
+export interface SoalUjian {
+  id: string;
+  nomor: number;
+  tipe: JenisSoal;
+  pertanyaan: string;
+  gambar?: string; // Data URI (Base64) or URL
+  gambarCaption?: string;
+  pilihan?: {
+    [key: string]: string; // A, B, C, D, E
+  };
+  kunciJawaban: string; // e.g. "A", "Benar", "kata kunci", atau rubrik esai
+  pembahasan?: string;
+  bobot: number; // default 1
+  perluVerifikasi?: boolean; // flag if OCR/parser is uncertain
+  catatanVerifikasi?: string;
+}
+
+export interface RiwayatPerubahanKunci {
+  id: string;
+  tanggal: string;
+  diubahOleh: string;
+  keterangan: string;
+  nomorSoal: number;
+  kunciLama: string;
+  kunciBaru: string;
+}
+
+export interface UjianOnline {
+  id: string;
+  schoolId?: string;
+  judul: string;
+  deskripsi?: string;
+  mataPelajaran: string;
+  mapelId?: string;
+  guruId: string;
+  guruNama: string;
+  kelasTarget: string[]; // e.g. ["Kelas 1A", "Kelas 1B"] or ["Semua Siswa"]
+  semester: 'Ganjil' | 'Genap';
+  tahunAjaran: string;
+  jenisUjian:
+    | 'Ulangan Harian'
+    | 'Penilaian Tengah Semester (PTS/STS)'
+    | 'Penilaian Akhir Semester (PAS/SAS)'
+    | 'Ujian Sekolah'
+    | 'Try Out'
+    | 'Kuis / Latihan Harian';
+  status: StatusUjian;
+  tanggalMulai: string; // YYYY-MM-DDTHH:mm
+  tanggalSelesai: string; // YYYY-MM-DDTHH:mm
+  durasiMenit: number; // e.g. 60
+  jumlahPercobaan: number; // default 1
+  acakSoal: boolean;
+  acakPilihan: boolean;
+  tampilkanNilaiLangsung: boolean;
+  tampilkanPembahasan: 'tidak' | 'setelah_ujian' | 'setelah_jadwal_selesai';
+  kodeUjian?: string; // Optional PIN / Token (e.g. "ABC123")
+  kkm: number; // e.g. 75
+  soalList: SoalUjian[];
+  modeTampilan: 'terstruktur' | 'dokumen_asli';
+  dokumenAsliNama?: string;
+  dokumenAsliUrl?: string; // Base64 or Blob
+  riwayatPerubahanKunci?: RiwayatPerubahanKunci[];
+  // Fitur Pengawasan & Anti-Curang (Proctoring)
+  pengawasanAktif?: boolean; // default true
+  wajibFullscreen?: boolean; // default true
+  maksimalPelanggaran?: number; // default 3, jika tercapai maka otomatis terkunci
+  blokirCopyPaste?: boolean; // default true
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface LogPelanggaranUjian {
+  id: string;
+  waktu: string;
+  jenis: 'pindah_tab' | 'keluar_fullscreen' | 'copy_paste' | 'klik_kanan' | 'jendela_blur' | 'lainnya';
+  deskripsi: string;
+  durasiKeluarDetik?: number;
+}
+
+export interface DetailJawabanSiswa {
+  jawabanDipilih: string;
+  raguRagu?: boolean;
+  isBenar?: boolean;
+  skorDidapat?: number;
+  nilaiEsai?: number;
+  catatanGuruEsai?: string;
+  dinilaiOlehGuru?: boolean;
+}
+
+export interface JawabanSiswaUjian {
+  id: string;
+  schoolId?: string;
+  ujianId: string;
+  siswaId: string;
+  namaSiswa: string;
+  nisn?: string;
+  nomorInduk?: string;
+  kelas: string;
+  jawaban: { [soalId: string]: DetailJawabanSiswa };
+  waktuMulai: string;
+  waktuSelesai?: string;
+  durasiDetik?: number;
+  status: 'sedang_mengerjakan' | 'selesai' | 'waktu_habis' | 'terkunci';
+  jumlahBenar?: number;
+  jumlahSalah?: number;
+  jumlahKosong?: number;
+  nilaiAkhir?: number; // 0 - 100
+  lulusKkm?: boolean;
+  adaEsaiBelumDinilai?: boolean;
+  catatanGuru?: string;
+  // Pengawasan & Status Sesi
+  jumlahPelanggaran?: number;
+  logPelanggaran?: LogPelanggaranUjian[];
+  terkunciOlehSistem?: boolean;
+  alasanTerkunci?: string;
+  waktuTerkunci?: string;
+  dibukaOlehGuru?: boolean;
+  terakhirAktif?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+

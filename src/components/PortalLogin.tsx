@@ -289,13 +289,6 @@ export const PortalLogin: React.FC<PortalLoginProps> = ({
                 )}
               </button>
             </form>
-
-            {/* Default Account Guidance */}
-            <div className="pt-3 border-t border-slate-100 text-center">
-              <p className="text-[11px] text-slate-400">
-                Akun bawaan operator sekolah: <span className="font-mono text-slate-600 font-semibold">admin</span> / <span className="font-mono text-slate-600 font-semibold">admin123</span>
-              </p>
-            </div>
           </div>
         </div>
       </main>

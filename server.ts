@@ -3,6 +3,7 @@ import path from "path";
 import { createServer as createViteServer } from "vite";
 import { GoogleGenAI } from "@google/genai";
 import dotenv from "dotenv";
+import JSZip from "jszip";
 
 dotenv.config();
 
@@ -120,7 +121,7 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  app.use(express.json({ limit: "15mb" }));
+  app.use(express.json({ limit: "50mb" }));
 
   // Health check
   app.get("/api/health", (req, res) => {
@@ -416,6 +417,368 @@ PANDUAN KHUSUS LKPD & BAHAN AJAR BERGAMBAR:
       res.status(500).json({
         success: false,
         error: err.message || "Terjadi kesalahan saat membuat materi pembelajaran dengan AI.",
+      });
+    }
+  });
+
+  // ==================== ENDPOINT UJIAN ONLINE: DOCX & PDF PARSER ====================
+
+  // Helper: Extract paragraphs and embedded images from Word (.docx)
+  async function extractFromDocx(buffer: Buffer) {
+    const zip = await JSZip.loadAsync(buffer);
+
+    const relsFile = zip.file("word/_rels/document.xml.rels");
+    const relsMap: { [rId: string]: string } = {};
+    if (relsFile) {
+      const relsXml = await relsFile.async("string");
+      const relMatches = relsXml.matchAll(/<Relationship[^>]*Id="([^"]+)"[^>]*Target="([^"]+)"/g);
+      for (const m of relMatches) {
+        relsMap[m[1]] = m[2];
+      }
+    }
+
+    const mediaImages: { [mediaPath: string]: string } = {};
+    const mediaFiles = zip.file(/^word\/media\//);
+    for (const f of mediaFiles) {
+      const ext = f.name.split('.').pop()?.toLowerCase() || 'png';
+      const mime = ext === 'jpg' || ext === 'jpeg' ? 'image/jpeg' : ext === 'gif' ? 'image/gif' : 'image/png';
+      const b64 = await f.async("base64");
+      const relativePath = f.name.replace(/^word\//, '');
+      const dataUri = `data:${mime};base64,${b64}`;
+      mediaImages[relativePath] = dataUri;
+      mediaImages[f.name] = dataUri;
+    }
+
+    const docFile = zip.file("word/document.xml");
+    if (!docFile) {
+      throw new Error("File .docx tidak memiliki berkas dokumen utama (word/document.xml).");
+    }
+    const docXml = await docFile.async("string");
+
+    const pMatches = docXml.split(/<\/w:p>/g);
+    const extractedParagraphs: { text: string; imageUri?: string }[] = [];
+
+    for (const p of pMatches) {
+      let imageUri: string | undefined = undefined;
+      const rIdMatch = p.match(/r:embed="([^"]+)"/);
+      if (rIdMatch) {
+        const rId = rIdMatch[1];
+        const target = relsMap[rId];
+        if (target && mediaImages[target]) {
+          imageUri = mediaImages[target];
+        }
+      }
+
+      const textMatches = p.match(/<w:t[^>]*>(.*?)<\/w:t>/g);
+      let text = "";
+      if (textMatches) {
+        text = textMatches.map(t => t.replace(/<[^>]+>/g, '')).join('');
+      }
+
+      const cleanText = text.trim();
+      if (cleanText || imageUri) {
+        extractedParagraphs.push({ text: cleanText, imageUri });
+      }
+    }
+
+    return { extractedParagraphs, mediaImages };
+  }
+
+  // 1. Endpoint: Parse Soal dari Word (.docx)
+  app.post("/api/ujian/parse-docx", async (req, res) => {
+    try {
+      const { fileBase64, fileName = "dokumen-soal.docx" } = req.body;
+      if (!fileBase64) {
+        return res.status(400).json({ success: false, error: "Data fileBase64 tidak ditemukan." });
+      }
+
+      const cleanBase64 = fileBase64.replace(/^data:.*?;base64,/, "");
+      const buffer = Buffer.from(cleanBase64, "base64");
+      const { extractedParagraphs, mediaImages } = await extractFromDocx(buffer);
+
+      // Build structured text representation with image placeholders
+      const imageIndexMap: { [marker: string]: string } = {};
+      let imgCounter = 1;
+
+      const formattedLines = extractedParagraphs.map(p => {
+        let line = p.text;
+        if (p.imageUri) {
+          const marker = `[[IMAGE_SOAL_${imgCounter}]]`;
+          imageIndexMap[marker] = p.imageUri;
+          line = `${line} ${marker}`.trim();
+          imgCounter++;
+        }
+        return line;
+      }).filter(Boolean);
+
+      const rawDocumentText = formattedLines.join("\n");
+
+      const ai = getGeminiClient();
+      const prompt = `Anda adalah parser naskah ujian sekolah profesional Indonesia.
+Bacalah dokumen naskah soal berikut secara teliti:
+
+--- AWAL NASKAH DOKUMEN ---
+${rawDocumentText}
+--- AKHIR NASKAH DOKUMEN ---
+
+ATURAN WAJIB & KETAT:
+1. JANGAN PERNAH MENGARANG, MERUBAH, ATAU MENGGANTI kata, angka, pilihan jawaban, rumus, atau urutan soal dari dokumen asli!
+2. Kenali nomor soal, teks pertanyaan, pilihan A/B/C/D/E, instruksi, dan jenis soal ('pilihan_ganda' | 'benar_salah' | 'isian' | 'esai').
+3. Urutan nomor soal WAJIB dipertahankan persis seperti dokumen asli (1, 2, 3, ...).
+4. Jika terdapat penanda gambar seperti '[[IMAGE_SOAL_1]]', tempatkan penanda tersebut pada soal yang tepat di field 'gambarMarker'.
+5. Deteksi kunci jawaban jika ada pada soal (misalnya cetak tebal, garis bawah, atau tabel kunci jawaban di akhir dokumen).
+6. Hubungkan setiap kunci jawaban dengan nomor soal yang benar. Jika kunci tidak terdeteksi, biarkan string kosong "" dan berikan peringatan di 'catatanVerifikasi'.
+7. Jika ada soal yang ambigu, nomor terpotong, atau kunci jawaban meragukan, tandai 'perluVerifikasi': true dengan 'catatanVerifikasi'.
+8. Format output WAJIB JSON valid:
+
+{
+  "judul": "string judul naskah jika ada",
+  "mataPelajaran": "string mata pelajaran jika tertera",
+  "kelas": "string tingkat kelas jika tertera",
+  "soalList": [
+    {
+      "nomor": 1,
+      "tipe": "pilihan_ganda | benar_salah | isian | esai",
+      "pertanyaan": "teks pertanyaan lengkap",
+      "pilihan": {
+        "A": "teks opsi A",
+        "B": "teks opsi B",
+        "C": "teks opsi C",
+        "D": "teks opsi D"
+      },
+      "kunciJawaban": "A | B | C | D | teks kunci",
+      "pembahasan": "penjelasan jika ada di dokumen",
+      "gambarMarker": "[[IMAGE_SOAL_1]] jika ada pada soal ini, atau null",
+      "bobot": 1,
+      "perluVerifikasi": false,
+      "catatanVerifikasi": "keterangan jika perlu verifikasi"
+    }
+  ]
+}`;
+
+      const responseText = await generateContentWithFallback(ai, {
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+        },
+      });
+
+      const parsed = cleanAndParseJson(responseText);
+
+      // Map back image markers to actual Base64 Data URIs
+      const questions = (parsed.soalList || []).map((q: any, idx: number) => {
+        let finalImage: string | undefined = undefined;
+        if (q.gambarMarker && imageIndexMap[q.gambarMarker]) {
+          finalImage = imageIndexMap[q.gambarMarker];
+        } else if (!finalImage && Object.keys(imageIndexMap).length > 0) {
+          // If marker was referenced inside text
+          for (const [marker, uri] of Object.entries(imageIndexMap)) {
+            if (q.pertanyaan && q.pertanyaan.includes(marker)) {
+              finalImage = uri;
+              q.pertanyaan = q.pertanyaan.replace(marker, "").trim();
+              break;
+            }
+          }
+        }
+
+        return {
+          id: `soal-${Date.now()}-${idx + 1}`,
+          nomor: q.nomor || idx + 1,
+          tipe: q.tipe || 'pilihan_ganda',
+          pertanyaan: q.pertanyaan || '',
+          pilihan: q.pilihan || undefined,
+          kunciJawaban: q.kunciJawaban || '',
+          pembahasan: q.pembahasan || '',
+          bobot: Number(q.bobot) > 0 ? Number(q.bobot) : 1,
+          gambar: finalImage,
+          perluVerifikasi: Boolean(q.perluVerifikasi || !q.kunciJawaban),
+          catatanVerifikasi: q.catatanVerifikasi || (!q.kunciJawaban ? 'Kunci jawaban belum terdeteksi dari dokumen' : undefined),
+        };
+      });
+
+      res.json({
+        success: true,
+        judul: parsed.judul || fileName.replace(/\.[^/.]+$/, ""),
+        mataPelajaran: parsed.mataPelajaran || "",
+        kelas: parsed.kelas || "",
+        soalList: questions,
+        totalSoal: questions.length,
+        totalGambarDiekstrak: Object.keys(mediaImages).length,
+        rawText: rawDocumentText,
+      });
+    } catch (err: any) {
+      console.error("API /api/ujian/parse-docx error:", err);
+      res.status(500).json({
+        success: false,
+        error: err.message || "Gagal memproses file Word (.docx).",
+      });
+    }
+  });
+
+  // 2. Endpoint: Parse Soal dari PDF (Teks & Scan/OCR)
+  app.post("/api/ujian/parse-pdf", async (req, res) => {
+    try {
+      const { fileBase64, fileName = "dokumen-soal.pdf" } = req.body;
+      if (!fileBase64) {
+        return res.status(400).json({ success: false, error: "Data fileBase64 PDF tidak ditemukan." });
+      }
+
+      const cleanBase64 = fileBase64.replace(/^data:application\/pdf;base64,/, "");
+      const ai = getGeminiClient();
+
+      const prompt = `Anda adalah sistem AI pemeriksa naskah ujian resmi sekolah Indonesia.
+Analisis berkas PDF terlampir secara menyeluruh (baik halaman berupa teks digital maupun hasil scan/gambar OCR).
+
+ATURAN WAJIB & INTEGRITAS SOAL:
+1. JANGAN PERNAH MENGARANG ATAU MENGUBAH teks soal, angka, pilihan jawaban, rumus, atau urutan soal dari dokumen asli!
+2. Ekstrak nomor soal berurutan persis sesuai naskah dokumen asli.
+3. Kenali nomor soal, teks pertanyaan, rumus matematika/sains, tabel, dan pilihan A/B/C/D/E.
+4. Tentukan tipe soal: 'pilihan_ganda' | 'benar_salah' | 'isian' | 'esai'.
+5. Deteksi kunci jawaban jika tersedia (pada naskah soal langsung, cetak tebal, atau tabel kunci jawaban di akhir halaman).
+6. Jika dokumen memiliki diagram/gambar pada nomor soal tertentu, jelaskan deskripsi visual diagram tersebut pada field 'gambarDeskripsi'.
+7. Jika ada soal yang terpotong, buram, tidak terbaca jelas, atau kunci belum cocok, tandai 'perluVerifikasi': true dan isi 'catatanVerifikasi'.
+8. Format output WAJIB JSON valid sesuai skema:
+
+{
+  "judul": "string judul dokumen ujian",
+  "mataPelajaran": "string mata pelajaran jika ada",
+  "kelas": "string kelas jika ada",
+  "soalList": [
+    {
+      "nomor": 1,
+      "tipe": "pilihan_ganda | benar_salah | isian | esai",
+      "pertanyaan": "teks soal lengkap beserta rumus atau data tabel",
+      "pilihan": {
+        "A": "teks A",
+        "B": "teks B",
+        "C": "teks C",
+        "D": "teks D"
+      },
+      "kunciJawaban": "A | B | C | D | teks kunci",
+      "pembahasan": "pembahasan ringkas jika ada",
+      "gambarDeskripsi": "keterangan gambar/diagram jika soal merujuk pada gambar tertentu",
+      "bobot": 1,
+      "perluVerifikasi": false,
+      "catatanVerifikasi": "catatan jika perlu dicek guru"
+    }
+  ]
+}`;
+
+      const responseText = await generateContentWithFallback(ai, {
+        contents: [
+          {
+            inlineData: {
+              mimeType: "application/pdf",
+              data: cleanBase64,
+            },
+          },
+          {
+            text: prompt,
+          },
+        ],
+        config: {
+          responseMimeType: "application/json",
+        },
+      });
+
+      const parsed = cleanAndParseJson(responseText);
+
+      const questions = (parsed.soalList || []).map((q: any, idx: number) => ({
+        id: `soal-${Date.now()}-${idx + 1}`,
+        nomor: q.nomor || idx + 1,
+        tipe: q.tipe || 'pilihan_ganda',
+        pertanyaan: q.pertanyaan || '',
+        pilihan: q.pilihan || undefined,
+        kunciJawaban: q.kunciJawaban || '',
+        pembahasan: q.pembahasan || '',
+        gambarCaption: q.gambarDeskripsi || undefined,
+        bobot: Number(q.bobot) > 0 ? Number(q.bobot) : 1,
+        perluVerifikasi: Boolean(q.perluVerifikasi || !q.kunciJawaban),
+        catatanVerifikasi: q.catatanVerifikasi || (!q.kunciJawaban ? 'Kunci jawaban belum terdeteksi dari dokumen' : undefined),
+      }));
+
+      res.json({
+        success: true,
+        judul: parsed.judul || fileName.replace(/\.[^/.]+$/, ""),
+        mataPelajaran: parsed.mataPelajaran || "",
+        kelas: parsed.kelas || "",
+        soalList: questions,
+        totalSoal: questions.length,
+      });
+    } catch (err: any) {
+      console.error("API /api/ujian/parse-pdf error:", err);
+      res.status(500).json({
+        success: false,
+        error: err.message || "Gagal memproses file PDF.",
+      });
+    }
+  });
+
+  // 3. Endpoint: Parse Soal dari Teks Bebas (Copy-Paste)
+  app.post("/api/ujian/parse-text-soal", async (req, res) => {
+    try {
+      const { text } = req.body;
+      if (!text || !text.trim()) {
+        return res.status(400).json({ success: false, error: "Teks soal tidak boleh kosong." });
+      }
+
+      const ai = getGeminiClient();
+      const prompt = `Anda adalah parser naskah ujian sekolah Indonesia.
+Bacalah teks berikut dan ubah menjadi butir soal terstruktur secara akurat:
+
+${text}
+
+ATURAN:
+1. Pertahankan isi teks, angka, pilihan jawaban persis seperti aslinya.
+2. Kenali nomor soal, teks pertanyaan, pilihan A/B/C/D/E, dan kunci jawaban.
+3. Output format JSON valid:
+{
+  "soalList": [
+    {
+      "nomor": 1,
+      "tipe": "pilihan_ganda | benar_salah | isian | esai",
+      "pertanyaan": "teks soal",
+      "pilihan": {
+        "A": "teks A",
+        "B": "teks B",
+        "C": "teks C",
+        "D": "teks D"
+      },
+      "kunciJawaban": "kunci",
+      "bobot": 1
+    }
+  ]
+}`;
+
+      const responseText = await generateContentWithFallback(ai, {
+        contents: prompt,
+        config: {
+          responseMimeType: "application/json",
+        },
+      });
+
+      const parsed = cleanAndParseJson(responseText);
+      const questions = (parsed.soalList || []).map((q: any, idx: number) => ({
+        id: `soal-${Date.now()}-${idx + 1}`,
+        nomor: q.nomor || idx + 1,
+        tipe: q.tipe || 'pilihan_ganda',
+        pertanyaan: q.pertanyaan || '',
+        pilihan: q.pilihan || undefined,
+        kunciJawaban: q.kunciJawaban || '',
+        bobot: Number(q.bobot) > 0 ? Number(q.bobot) : 1,
+        perluVerifikasi: !q.kunciJawaban,
+        catatanVerifikasi: !q.kunciJawaban ? 'Kunci jawaban perlu diisi' : undefined,
+      }));
+
+      res.json({
+        success: true,
+        soalList: questions,
+      });
+    } catch (err: any) {
+      console.error("API /api/ujian/parse-text-soal error:", err);
+      res.status(500).json({
+        success: false,
+        error: err.message || "Gagal memproses teks soal.",
       });
     }
   });

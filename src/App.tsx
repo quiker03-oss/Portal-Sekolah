@@ -6,7 +6,27 @@ import { AdminLayout } from './components/admin/AdminLayout';
 import { SuperAdminLogin } from './components/superadmin/SuperAdminLogin';
 import { SuperAdminDashboard } from './components/superadmin/SuperAdminDashboard';
 import { ErrorBoundary } from './components/common/ErrorBoundary';
+import { UjianSiswaView } from './components/ujian/UjianSiswaView';
 import { ShieldCheck, ArrowLeft } from 'lucide-react';
+
+const getExamIdFromUrl = (): string | null => {
+  if (typeof window === 'undefined') return null;
+  const hash = window.location.hash || '';
+  const search = window.location.search || '';
+
+  const hashMatch = hash.match(/^#(?:ujian|cbt|ujian-online)\/(.+)$/i);
+  if (hashMatch && hashMatch[1]) {
+    return decodeURIComponent(hashMatch[1]);
+  }
+
+  const params = new URLSearchParams(search);
+  const paramVal = params.get('ujian') || params.get('cbt');
+  if (paramVal) {
+    return paramVal;
+  }
+
+  return null;
+};
 
 const isSuperAdminUrl = () => {
   if (typeof window === 'undefined') return false;
@@ -30,6 +50,7 @@ const isSuperAdminUrl = () => {
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(db.getCurrentUser());
+  const [studentExamId, setStudentExamId] = useState<string | null>(() => getExamIdFromUrl());
 
   // Super Admin view & auth state
   const [isSuperAdminRoute, setIsSuperAdminRoute] = useState<boolean>(() => isSuperAdminUrl());
@@ -52,6 +73,8 @@ export default function App() {
         setIsSuperAdminRoute(true);
       }
       setIsSuperAdminAuth(hasSession);
+      const examId = getExamIdFromUrl();
+      setStudentExamId(examId);
     };
 
     window.addEventListener('hashchange', handleLocationOrAuthChange);
@@ -108,6 +131,27 @@ export default function App() {
     setIsSuperAdminRoute(true);
     window.location.hash = '#superadmin';
   };
+
+  // 0. Student Exam Portal View (When accessing via exam link or QR code)
+  if (studentExamId) {
+    return (
+      <ErrorBoundary fallbackTitle="Kendala pada Halaman Ujian Siswa">
+        <UjianSiswaView
+          ujianId={studentExamId}
+          onExit={() => {
+            setStudentExamId(null);
+            if (
+              window.location.hash.startsWith('#ujian') ||
+              window.location.hash.startsWith('#cbt') ||
+              window.location.search.includes('ujian=')
+            ) {
+              window.history.replaceState(null, '', window.location.pathname);
+            }
+          }}
+        />
+      </ErrorBoundary>
+    );
+  }
 
   // 1. Super Admin View
   if ((isSuperAdminAuth && !isSuperAdminPreviewSchool) || (isSuperAdminRoute && isSuperAdminAuth)) {

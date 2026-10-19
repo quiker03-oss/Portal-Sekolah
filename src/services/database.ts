@@ -24,6 +24,11 @@ import {
   NaskahUjianAI,
   ModulAjarAI,
   BahanAjarAI,
+  UjianOnline,
+  JawabanSiswaUjian,
+  SoalUjian,
+  RiwayatPerubahanKunci,
+  LogPelanggaranUjian,
 } from '../types';
 
 const STORAGE_KEYS = {
@@ -53,6 +58,8 @@ const STORAGE_KEYS = {
   AI_SOAL: 'sdn2_ai_soal',
   AI_MODUL: 'sdn2_ai_modul',
   AI_MATERI: 'sdn2_ai_materi',
+  UJIAN_ONLINE: 'sdn2_ujian_online',
+  JAWABAN_UJIAN: 'sdn2_jawaban_ujian',
 };
 
 // Default school emblem
@@ -928,6 +935,8 @@ class DatabaseService {
       [STORAGE_KEYS.SETTINGS]: 'settings',
       [STORAGE_KEYS.SEKOLAH]: 'sekolah',
       [STORAGE_KEYS.LANDING_CONFIG]: 'landing_config',
+      [STORAGE_KEYS.UJIAN_ONLINE]: 'ujian_online',
+      [STORAGE_KEYS.JAWABAN_UJIAN]: 'jawaban_ujian',
     };
 
     Object.entries(collectionsMap).forEach(([storageKey, colName]) => {
@@ -1176,7 +1185,7 @@ class DatabaseService {
        }
     }
 
-    if (colName === 'absensi_siswa' || colName === 'kas' || colName === 'siswa' || colName === 'guru' || colName === 'kelas' || colName === 'mapel' || colName === 'nilai' || colName === 'nilai_harian' || colName === 'catatan_rapor' || colName === 'pengumuman' || colName === 'berita' || colName === 'galeri' || colName === 'users' || colName === 'school_accounts') {
+    if (colName === 'absensi_siswa' || colName === 'kas' || colName === 'siswa' || colName === 'guru' || colName === 'kelas' || colName === 'mapel' || colName === 'nilai' || colName === 'nilai_harian' || colName === 'catatan_rapor' || colName === 'pengumuman' || colName === 'berita' || colName === 'galeri' || colName === 'users' || colName === 'school_accounts' || colName === 'ujian_online' || colName === 'jawaban_ujian') {
       if (Array.isArray(value)) {
         const previous = (this.cache.get(actualKey) as any[]) || [];
         
@@ -1408,6 +1417,18 @@ class DatabaseService {
     return list;
   }
   
+  getSiswa(): Siswa[] {
+    return this.getAllSiswaListUnfiltered();
+  }
+
+  getKelas(): Kelas[] {
+    return this.getAllKelasListUnfiltered();
+  }
+
+  getMataPelajaran(): MataPelajaran[] {
+    return this.getMapelList();
+  }
+
   getAllSiswaListUnfiltered(): Siswa[] {
     // Digunakan internal oleh backend untuk hal-hal khusus jika perlu
     return this.getItem<Siswa[]>(STORAGE_KEYS.SISWA, INITIAL_SISWA);
@@ -2844,6 +2865,563 @@ class DatabaseService {
     this.setItem(STORAGE_KEYS.AI_MATERI, updated);
     window.dispatchEvent(new CustomEvent('ai_materi_updated', { detail: updated }));
   }
+
+  // ==================== UJIAN ONLINE / CBT METHODS ====================
+
+  getUjianOnlineList(): UjianOnline[] {
+    const list = this.getItem<UjianOnline[]>(STORAGE_KEYS.UJIAN_ONLINE, []);
+    if (!list || list.length === 0) {
+      // Seed default initial exams if none exist
+      const initial = getInitialUjianOnlineList();
+      this.setItem(STORAGE_KEYS.UJIAN_ONLINE, initial);
+      return initial;
+    }
+    return list;
+  }
+
+  getUjianOnlineById(id: string): UjianOnline | undefined {
+    const list = this.getUjianOnlineList();
+    return list.find((u) => u.id === id);
+  }
+
+  saveUjianOnline(item: UjianOnline): UjianOnline {
+    const list = this.getUjianOnlineList();
+    const existingIndex = list.findIndex((u) => u.id === item.id);
+    let updated: UjianOnline[];
+    const now = new Date().toISOString();
+    const preparedItem: UjianOnline = {
+      ...item,
+      updatedAt: now,
+      createdAt: item.createdAt || now,
+    };
+
+    if (existingIndex >= 0) {
+      updated = [...list];
+      updated[existingIndex] = preparedItem;
+    } else {
+      updated = [preparedItem, ...list];
+    }
+
+    this.setItem(STORAGE_KEYS.UJIAN_ONLINE, updated);
+    window.dispatchEvent(new CustomEvent('ujian_online_updated', { detail: updated }));
+    return preparedItem;
+  }
+
+  deleteUjianOnline(id: string): void {
+    const list = this.getUjianOnlineList();
+    const updated = list.filter((u) => u.id !== id);
+    this.setItem(STORAGE_KEYS.UJIAN_ONLINE, updated);
+    window.dispatchEvent(new CustomEvent('ujian_online_updated', { detail: updated }));
+  }
+
+  duplicateUjianOnline(id: string): UjianOnline | undefined {
+    const source = this.getUjianOnlineById(id);
+    if (!source) return undefined;
+    const now = new Date().toISOString();
+    const duplicated: UjianOnline = {
+      ...source,
+      id: `cbt-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      judul: `${source.judul} (Salinan)`,
+      status: 'draf',
+      createdAt: now,
+      updatedAt: now,
+      riwayatPerubahanKunci: [],
+    };
+    return this.saveUjianOnline(duplicated);
+  }
+
+  archiveUjianOnline(id: string, diarsipkan: boolean = true): void {
+    const exam = this.getUjianOnlineById(id);
+    if (!exam) return;
+    this.saveUjianOnline({
+      ...exam,
+      status: diarsipkan ? 'diarsipkan' : 'draf',
+    });
+  }
+
+  // Student Answers (Jawaban Siswa)
+  getJawabanUjianList(ujianId?: string): JawabanSiswaUjian[] {
+    const list = this.getItem<JawabanSiswaUjian[]>(STORAGE_KEYS.JAWABAN_UJIAN, []);
+    if (ujianId) {
+      return list.filter((j) => j.ujianId === ujianId);
+    }
+    return list;
+  }
+
+  getJawabanSiswaByUjian(ujianId: string, siswaId: string): JawabanSiswaUjian | undefined {
+    const list = this.getJawabanUjianList(ujianId);
+    return list.find((j) => j.siswaId === siswaId);
+  }
+
+  saveJawabanSiswaUjian(jawaban: JawabanSiswaUjian): JawabanSiswaUjian {
+    const list = this.getItem<JawabanSiswaUjian[]>(STORAGE_KEYS.JAWABAN_UJIAN, []);
+    const existingIndex = list.findIndex(
+      (j) => j.id === jawaban.id || (j.ujianId === jawaban.ujianId && j.siswaId === jawaban.siswaId)
+    );
+    const now = new Date().toISOString();
+    const prepared: JawabanSiswaUjian = {
+      ...jawaban,
+      updatedAt: now,
+      createdAt: jawaban.createdAt || now,
+    };
+
+    let updated: JawabanSiswaUjian[];
+    if (existingIndex >= 0) {
+      updated = [...list];
+      updated[existingIndex] = prepared;
+    } else {
+      updated = [prepared, ...list];
+    }
+
+    this.setItem(STORAGE_KEYS.JAWABAN_UJIAN, updated);
+    window.dispatchEvent(new CustomEvent('jawaban_ujian_updated', { detail: updated }));
+    return prepared;
+  }
+
+  deleteJawabanSiswaUjian(id: string): void {
+    const list = this.getItem<JawabanSiswaUjian[]>(STORAGE_KEYS.JAWABAN_UJIAN, []);
+    const updated = list.filter((j) => j.id !== id);
+    this.setItem(STORAGE_KEYS.JAWABAN_UJIAN, updated);
+    window.dispatchEvent(new CustomEvent('jawaban_ujian_updated', { detail: updated }));
+  }
+
+  // ==================== METODE PENGAWASAN UJIAN (PROCTORING) ====================
+
+  catatPelanggaranSiswa(
+    ujianId: string,
+    siswaId: string,
+    pelanggaran: Omit<LogPelanggaranUjian, 'id' | 'waktu'> & { waktu?: string },
+    maxViolations: number = 3
+  ): JawabanSiswaUjian {
+    const existing = this.getJawabanSiswaByUjian(ujianId, siswaId);
+    const now = new Date().toISOString();
+    const newLogItem: LogPelanggaranUjian = {
+      id: `viol-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
+      waktu: pelanggaran.waktu || now,
+      jenis: pelanggaran.jenis,
+      deskripsi: pelanggaran.deskripsi,
+      durasiKeluarDetik: pelanggaran.durasiKeluarDetik,
+    };
+
+    let updatedSession: JawabanSiswaUjian;
+    if (existing) {
+      const logs = [...(existing.logPelanggaran || []), newLogItem];
+      const count = logs.length;
+      const shouldLock = count >= maxViolations;
+      updatedSession = {
+        ...existing,
+        jumlahPelanggaran: count,
+        logPelanggaran: logs,
+        terakhirAktif: now,
+        status: shouldLock ? 'terkunci' : existing.status,
+        terkunciOlehSistem: shouldLock ? true : existing.terkunciOlehSistem,
+        alasanTerkunci: shouldLock ? `Melebihi batas toleransi pelanggaran (${count}/${maxViolations})` : existing.alasanTerkunci,
+        waktuTerkunci: shouldLock ? now : existing.waktuTerkunci,
+      };
+    } else {
+      updatedSession = {
+        id: `ans-${ujianId}-${siswaId}`,
+        ujianId,
+        siswaId,
+        namaSiswa: '',
+        kelas: '',
+        jawaban: {},
+        waktuMulai: now,
+        status: 1 >= maxViolations ? 'terkunci' : 'sedang_mengerjakan',
+        jumlahPelanggaran: 1,
+        logPelanggaran: [newLogItem],
+        terkunciOlehSistem: 1 >= maxViolations,
+        alasanTerkunci: 1 >= maxViolations ? 'Melebihi batas toleransi pelanggaran' : undefined,
+        waktuTerkunci: 1 >= maxViolations ? now : undefined,
+        terakhirAktif: now,
+        createdAt: now,
+        updatedAt: now,
+      };
+    }
+
+    return this.saveJawabanSiswaUjian(updatedSession);
+  }
+
+  bukaKunciSesiSiswa(ujianId: string, siswaId: string): JawabanSiswaUjian | undefined {
+    const existing = this.getJawabanSiswaByUjian(ujianId, siswaId);
+    if (!existing) return undefined;
+    const now = new Date().toISOString();
+    const updated: JawabanSiswaUjian = {
+      ...existing,
+      status: 'sedang_mengerjakan',
+      terkunciOlehSistem: false,
+      dibukaOlehGuru: true,
+      alasanTerkunci: undefined,
+      waktuTerkunci: undefined,
+      terakhirAktif: now,
+      updatedAt: now,
+    };
+    return this.saveJawabanSiswaUjian(updated);
+  }
+
+  resetSesiSiswa(ujianId: string, siswaId: string): void {
+    const list = this.getItem<JawabanSiswaUjian[]>(STORAGE_KEYS.JAWABAN_UJIAN, []);
+    const updated = list.filter((j) => !(j.ujianId === ujianId && j.siswaId === siswaId));
+    this.setItem(STORAGE_KEYS.JAWABAN_UJIAN, updated);
+    window.dispatchEvent(new CustomEvent('jawaban_ujian_updated', { detail: updated }));
+    try {
+      localStorage.removeItem(`draft_ujian_${ujianId}_${siswaId}`);
+    } catch {}
+  }
+
+  gradeJawabanSiswa(
+    ujian: UjianOnline,
+    jawabanMap: { [soalId: string]: { jawabanDipilih: string; nilaiEsai?: number } }
+  ): {
+    nilaiAkhir: number;
+    jumlahBenar: number;
+    jumlahSalah: number;
+    jumlahKosong: number;
+    lulusKkm: boolean;
+    adaEsaiBelumDinilai: boolean;
+    detailWithScores: { [soalId: string]: any };
+  } {
+    let totalPoinDiperoleh = 0;
+    let totalBobotMaksimal = 0;
+    let jumlahBenar = 0;
+    let jumlahSalah = 0;
+    let jumlahKosong = 0;
+    let adaEsaiBelumDinilai = false;
+    const detailWithScores: { [soalId: string]: any } = {};
+
+    ujian.soalList.forEach((soal) => {
+      const bobot = Number(soal.bobot) > 0 ? Number(soal.bobot) : 1;
+      totalBobotMaksimal += bobot;
+      const resp = jawabanMap[soal.id];
+      const jawabanUser = resp?.jawabanDipilih ? String(resp.jawabanDipilih).trim() : '';
+
+      if (!jawabanUser) {
+        jumlahKosong++;
+        detailWithScores[soal.id] = {
+          jawabanDipilih: '',
+          isBenar: false,
+          skorDidapat: 0,
+        };
+        return;
+      }
+
+      if (soal.tipe === 'pilihan_ganda' || soal.tipe === 'benar_salah') {
+        const isMatch =
+          jawabanUser.toUpperCase() === String(soal.kunciJawaban || '').trim().toUpperCase();
+        if (isMatch) {
+          jumlahBenar++;
+          totalPoinDiperoleh += bobot;
+          detailWithScores[soal.id] = {
+            jawabanDipilih: jawabanUser,
+            isBenar: true,
+            skorDidapat: bobot,
+          };
+        } else {
+          jumlahSalah++;
+          detailWithScores[soal.id] = {
+            jawabanDipilih: jawabanUser,
+            isBenar: false,
+            skorDidapat: 0,
+          };
+        }
+      } else if (soal.tipe === 'isian') {
+        const cleanedUser = jawabanUser.toLowerCase().replace(/\s+/g, ' ');
+        const cleanedKunci = String(soal.kunciJawaban || '').toLowerCase().replace(/\s+/g, ' ');
+        // Allow flexible keyword checking or multiple variants separated by comma or semicolon
+        const validVariants = cleanedKunci.split(/[,;/|]/).map((k) => k.trim()).filter(Boolean);
+        const isMatch = validVariants.some((v) => cleanedUser === v || cleanedUser.includes(v));
+
+        if (isMatch) {
+          jumlahBenar++;
+          totalPoinDiperoleh += bobot;
+          detailWithScores[soal.id] = {
+            jawabanDipilih: jawabanUser,
+            isBenar: true,
+            skorDidapat: bobot,
+          };
+        } else {
+          jumlahSalah++;
+          detailWithScores[soal.id] = {
+            jawabanDipilih: jawabanUser,
+            isBenar: false,
+            skorDidapat: 0,
+          };
+        }
+      } else if (soal.tipe === 'esai') {
+        // Essay questions: check if teacher has manually assigned a score
+        const skorEsai = typeof resp.nilaiEsai === 'number' ? resp.nilaiEsai : undefined;
+        if (skorEsai !== undefined) {
+          totalPoinDiperoleh += skorEsai;
+          if (skorEsai >= bobot / 2) {
+            jumlahBenar++;
+          } else {
+            jumlahSalah++;
+          }
+          detailWithScores[soal.id] = {
+            jawabanDipilih: jawabanUser,
+            nilaiEsai: skorEsai,
+            dinilaiOlehGuru: true,
+            skorDidapat: skorEsai,
+          };
+        } else {
+          adaEsaiBelumDinilai = true;
+          detailWithScores[soal.id] = {
+            jawabanDipilih: jawabanUser,
+            dinilaiOlehGuru: false,
+            skorDidapat: 0,
+          };
+        }
+      }
+    });
+
+    const nilaiAkhir =
+      totalBobotMaksimal > 0
+        ? Math.round((totalPoinDiperoleh / totalBobotMaksimal) * 100)
+        : 0;
+
+    const kkm = Number(ujian.kkm) || 75;
+    const lulusKkm = nilaiAkhir >= kkm;
+
+    return {
+      nilaiAkhir,
+      jumlahBenar,
+      jumlahSalah,
+      jumlahKosong,
+      lulusKkm,
+      adaEsaiBelumDinilai,
+      detailWithScores,
+    };
+  }
+
+  // Recalculates student scores transparently if teacher edits an answer key post-exam
+  updateKunciJawabanUjian(
+    ujianId: string,
+    nomorSoal: number,
+    kunciBaru: string,
+    diubahOleh: string,
+    keterangan: string
+  ): UjianOnline | undefined {
+    const exam = this.getUjianOnlineById(ujianId);
+    if (!exam) return undefined;
+
+    const soalIndex = exam.soalList.findIndex((s) => s.nomor === nomorSoal);
+    if (soalIndex === -1) return undefined;
+
+    const kunciLama = exam.soalList[soalIndex].kunciJawaban;
+    if (kunciLama === kunciBaru) return exam;
+
+    const updatedSoalList = [...exam.soalList];
+    updatedSoalList[soalIndex] = {
+      ...updatedSoalList[soalIndex],
+      kunciJawaban: kunciBaru,
+    };
+
+    const riwayatLog: RiwayatPerubahanKunci = {
+      id: `rev-${Date.now()}`,
+      tanggal: new Date().toISOString(),
+      diubahOleh,
+      keterangan: keterangan || 'Koreksi kunci jawaban setelah evaluasi',
+      nomorSoal,
+      kunciLama,
+      kunciBaru,
+    };
+
+    const updatedExam: UjianOnline = {
+      ...exam,
+      soalList: updatedSoalList,
+      riwayatPerubahanKunci: [riwayatLog, ...(exam.riwayatPerubahanKunci || [])],
+      updatedAt: new Date().toISOString(),
+    };
+
+    this.saveUjianOnline(updatedExam);
+
+    // Audit and recalculate all existing submissions for this exam!
+    const submissions = this.getJawabanUjianList(ujianId);
+    submissions.forEach((sub) => {
+      if (sub.status === 'selesai' || sub.status === 'waktu_habis') {
+        const regraded = this.gradeJawabanSiswa(updatedExam, sub.jawaban);
+        const mergedJawaban: { [soalId: string]: any } = {};
+        Object.keys(sub.jawaban).forEach((soalId) => {
+          mergedJawaban[soalId] = {
+            ...sub.jawaban[soalId],
+            ...regraded.detailWithScores[soalId],
+          };
+        });
+
+        this.saveJawabanSiswaUjian({
+          ...sub,
+          nilaiAkhir: regraded.nilaiAkhir,
+          jumlahBenar: regraded.jumlahBenar,
+          jumlahSalah: regraded.jumlahSalah,
+          jumlahKosong: regraded.jumlahKosong,
+          lulusKkm: regraded.lulusKkm,
+          adaEsaiBelumDinilai: regraded.adaEsaiBelumDinilai,
+          jawaban: mergedJawaban,
+          catatanGuru: `${sub.catatanGuru ? sub.catatanGuru + ' | ' : ''}Nilai dikalkulasi ulang pada ${new Date().toLocaleDateString('id-ID')} karena revisi kunci soal #${nomorSoal}`,
+        });
+      }
+    });
+
+    return updatedExam;
+  }
+}
+
+// Initial Sample Exam Data generator
+function getInitialUjianOnlineList(): UjianOnline[] {
+  const now = new Date();
+  const startTime = new Date(now.getTime() - 2 * 60 * 60 * 1000).toISOString().slice(0, 16);
+  const endTime = new Date(now.getTime() + 72 * 60 * 60 * 1000).toISOString().slice(0, 16);
+
+  return [
+    {
+      id: 'cbt-ipas-01',
+      judul: 'Penilaian Akhir Semester (PAS) - Ilmu Pengetahuan Alam dan Sosial (IPAS)',
+      deskripsi: 'Ujian Asesmen Sumatif Akhir Semester IPAS Kelas 5. Jawablah soal dengan jujur, teliti, dan seksama.',
+      mataPelajaran: 'Ilmu Pengetahuan Alam dan Sosial (IPAS)',
+      mapelId: 'mp-ipas',
+      guruId: 'tch-2',
+      guruNama: 'Budi Santoso, S.Pd.',
+      kelasTarget: ['Kelas 5'],
+      semester: 'Genap',
+      tahunAjaran: '2024/2025',
+      jenisUjian: 'Penilaian Akhir Semester (PAS/SAS)',
+      status: 'aktif',
+      tanggalMulai: startTime,
+      tanggalSelesai: endTime,
+      durasiMenit: 60,
+      jumlahPercobaan: 1,
+      acakSoal: true,
+      acakPilihan: true,
+      tampilkanNilaiLangsung: true,
+      tampilkanPembahasan: 'setelah_ujian',
+      kodeUjian: 'PAS5',
+      kkm: 75,
+      modeTampilan: 'terstruktur',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      soalList: [
+        {
+          id: 's-1',
+          nomor: 1,
+          tipe: 'pilihan_ganda',
+          pertanyaan: 'Perhatikan gambar rantai makanan ekosistem sawah berikut. Organisme manakah yang berperan sebagai produsen utama?',
+          gambar: 'https://images.unsplash.com/photo-1500382017468-9049fed747ef?auto=format&fit=crop&w=800&q=80',
+          gambarCaption: 'Gambar 1: Hamparan ekosistem sawah tempat interaksi biotik dan abiotik',
+          pilihan: {
+            A: 'Padi',
+            B: 'Belalang',
+            C: 'Katak sawah',
+            D: 'Ular sawah',
+          },
+          kunciJawaban: 'A',
+          pembahasan: 'Padi berperan sebagai produsen karena mampu menghasilkan makanan sendiri melalui proses fotosintesis dengan bantuan sinar matahari.',
+          bobot: 1,
+        },
+        {
+          id: 's-2',
+          nomor: 2,
+          tipe: 'pilihan_ganda',
+          pertanyaan: 'Bagian mata yang berfungsi mengatur jumlah cahaya yang masuk ke dalam bola mata adalah...',
+          pilihan: {
+            A: 'Kornea',
+            B: 'Pupil dan Iris',
+            C: 'Retina',
+            D: 'Lensa mata',
+          },
+          kunciJawaban: 'B',
+          pembahasan: 'Iris memberi warna pada mata dan mengontrol ukuran pupil untuk mengatur intensitas cahaya yang masuk ke mata.',
+          bobot: 1,
+        },
+        {
+          id: 's-3',
+          nomor: 3,
+          tipe: 'benar_salah',
+          pertanyaan: 'Cahaya merambat lurus dan dapat dipantulkan apabila mengenai permukaan benda yang mengilap seperti cermin.',
+          pilihan: {
+            Benar: 'Benar',
+            Salah: 'Salah',
+          },
+          kunciJawaban: 'Benar',
+          pembahasan: 'Sifat dasar cahaya antara lain merambat lurus, menembus benda bening, serta dapat dipantulkan dan dibiaskan.',
+          bobot: 1,
+        },
+        {
+          id: 's-4',
+          nomor: 4,
+          tipe: 'isian',
+          pertanyaan: 'Peristiwa perpindahan panas matahari sampai ke bumi melalui ruang hampa tanpa perantara zat cair maupun gas disebut perpindahan secara...',
+          kunciJawaban: 'radiasi',
+          pembahasan: 'Radiasi adalah perpindahan panas melalui pancaran gelombang elektromagnetik tanpa memerlukan zat perantara.',
+          bobot: 1,
+        },
+        {
+          id: 's-5',
+          nomor: 5,
+          tipe: 'esai',
+          pertanyaan: 'Jelaskan 3 (tiga) upaya nyata yang dapat dilakukan oleh siswa di lingkungan sekolah untuk menjaga kelestarian lingkungan dan mencegah pencemaran sampah plastik!',
+          kunciJawaban: '1. Membawa tempat makan dan botol minum (tumbler) sendiri dari rumah. 2. Memilah sampah organik dan anorganik pada tempat sampah yang sesuai. 3. Melakukan aksi pungut sampah dan daur ulang limbah plastik menjadi kreasi kerajinan tangan.',
+          pembahasan: 'Jawaban dinilai berdasarkan kelogisan, relevansi dengan lingkungan sekolah, dan kesadaran lingkungan siswa.',
+          bobot: 2,
+        },
+      ],
+    },
+    {
+      id: 'cbt-mat-02',
+      judul: 'Ulangan Harian Matematika - Pecahan & Pengukuran',
+      deskripsi: 'Ulangan Harian Matematika Materi Operasi Hitung Pecahan Biasa dan Campuran.',
+      mataPelajaran: 'Matematika',
+      guruId: 'tch-2',
+      guruNama: 'Budi Santoso, S.Pd.',
+      kelasTarget: ['Kelas 5', 'Kelas 6'],
+      semester: 'Genap',
+      tahunAjaran: '2024/2025',
+      jenisUjian: 'Ulangan Harian',
+      status: 'terjadwal',
+      tanggalMulai: new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString().slice(0, 16),
+      tanggalSelesai: new Date(now.getTime() + 96 * 60 * 60 * 1000).toISOString().slice(0, 16),
+      durasiMenit: 45,
+      jumlahPercobaan: 1,
+      acakSoal: true,
+      acakPilihan: true,
+      tampilkanNilaiLangsung: true,
+      tampilkanPembahasan: 'setelah_jadwal_selesai',
+      kodeUjian: 'MTK56',
+      kkm: 75,
+      modeTampilan: 'terstruktur',
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      soalList: [
+        {
+          id: 'm-1',
+          nomor: 1,
+          tipe: 'pilihan_ganda',
+          pertanyaan: 'Hasil dari 3/4 + 1/2 adalah...',
+          pilihan: {
+            A: '4/6',
+            B: '5/4 atau 1 1/4',
+            C: '3/8',
+            D: '2/4',
+          },
+          kunciJawaban: 'B',
+          bobot: 1,
+        },
+        {
+          id: 'm-2',
+          nomor: 2,
+          tipe: 'pilihan_ganda',
+          pertanyaan: 'Sebuah kolam berbentuk persegi panjang dengan panjang 12 meter dan lebar 8 meter. Keliling kolam tersebut adalah...',
+          pilihan: {
+            A: '20 meter',
+            B: '40 meter',
+            C: '96 meter',
+            D: '48 meter',
+          },
+          kunciJawaban: 'B',
+          bobot: 1,
+        },
+      ],
+    },
+  ];
 }
 
 export const db = new DatabaseService();

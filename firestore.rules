@@ -24,7 +24,10 @@ service cloud.firestore {
         'landing_config',
         'school_accounts',
         'superadmin_user',
-        'superadmin_logs'
+        'superadmin_logs',
+        'ujian_online',
+        'jawaban_ujian',
+        'log_ujian'
       ];
     }
   }

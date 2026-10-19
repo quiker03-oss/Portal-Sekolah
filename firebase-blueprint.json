@@ -63,6 +63,31 @@
         "jumlah": { "type": "number" },
         "kategori": { "type": "string" }
       }
+    },
+    "UjianOnline": {
+      "title": "UjianOnline",
+      "description": "Online exam definition and questions",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "schoolId": { "type": "string" },
+        "judul": { "type": "string" },
+        "mataPelajaran": { "type": "string" },
+        "status": { "type": "string" }
+      }
+    },
+    "JawabanSiswaUjian": {
+      "title": "JawabanSiswaUjian",
+      "description": "Student exam submissions and scores",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "schoolId": { "type": "string" },
+        "ujianId": { "type": "string" },
+        "siswaId": { "type": "string" },
+        "status": { "type": "string" },
+        "nilaiAkhir": { "type": "number" }
+      }
     }
   },
   "firestore": {
@@ -85,6 +110,14 @@
     "/schools/{schoolId}/kas/{kasId}": {
       "schema": { "$ref": "#/entities/TransaksiKas" },
       "description": "Cash transactions"
+    },
+    "/schools/{schoolId}/ujian_online/{ujianId}": {
+      "schema": { "$ref": "#/entities/UjianOnline" },
+      "description": "Online exams"
+    },
+    "/schools/{schoolId}/jawaban_ujian/{jawabanId}": {
+      "schema": { "$ref": "#/entities/JawabanSiswaUjian" },
+      "description": "Exam submissions"
     }
   }
 }
