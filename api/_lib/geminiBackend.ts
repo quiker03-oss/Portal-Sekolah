@@ -18,11 +18,10 @@ export function getGeminiClient(): GoogleGenAI {
   });
 }
 
-// Reliable, high-throughput models prioritizing ultra-fast models to prevent 503 high demand spikes
+// Reliable, high-throughput models prioritizing gemini-3.8-flash and official fallbacks
 export const AI_FALLBACK_MODELS = [
-  "gemini-3.1-flash-lite",
-  "gemini-3.6-flash",
   "gemini-3.8-flash",
+  "gemini-3.1-flash-lite",
   "gemini-flash-latest",
 ];
 
@@ -541,57 +540,161 @@ Kriteria Kualitas Soal:
   };
 }
 
-// 5. Core handler: Buat Modul Ajar AI
 export async function handleBuatModul(body: any) {
   const {
+    jenisDokumen = "Modul Ajar",
+    kurikulum = "Kurikulum Merdeka",
+    jenjang = "SD",
     mataPelajaran = "IPAS",
     faseKelas = "Fase B (Kelas 4)",
+    tahunAjaran = "2025/2026",
+    semester = "Ganjil",
     alokasiWaktu = "2 x 35 Menit (1 Pertemuan)",
     topikMateri = "",
+    capaianPembelajaran = "",
     profilPancasila = ["Bernalar Kritis", "Gotong Royong", "Mandiri"],
+    modelPembelajaran = "Problem Based Learning (PBL)",
+    metodePendekatan = "Pendekatan Saintifik & Pembelajaran Berdiferensiasi",
+    saranaPrasarana = "Buku Panduan Guru, Buku Siswa, LCD Proyektor, Lembar Kerja Siswa",
+    targetPesertaDidik = "Peserta Didik Reguler / Tipikal (Heterogen)",
     instruksiTambahan = "",
   } = body || {};
 
   const ai = getGeminiClient();
 
-  const prompt = `Anda adalah pakar penyusun Modul Ajar Kurikulum Merdeka di Indonesia.
-Rancanglah sebuah Modul Ajar / Rencana Pelaksanaan Pembelajaran (RPP Plus) yang komprehensif, inspiratif, dan siap digunakan guru di kelas:
+  const isK13 = kurikulum === "Kurikulum 2013";
+
+  const prompt = isK13
+    ? `Anda adalah instruktur pakar kurikulum resmi Indonesia untuk RPP Kurikulum 2013 (K13) sesuai Permendikbud No. 22 Tahun 2016 dan SE Mendikbud No. 14 Tahun 2019 (RPP Efektif & Efisien).
+Rancanglah dokumen RPP resmi profesional lengkap siap cetak dan siap ajar untuk guru:
+- Jenis Dokumen: ${jenisDokumen}
+- Kurikulum: Kurikulum 2013 (K13)
+- Jenjang: ${jenjang} | Kelas/Semester: ${faseKelas} / ${semester}
+- Tahun Ajaran: ${tahunAjaran}
 - Mata Pelajaran: ${mataPelajaran}
-- Fase & Kelas: ${faseKelas}
+- Materi Pokok/Topik: ${topikMateri}
 - Alokasi Waktu: ${alokasiWaktu}
-- Topik / Materi Pembelajaran: ${topikMateri}
-- Target Dimensi Profil Pelajar Pancasila: ${Array.isArray(profilPancasila) ? profilPancasila.join(", ") : profilPancasila}
-${instruksiTambahan ? `- Instruksi Tambahan Guru: ${instruksiTambahan}` : ""}
+- Model Pembelajaran: ${modelPembelajaran}
+- Metode & Pendekatan: ${metodePendekatan}
+- Sarana / Media / Sumber: ${saranaPrasarana}
+${capaianPembelajaran ? `- KD / IPK Acuan: ${capaianPembelajaran}` : ""}
+${instruksiTambahan ? `- Catatan Khusus Guru: ${instruksiTambahan}` : ""}
 
-Struktur Modul Wajib Terdiri Dari:
-1. Judul & Informasi Umum
-2. Target Dimensi Profil Pelajar Pancasila
-3. Tujuan Pembelajaran (spesifik & terukur)
-4. Pemahaman Bermakna & Pertanyaan Pemantik
-5. Alur Kegiatan Pembelajaran (Pendahuluan, Kegiatan Inti berpusat pada murid / student-centered, dan Penutup)
-6. Asesmen Pembelajaran (Diagnostik, Formatif, dan Sumatif)
-7. Ringkasan Lembar Kerja Peserta Didik (LKPD) ringkas untuk latihan siswa di kelas.
+Pedoman Standar Isi RPP K13:
+1. Identitas Sekolah & Mata Pelajaran
+2. Kompetensi Inti (KI 1, KI 2, KI 3, KI 4) yang relevan
+3. Kompetensi Dasar (KD) dan Indikator Pencapaian Kompetensi (IPK) berbasis KKO Taksonomi Bloom
+4. Tujuan Pembelajaran dirumuskan dengan kaidah ABCD (Audience, Behavior, Condition, Degree)
+5. Materi Pembelajaran (Fakta, Konsep, Prinsip, Prosedur)
+6. Langkah-Langkah Pembelajaran: Pendahuluan, Inti (sintaks ${modelPembelajaran} dan pendekatan saintifik: Mengamati, Menanya, Mengumpulkan Informasi, Menalar, Mengomunikasikan), Penutup & Doa.
+7. Penilaian Hasil Belajar mencakup 3 Ranah: Sikap (Observasi/Jurnal), Pengetahuan (Tes Tulis/Lisan), Keterampilan (Kinerja/Praktik/Proyek) beserta Rubrik Penskoran.
+8. Remedial & Pengayaan
+9. Lembar Kerja Siswa (LKS) Ringkas.
 
-Format output WAJIB JSON yang valid sesuai skema berikut tanpa teks tambahan di luar JSON:
+Format WAJIB JSON murni tanpa markdown pembungkus di luar JSON:
 {
-  "judul": "string",
-  "faseKelas": "string",
-  "alokasiWaktu": "string",
-  "targetProfilPelajar": ["string"],
-  "tujuanPembelajaran": ["string"],
-  "pemahamanBermakna": "string",
-  "pertanyaanPemantik": ["string"],
+  "judul": "string judul resmi RPP",
+  "jenisDokumen": "${jenisDokumen}",
+  "kurikulum": "Kurikulum 2013",
+  "jenjang": "${jenjang}",
+  "faseKelas": "${faseKelas}",
+  "tahunAjaran": "${tahunAjaran}",
+  "semester": "${semester}",
+  "alokasiWaktu": "${alokasiWaktu}",
+  "mataPelajaran": "${mataPelajaran}",
+  "capaianPembelajaran": "string ringkasan KI & KD yang disasar",
+  "targetProfilPelajar": ["Nasionalis", "Religius", "Gotong Royong", "Integritas", "Mandiri"],
+  "modelPembelajaran": "${modelPembelajaran}",
+  "metodePendekatan": "${metodePendekatan}",
+  "saranaPrasarana": ["${saranaPrasarana}"],
+  "tujuanPembelajaran": ["string butir tujuan pembelajaran kaidah ABCD"],
+  "pemahamanBermakna": "string manfaat materi dalam kehidupan sehari-hari",
+  "pertanyaanPemantik": ["string pertanyaan pemantik"],
+  "diferensiasi": {
+    "konten": "string penyesuaian materi bagi siswa cepat dan butuh bimbingan",
+    "proses": "string pendampingan bertingkat",
+    "produk": "string unjuk kerja atau hasil belajar alternatif"
+  },
   "kegiatanPembelajaran": {
-    "pendahuluan": ["string langkah-langkah"],
-    "inti": ["string langkah-langkah eksplorasi dan kolaborasi"],
-    "penutup": ["string refleksi dan apresiasi"]
+    "pendahuluan": ["string langkah pendahuluan lengkap"],
+    "inti": ["string langkah inti runtut sesuai sintaks"],
+    "penutup": ["string langkah penutup, refleksi, tugas"]
   },
   "asesmen": {
-    "diagnostik": "string",
-    "formatif": "string",
-    "sumatif": "string"
+    "diagnostik": "string teknik penilaian kemampuan awal",
+    "formatif": "string penilaian proses, sikap, dan keaktifan",
+    "sumatif": "string penilaian pengetahuan di akhir pembelajaran",
+    "rubrik": "string kriteria rubrik penskoran 1-4"
   },
-  "lembarKerjaRingkas": "string (isi tugas atau LKPD singkat)"
+  "pengayaanRemedial": "string instruksi remedial bagi siswa belum tuntas dan pengayaan bagi yang tuntas",
+  "refleksiGuruSiswa": "string butir pertanyaan refleksi guru dan refleksi murid",
+  "lembarKerjaRingkas": "string isi naskah LKS ringkas untuk siswa"
+}`
+    : `Anda adalah widyaprada & pakar pengembang Modul Ajar Kurikulum Merdeka resmi di Kemendikbudristek Indonesia sesuai Permendikbudristek No. 12 Tahun 2024 dan panduan pembelajaran & asesmen terbaru.
+Rancanglah dokumen Modul Ajar / Perangkat Ajar Kurikulum Merdeka yang komprehensif, operasional, berpusat pada murid (student-centered), dan siap digunakan guru di kelas:
+- Jenis Dokumen: ${jenisDokumen}
+- Kurikulum: Kurikulum Merdeka
+- Jenjang: ${jenjang} | Fase & Kelas: ${faseKelas}
+- Tahun Ajaran: ${tahunAjaran} | Semester: ${semester}
+- Mata Pelajaran: ${mataPelajaran}
+- Topik / Materi Pembelajaran: ${topikMateri}
+- Alokasi Waktu: ${alokasiWaktu}
+- Dimensi Profil Pelajar Pancasila: ${Array.isArray(profilPancasila) ? profilPancasila.join(", ") : profilPancasila}
+- Model Pembelajaran: ${modelPembelajaran}
+- Metode & Pendekatan: ${metodePendekatan}
+- Sarana dan Prasarana: ${saranaPrasarana}
+- Target Peserta Didik: ${targetPesertaDidik}
+${capaianPembelajaran ? `- Capaian Pembelajaran (CP) / Elemen Acuan: ${capaianPembelajaran}` : ""}
+${instruksiTambahan ? `- Instruksi Tambahan Guru: ${instruksiTambahan}` : ""}
+
+Ketentuan Resmi Komponen Modul Ajar Kurikulum Merdeka:
+1. Informasi Umum: Identitas, Kompetensi Awal, Profil Pelajar Pancasila (6 Dimensi), Sarana & Prasarana, Target Peserta Didik, Model Pembelajaran.
+2. Komponen Inti: Capaian Pembelajaran Elemen, Tujuan Pembelajaran (spesifik, terukur, bermakna), Pemahaman Bermakna, Pertanyaan Pemantik.
+3. Pembelajaran Berdiferensiasi nyata (Diferensiasi Konten, Diferensiasi Proses, Diferensiasi Produk).
+4. Kegiatan Pembelajaran: Pendahuluan, Inti (langkah konkret sintaks ${modelPembelajaran}), Penutup & Refleksi.
+5. Asesmen Berkelanjutan: Asesmen Awal (Diagnostik), Asesmen Formatif (selama proses), Asesmen Sumatif (akhir lingkup materi), dilengkapi Rubrik Kriteria Ketercapaian Tujuan Pembelajaran (KKTP).
+6. Pengayaan & Remedial yang terencana.
+7. Refleksi Guru dan Refleksi Peserta Didik.
+8. Lampiran: Lembar Kerja Peserta Didik (LKPD) yang aplikatif.
+
+Format WAJIB JSON murni tanpa markdown pembungkus di luar JSON:
+{
+  "judul": "string judul resmi Modul Ajar",
+  "jenisDokumen": "${jenisDokumen}",
+  "kurikulum": "Kurikulum Merdeka",
+  "jenjang": "${jenjang}",
+  "faseKelas": "${faseKelas}",
+  "tahunAjaran": "${tahunAjaran}",
+  "semester": "${semester}",
+  "alokasiWaktu": "${alokasiWaktu}",
+  "mataPelajaran": "${mataPelajaran}",
+  "capaianPembelajaran": "string CP / elemen acuan resmi",
+  "targetProfilPelajar": ["${Array.isArray(profilPancasila) ? profilPancasila.join('", "') : profilPancasila}"],
+  "modelPembelajaran": "${modelPembelajaran}",
+  "metodePendekatan": "${metodePendekatan}",
+  "saranaPrasarana": ["${saranaPrasarana}"],
+  "tujuanPembelajaran": ["string butir tujuan pembelajaran terukur"],
+  "pemahamanBermakna": "string konsep kunci bermakna",
+  "pertanyaanPemantik": ["string butir pertanyaan pemantik memancing nalar"],
+  "diferensiasi": {
+    "konten": "string diferensiasi bahan ajar",
+    "proses": "string diferensiasi bimbingan belajar bertahap",
+    "produk": "string ragam unjuk hasil belajar peserta didik"
+  },
+  "kegiatanPembelajaran": {
+    "pendahuluan": ["string langkah pendahuluan berkesan"],
+    "inti": ["string langkah inti eksplorasi, kolaborasi, dan presentasi"],
+    "penutup": ["string langkah penutup dan apresiasi"]
+  },
+  "asesmen": {
+    "diagnostik": "string asesmen awal kognitif / non-kognitif",
+    "formatif": "string lembar observasi partisipasi & latihan",
+    "sumatif": "string tes tertulis / performa akhir lingkup materi",
+    "rubrik": "string rubrik KKTP interval nilai atau deskripsi kriteria"
+  },
+  "pengayaanRemedial": "string rencana bimbingan remedial dan pengayaan",
+  "refleksiGuruSiswa": "string panduan refleksi guru dan siswa",
+  "lembarKerjaRingkas": "string naskah LKPD lengkap dengan instruksi aktivitas siswa"
 }`;
 
   const responseText = await generateContentWithFallback(ai, {

@@ -27,8 +27,22 @@ service cloud.firestore {
         'superadmin_logs',
         'ujian_online',
         'jawaban_ujian',
-        'log_ujian'
+        'log_ujian',
+        'ai_soal',
+        'ai_modul',
+        'ai_materi'
       ];
+    }
+
+    // Allow collection group queries and direct lookups for online exams and submissions
+    match /{path=**}/ujian_online/{docId} {
+      allow read: if true;
+      allow write: if true;
+    }
+    match /{path=**}/jawaban_ujian/{docId} {
+      allow read: if true;
+      allow write: if true;
     }
   }
 }
+

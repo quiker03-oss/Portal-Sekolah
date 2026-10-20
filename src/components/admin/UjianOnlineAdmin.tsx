@@ -61,6 +61,7 @@ import {
   Radio,
   UserX,
 } from 'lucide-react';
+import { PrintRekapModal } from './PrintRekapModal';
 
 interface UjianOnlineAdminProps {
   currentUser: User;
@@ -73,6 +74,7 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
   // Exam list data & filter
   const [ujianList, setUjianList] = useState<UjianOnline[]>([]);
   const [selectedFilterStatus, setSelectedFilterStatus] = useState<string>('semua');
+  const [showPrintRekapModal, setShowPrintRekapModal] = useState<boolean>(false);
   const [selectedFilterKelas, setSelectedFilterKelas] = useState<string>('semua');
   const [searchExamQuery, setSearchExamQuery] = useState<string>('');
 
@@ -150,7 +152,9 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
     };
 
     window.addEventListener('ujian_online_updated', handleDataUpdate);
+    window.addEventListener('data_ujian_online_changed', handleDataUpdate);
     window.addEventListener('jawaban_ujian_updated', handleDataUpdate);
+    window.addEventListener('data_jawaban_ujian_changed', handleDataUpdate);
 
     // Auto-polling for proctoring monitoring
     const proctorInterval = setInterval(() => {
@@ -161,7 +165,9 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
 
     return () => {
       window.removeEventListener('ujian_online_updated', handleDataUpdate);
+      window.removeEventListener('data_ujian_online_changed', handleDataUpdate);
       window.removeEventListener('jawaban_ujian_updated', handleDataUpdate);
+      window.removeEventListener('data_jawaban_ujian_changed', handleDataUpdate);
       clearInterval(proctorInterval);
     };
   }, [rekapUjianTarget, pengawasanUjianTarget, view]);
@@ -186,7 +192,8 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
   // Render QR Code in modal whenever target changes
   useEffect(() => {
     if (showShareModal && shareUjianTarget && qrCanvasRef.current) {
-      const examUrl = `${window.location.origin}/#ujian/${shareUjianTarget.id}`;
+      const schoolId = shareUjianTarget.schoolId || db.getActiveSchoolId();
+      const examUrl = `${window.location.origin}/#ujian/${shareUjianTarget.id}?school=${schoolId}`;
       QRCode.toCanvas(qrCanvasRef.current, examUrl, {
         width: 220,
         margin: 2,
@@ -285,7 +292,7 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
   };
 
   // Handle save exam
-  const handleSaveExam = (statusToSave?: StatusUjian) => {
+  const handleSaveExam = async (statusToSave?: StatusUjian) => {
     if (!activeUjian) return;
     if (!activeUjian.judul.trim()) {
       alert('Judul ujian tidak boleh kosong.');
@@ -300,39 +307,41 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
       return;
     }
 
+    const schoolId = activeUjian.schoolId || db.getActiveSchoolId();
     const examToSave: UjianOnline = {
       ...activeUjian,
+      schoolId,
       status: statusToSave || activeUjian.status || 'aktif',
     };
 
-    db.saveUjianOnline(examToSave);
+    await db.saveUjianOnline(examToSave);
     loadAllData();
     setView('list');
     setActiveUjian(null);
   };
 
   // Handle duplicate exam
-  const handleDuplicateExam = (id: string) => {
+  const handleDuplicateExam = async (id: string) => {
     if (confirm('Duplikasi naskah ujian ini sebagai draf baru?')) {
-      db.duplicateUjianOnline(id);
+      await db.duplicateUjianOnline(id);
       loadAllData();
     }
   };
 
   // Handle archive exam
-  const handleArchiveExam = (id: string, isArchived: boolean) => {
-    db.archiveUjianOnline(id, isArchived);
+  const handleArchiveExam = async (id: string, isArchived: boolean) => {
+    await db.archiveUjianOnline(id, isArchived);
     loadAllData();
   };
 
   // Handle delete exam
-  const handleDeleteExam = (id: string, judul: string) => {
+  const handleDeleteExam = async (id: string, judul: string) => {
     if (
       confirm(
         `Apakah Anda yakin ingin menghapus ujian "${judul}"? Seluruh data hasil ujian siswa terkait juga akan terhapus.`
       )
     ) {
-      db.deleteUjianOnline(id);
+      await db.deleteUjianOnline(id);
       loadAllData();
     }
   };
@@ -347,7 +356,8 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
   // Copy link
   const handleCopyLink = () => {
     if (!shareUjianTarget) return;
-    const url = `${window.location.origin}/#ujian/${shareUjianTarget.id}`;
+    const schoolId = shareUjianTarget.schoolId || db.getActiveSchoolId();
+    const url = `${window.location.origin}/#ujian/${shareUjianTarget.id}?school=${schoolId}`;
     navigator.clipboard.writeText(url);
     setCopyFeedback(true);
     setTimeout(() => setCopyFeedback(false), 2000);
@@ -580,12 +590,9 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
   const handleChangeImportKey = (idx: number, newKey: string) => {
     if (!importResult) return;
     const updated = [...importResult.soalList];
-    updated[idx] = {
-      ...updated[idx],
-      kunciJawaban: newKey,
-      perluVerifikasi: false,
-      catatanVerifikasi: undefined,
-    };
+    const item = { ...updated[idx], kunciJawaban: newKey, perluVerifikasi: false };
+    delete item.catatanVerifikasi;
+    updated[idx] = item;
     setImportResult({ ...importResult, soalList: updated });
   };
 
@@ -598,13 +605,17 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
       nomor: idx + 1,
     }));
 
+    // Avoid storing massive base64 in the exam document which causes Firestore setDoc to exceed 1MB
+    const isBase64Huge = importResult.fileBase64 && importResult.fileBase64.length > 250000;
+    const safeDocUrl = isBase64Huge ? undefined : importResult.fileBase64;
+
     setActiveUjian({
       ...activeUjian,
       judul: activeUjian.judul || importResult.judul || activeUjian.judul,
       mataPelajaran: activeUjian.mataPelajaran || importResult.mataPelajaran || activeUjian.mataPelajaran,
       soalList: mergedQuestions,
       dokumenAsliNama: importResult.fileName,
-      dokumenAsliUrl: importResult.fileBase64,
+      dokumenAsliUrl: safeDocUrl,
     });
 
     setShowImportModal(false);
@@ -2055,11 +2066,11 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
                 <span>Ekspor Excel (.xlsx)</span>
               </button>
               <button
-                onClick={() => window.print()}
-                className="bg-slate-100 hover:bg-slate-200 text-slate-700 font-bold px-4 py-2 rounded-xl text-xs transition flex items-center gap-1.5 cursor-pointer"
+                onClick={() => setShowPrintRekapModal(true)}
+                className="bg-blue-600 hover:bg-blue-700 text-white font-bold px-4 py-2 rounded-xl text-xs transition shadow-md shadow-blue-600/20 flex items-center gap-1.5 cursor-pointer"
               >
                 <Printer className="w-4 h-4" />
-                <span>Cetak Rekap</span>
+                <span>Cetak Rekap Resmi</span>
               </button>
             </div>
           </div>
@@ -2297,7 +2308,7 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
                 <input
                   type="text"
                   readOnly
-                  value={`${window.location.origin}/#ujian/${shareUjianTarget.id}`}
+                  value={`${window.location.origin}/#ujian/${shareUjianTarget.id}?school=${shareUjianTarget.schoolId || db.getActiveSchoolId()}`}
                   className="bg-transparent text-xs text-slate-700 px-2 py-1 flex-1 font-mono focus:outline-hidden"
                 />
                 <button
@@ -2940,6 +2951,108 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
             </div>
           </div>
         </div>
+      )}
+
+      {/* Official Print Rekap Modal for CBT Exam */}
+      {rekapUjianTarget && (
+        <PrintRekapModal
+          isOpen={showPrintRekapModal}
+          onClose={() => setShowPrintRekapModal(false)}
+          title="DAFTAR REKAPITULASI NILAI UJIAN BERBASIS KOMPUTER (CBT)"
+          subtitle={`${rekapUjianTarget.judul} (${rekapUjianTarget.mataPelajaran})`}
+          metadata={[
+            { label: 'Mata Pelajaran', value: rekapUjianTarget.mataPelajaran || '-' },
+            { label: 'Kelas Target', value: rekapUjianTarget.kelasTarget.join(', ') || '-' },
+            {
+              label: 'Waktu Pelaksanaan',
+              value: new Date(rekapUjianTarget.tanggalMulai || rekapUjianTarget.createdAt).toLocaleDateString(
+                'id-ID',
+                { dateStyle: 'full' }
+              ),
+            },
+            { label: 'Nilai KKM', value: String(rekapUjianTarget.kkm || 75) },
+            {
+              label: 'Guru Pengampu',
+              value: rekapUjianTarget.guruNama || currentUser.name || 'Guru Mata Pelajaran',
+            },
+            { label: 'Rata-rata Nilai', value: String(stats.rataRata) },
+          ]}
+          summaryItems={[
+            { label: 'Terdaftar', count: stats.totalTerdaftar },
+            { label: 'Selesai Ujian', count: stats.totalSudah, colorClass: 'text-emerald-700 bg-emerald-50' },
+            { label: 'Belum Ujian', count: stats.totalBelum, colorClass: 'text-slate-700 bg-slate-50' },
+            { label: 'Tuntas KKM', count: stats.countTuntas, colorClass: 'text-blue-700 bg-blue-50' },
+            {
+              label: 'Belum Tuntas',
+              count: Math.max(0, stats.totalSudah - stats.countTuntas),
+              colorClass: 'text-amber-700 bg-amber-50',
+            },
+          ]}
+          columns={[
+            {
+              header: 'No',
+              render: (_, idx) => idx + 1,
+              width: '35px',
+              align: 'center',
+            },
+            {
+              header: 'NIS / NISN',
+              render: (row) => row.siswa.nisn || row.siswa.nomorInduk || (row.siswa as any).nis || '-',
+              width: '90px',
+            },
+            {
+              header: 'Nama Lengkap Siswa',
+              render: (row) => row.siswa.namaLengkap || (row.siswa as any).nama || '-',
+              width: '200px',
+            },
+            {
+              header: 'Kelas',
+              render: (row) => row.siswa.kelas || '-',
+              width: '65px',
+              align: 'center',
+            },
+            {
+              header: 'B / S / K',
+              render: (row) =>
+                row.jawaban
+                  ? `${row.jawaban.jumlahBenar ?? 0} / ${row.jawaban.jumlahSalah ?? 0} / ${
+                      row.jawaban.jumlahKosong ?? 0
+                    }`
+                  : '-',
+              width: '75px',
+              align: 'center',
+            },
+            {
+              header: 'Nilai Akhir',
+              render: (row) => (row.jawaban?.nilaiAkhir !== undefined ? row.jawaban.nilaiAkhir : '-'),
+              width: '75px',
+              align: 'center',
+            },
+            {
+              header: 'Status Ketuntasan',
+              render: (row) =>
+                row.jawaban ? (row.jawaban.lulusKkm ? 'TUNTAS' : 'BELUM TUNTAS') : 'BELUM MENGERJAKAN',
+              width: '120px',
+              align: 'center',
+            },
+            {
+              header: 'Waktu Pengumpulan',
+              render: (row) =>
+                row.jawaban?.waktuSelesai
+                  ? new Date(row.jawaban.waktuSelesai).toLocaleTimeString('id-ID', {
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })
+                  : '-',
+              width: '80px',
+              align: 'center',
+            },
+          ]}
+          data={rekapData}
+          signRole2="Guru Mata Pelajaran / Penguji"
+          signName2={rekapUjianTarget.guruNama || currentUser.name || 'Guru Mata Pelajaran'}
+          footerNote={`* Rekapitulasi nilai ini sah dan dihasilkan secara otomatis melalui Sistem CBT Ujian Online ${db.getSekolah().nama} pada tanggal ${new Intl.DateTimeFormat('id-ID', { dateStyle: 'full' }).format(new Date())}.`}
+        />
       )}
     </div>
   );

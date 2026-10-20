@@ -5,7 +5,7 @@ import {
   handleBuatSoal,
   handleBuatModul,
   handleBuatMateri,
-} from "./_lib/geminiBackend.ts";
+} from "./_lib/geminiBackend";
 
 export const config = {
   api: {

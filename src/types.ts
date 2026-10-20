@@ -355,13 +355,27 @@ export interface ModulAjarAI {
   guruId?: string;
   guruName?: string;
   judul: string;
+  jenisDokumen?: string; // 'Modul Ajar' | 'RPP Kurikulum Merdeka' | 'RPP K13' | 'RPP 1 Lembar'
+  kurikulum?: 'Kurikulum Merdeka' | 'Kurikulum 2013';
+  jenjang?: string;
   mataPelajaran: string;
   faseKelas: string;
+  tahunAjaran?: string;
+  semester?: 'Ganjil' | 'Genap';
   alokasiWaktu: string;
+  capaianPembelajaran?: string;
   targetProfilPelajar: string[];
+  modelPembelajaran?: string;
+  metodePendekatan?: string;
+  saranaPrasarana?: string[];
   tujuanPembelajaran: string[];
   pemahamanBermakna: string;
   pertanyaanPemantik: string[];
+  diferensiasi?: {
+    konten?: string;
+    proses?: string;
+    produk?: string;
+  };
   kegiatanPembelajaran: {
     pendahuluan: string[];
     inti: string[];
@@ -371,7 +385,10 @@ export interface ModulAjarAI {
     diagnostik: string;
     formatif: string;
     sumatif: string;
+    rubrik?: string;
   };
+  pengayaanRemedial?: string;
+  refleksiGuruSiswa?: string;
   lembarKerjaRingkas?: string;
   createdAt: string;
 }

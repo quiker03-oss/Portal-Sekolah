@@ -1,4 +1,4 @@
-import { db as firestoreDb, doc, setDoc, deleteDoc, collection, onSnapshot, query, getDocs } from './firebase';
+import { db as firestoreDb, doc, setDoc, getDoc, deleteDoc, collection, onSnapshot, query, getDocs } from './firebase';
 import {
   User,
   SekolahInfo,
@@ -841,19 +841,49 @@ class DatabaseService {
   private firestoreSchoolUnsubs: (() => void)[] = [];
   private firestoreSuperAdminUnsubs: (() => void)[] = [];
 
-  private async syncToFirestore(schoolId: string, collectionName: string, item: any) {
+  private sanitizeForFirestore(val: any): any {
+    if (val === undefined) return null;
+    if (val === null || typeof val !== 'object') {
+      if (typeof val === 'string' && val.length > 350000) {
+        return `[Teks melebihi batas simpan Cloud Firestore (${Math.round(val.length / 1024)} KB); isi teks diperingkas untuk keandalan server]`;
+      }
+      return val;
+    }
+    if (val instanceof Date) return val.toISOString();
+    if (Array.isArray(val)) {
+      return val
+        .filter((x) => x !== undefined)
+        .map((x) => this.sanitizeForFirestore(x));
+    }
+    const res: Record<string, any> = {};
+    for (const key of Object.keys(val)) {
+      const propVal = val[key];
+      if (propVal === undefined) continue;
+      // Do not store massive base64 in firestore document if > 350KB
+      if (typeof propVal === 'string' && propVal.length > 350000 && key.toLowerCase().includes('base64')) {
+        continue;
+      }
+      res[key] = this.sanitizeForFirestore(propVal);
+    }
+    return res;
+  }
+
+  private async syncToFirestore(schoolId: string, collectionName: string, item: any): Promise<void> {
+    if (!schoolId || !item || !item.id) return;
     try {
-      await setDoc(doc(firestoreDb, `schools/${schoolId}/${collectionName}`, item.id), item);
+      const sanitized = this.sanitizeForFirestore(item);
+      await setDoc(doc(firestoreDb, `schools/${schoolId}/${collectionName}`, String(item.id)), sanitized);
     } catch (e) {
-      console.error('Firestore sync error:', e);
+      console.error(`[Firestore Sync Error] school=${schoolId} col=${collectionName} id=${item?.id}:`, e);
     }
   }
 
-  private async deleteFromFirestore(schoolId: string, collectionName: string, itemId: string) {
+  private async deleteFromFirestore(schoolId: string, collectionName: string, itemId: string): Promise<void> {
+    if (!schoolId || !itemId) return;
     try {
-      await deleteDoc(doc(firestoreDb, `schools/${schoolId}/${collectionName}`, itemId));
+      await deleteDoc(doc(firestoreDb, `schools/${schoolId}/${collectionName}`, String(itemId)));
     } catch (e) {
-      console.error('Firestore delete error:', e);
+      console.error(`[Firestore Delete Error] school=${schoolId} col=${collectionName} id=${itemId}:`, e);
     }
   }
 
@@ -1010,6 +1040,12 @@ class DatabaseService {
               console.error('Storage error:', e);
             }
             window.dispatchEvent(new Event(`data_${colName}_changed`));
+            if (colName === 'ujian_online') {
+              window.dispatchEvent(new CustomEvent('ujian_online_updated', { detail: list }));
+            }
+            if (colName === 'jawaban_ujian') {
+              window.dispatchEvent(new CustomEvent('jawaban_ujian_updated', { detail: list }));
+            }
           },
           (err) => {
             console.warn(`Firestore snapshot error for ${colName}:`, err);
@@ -2869,28 +2905,146 @@ class DatabaseService {
   // ==================== UJIAN ONLINE / CBT METHODS ====================
 
   getUjianOnlineList(): UjianOnline[] {
-    const list = this.getItem<UjianOnline[]>(STORAGE_KEYS.UJIAN_ONLINE, []);
-    if (!list || list.length === 0) {
-      // Seed default initial exams if none exist
+    const actualKey = this.resolveStorageKey(STORAGE_KEYS.UJIAN_ONLINE);
+    if (this.cache.has(actualKey)) {
+      const cached = this.cache.get(actualKey);
+      if (Array.isArray(cached)) {
+        return [...cached] as UjianOnline[];
+      }
+      return cached as UjianOnline[];
+    }
+
+    try {
+      const raw = localStorage.getItem(actualKey);
+      if (raw !== null) {
+        const parsed = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          this.cache.set(actualKey, parsed);
+          return [...parsed];
+        }
+      }
+    } catch (e) {
+      console.error('Failed to parse ujian_online list:', e);
+    }
+
+    // Only if raw is strictly null (first time ever on this device for default school sch-1):
+    const activeSchoolId = this.getActiveSchoolId();
+    if (activeSchoolId === 'sch-1') {
       const initial = getInitialUjianOnlineList();
       this.setItem(STORAGE_KEYS.UJIAN_ONLINE, initial);
       return initial;
     }
-    return list;
+
+    this.cache.set(actualKey, []);
+    return [];
   }
 
   getUjianOnlineById(id: string): UjianOnline | undefined {
     const list = this.getUjianOnlineList();
-    return list.find((u) => u.id === id);
+    const found = list.find((u) => u.id === id);
+    if (found) return found;
+
+    // Check all cache entries across schools
+    for (const [key, val] of this.cache.entries()) {
+      if (key.includes('ujian_online') && Array.isArray(val)) {
+        const item = val.find((u: any) => u && u.id === id);
+        if (item) return item as UjianOnline;
+      }
+    }
+    return undefined;
   }
 
-  saveUjianOnline(item: UjianOnline): UjianOnline {
+  async getUjianOnlineByIdAsync(id: string, explicitSchoolId?: string): Promise<UjianOnline | undefined> {
+    // 1. Check local cache / localStorage first
+    const cached = this.getUjianOnlineById(id);
+    if (cached) return cached;
+
+    // 2. Identify candidate school IDs
+    const schoolCandidates: string[] = [];
+    if (explicitSchoolId && explicitSchoolId.trim()) {
+      schoolCandidates.push(explicitSchoolId.trim());
+    }
+    const active = this.getActiveSchoolId();
+    if (active && !schoolCandidates.includes(active)) {
+      schoolCandidates.push(active);
+    }
+    if (!schoolCandidates.includes('sch-1')) {
+      schoolCandidates.push('sch-1');
+    }
+
+    // Direct targeted lookup in candidate schools
+    for (const schId of schoolCandidates) {
+      try {
+        const docRef = doc(firestoreDb, `schools/${schId}/ujian_online`, id);
+        const docSnap = await getDoc(docRef);
+        if (docSnap.exists()) {
+          const exam = { ...docSnap.data(), id: docSnap.id, schoolId: schId } as UjianOnline;
+          const currentList = this.getItemForSchool<UjianOnline[]>(schId, STORAGE_KEYS.UJIAN_ONLINE, []);
+          if (!currentList.some((u) => u.id === exam.id)) {
+            this.setItemForSchool(schId, STORAGE_KEYS.UJIAN_ONLINE, [...currentList, exam]);
+          }
+          return exam;
+        }
+      } catch (err) {
+        console.warn(`[getUjianOnlineByIdAsync] Search in school ${schId} error:`, err);
+      }
+    }
+
+    // 3. Resilient fallback: Search across all registered school accounts
+    try {
+      const schoolsSnap = await getDocs(collection(firestoreDb, 'schools/superadmin/school_accounts'));
+      for (const sDoc of schoolsSnap.docs) {
+        const sId = sDoc.id;
+        if (schoolCandidates.includes(sId)) continue;
+        try {
+          const examSnap = await getDoc(doc(firestoreDb, `schools/${sId}/ujian_online`, id));
+          if (examSnap.exists()) {
+            const exam = { ...examSnap.data(), id: examSnap.id, schoolId: sId } as UjianOnline;
+            const currentList = this.getItemForSchool<UjianOnline[]>(sId, STORAGE_KEYS.UJIAN_ONLINE, []);
+            if (!currentList.some((u) => u.id === exam.id)) {
+              this.setItemForSchool(sId, STORAGE_KEYS.UJIAN_ONLINE, [...currentList, exam]);
+            }
+            return exam;
+          }
+        } catch {}
+      }
+    } catch (e) {
+      console.warn('[getUjianOnlineByIdAsync] Fallback lookup across schools error:', e);
+    }
+
+    return undefined;
+  }
+
+  async getSiswaForUjianAsync(exam: UjianOnline): Promise<Siswa[]> {
+    const schoolId = exam.schoolId || this.getActiveSchoolId() || 'sch-1';
+    const localSiswa = this.getItemForSchool<Siswa[]>(schoolId, STORAGE_KEYS.SISWA, []);
+    if (localSiswa && localSiswa.length > 0) {
+      return localSiswa;
+    }
+
+    try {
+      const snap = await getDocs(collection(firestoreDb, `schools/${schoolId}/siswa`));
+      if (!snap.empty) {
+        const remoteSiswa = snap.docs.map((d) => ({ ...d.data(), id: d.id })) as Siswa[];
+        this.setItemForSchool(schoolId, STORAGE_KEYS.SISWA, remoteSiswa);
+        return remoteSiswa;
+      }
+    } catch (err) {
+      console.warn(`[getSiswaForUjianAsync] Failed to fetch siswa for school ${schoolId}:`, err);
+    }
+
+    return this.getSiswa();
+  }
+
+  async saveUjianOnline(item: UjianOnline): Promise<UjianOnline> {
     const list = this.getUjianOnlineList();
     const existingIndex = list.findIndex((u) => u.id === item.id);
     let updated: UjianOnline[];
     const now = new Date().toISOString();
+    const activeSchoolId = this.getActiveSchoolId();
     const preparedItem: UjianOnline = {
       ...item,
+      schoolId: item.schoolId || activeSchoolId,
       updatedAt: now,
       createdAt: item.createdAt || now,
     };
@@ -2903,18 +3057,29 @@ class DatabaseService {
     }
 
     this.setItem(STORAGE_KEYS.UJIAN_ONLINE, updated);
+
+    // Guaranteed direct Firestore save
+    const targetSchoolId = preparedItem.schoolId || activeSchoolId;
+    await this.syncToFirestore(targetSchoolId, 'ujian_online', preparedItem);
+
     window.dispatchEvent(new CustomEvent('ujian_online_updated', { detail: updated }));
     return preparedItem;
   }
 
-  deleteUjianOnline(id: string): void {
+  async deleteUjianOnline(id: string): Promise<void> {
     const list = this.getUjianOnlineList();
+    const targetItem = list.find((u) => u.id === id);
     const updated = list.filter((u) => u.id !== id);
     this.setItem(STORAGE_KEYS.UJIAN_ONLINE, updated);
+
+    const activeSchoolId = this.getActiveSchoolId();
+    const schoolId = targetItem?.schoolId || activeSchoolId;
+    await this.deleteFromFirestore(schoolId, 'ujian_online', id);
+
     window.dispatchEvent(new CustomEvent('ujian_online_updated', { detail: updated }));
   }
 
-  duplicateUjianOnline(id: string): UjianOnline | undefined {
+  async duplicateUjianOnline(id: string): Promise<UjianOnline | undefined> {
     const source = this.getUjianOnlineById(id);
     if (!source) return undefined;
     const now = new Date().toISOString();
@@ -2927,13 +3092,13 @@ class DatabaseService {
       updatedAt: now,
       riwayatPerubahanKunci: [],
     };
-    return this.saveUjianOnline(duplicated);
+    return await this.saveUjianOnline(duplicated);
   }
 
-  archiveUjianOnline(id: string, diarsipkan: boolean = true): void {
+  async archiveUjianOnline(id: string, diarsipkan: boolean = true): Promise<void> {
     const exam = this.getUjianOnlineById(id);
     if (!exam) return;
-    this.saveUjianOnline({
+    await this.saveUjianOnline({
       ...exam,
       status: diarsipkan ? 'diarsipkan' : 'draf',
     });
@@ -2974,6 +3139,13 @@ class DatabaseService {
     }
 
     this.setItem(STORAGE_KEYS.JAWABAN_UJIAN, updated);
+
+    // Guaranteed Firestore sync
+    const schoolId = prepared.schoolId || this.getActiveSchoolId() || 'sch-1';
+    this.syncToFirestore(schoolId, 'jawaban_ujian', prepared).catch((e) => {
+      console.warn('Sync jawaban_ujian to firestore error:', e);
+    });
+
     window.dispatchEvent(new CustomEvent('jawaban_ujian_updated', { detail: updated }));
     return prepared;
   }
@@ -2982,6 +3154,10 @@ class DatabaseService {
     const list = this.getItem<JawabanSiswaUjian[]>(STORAGE_KEYS.JAWABAN_UJIAN, []);
     const updated = list.filter((j) => j.id !== id);
     this.setItem(STORAGE_KEYS.JAWABAN_UJIAN, updated);
+
+    const schoolId = this.getActiveSchoolId() || 'sch-1';
+    this.deleteFromFirestore(schoolId, 'jawaban_ujian', id).catch(() => {});
+
     window.dispatchEvent(new CustomEvent('jawaban_ujian_updated', { detail: updated }));
   }
 

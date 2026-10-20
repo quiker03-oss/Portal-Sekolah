@@ -9,23 +9,44 @@ import { ErrorBoundary } from './components/common/ErrorBoundary';
 import { UjianSiswaView } from './components/ujian/UjianSiswaView';
 import { ShieldCheck, ArrowLeft } from 'lucide-react';
 
-const getExamIdFromUrl = (): string | null => {
-  if (typeof window === 'undefined') return null;
+interface ExamUrlInfo {
+  examId: string | null;
+  schoolId: string | null;
+}
+
+const getExamInfoFromUrl = (): ExamUrlInfo => {
+  if (typeof window === 'undefined') return { examId: null, schoolId: null };
   const hash = window.location.hash || '';
   const search = window.location.search || '';
 
-  const hashMatch = hash.match(/^#(?:ujian|cbt|ujian-online)\/(.+)$/i);
-  if (hashMatch && hashMatch[1]) {
-    return decodeURIComponent(hashMatch[1]);
+  let examId: string | null = null;
+  let schoolId: string | null = null;
+
+  // 1. Search Query Parameters
+  const searchParams = new URLSearchParams(search);
+  if (searchParams.get('ujian')) examId = searchParams.get('ujian');
+  if (searchParams.get('cbt')) examId = searchParams.get('cbt');
+  if (searchParams.get('school')) schoolId = searchParams.get('school');
+  if (searchParams.get('schoolId')) schoolId = searchParams.get('schoolId');
+
+  // 2. Hash routing: #ujian/cbt-12345 or #ujian/cbt-12345?school=sch-1
+  if (hash) {
+    const rawHash = hash.replace(/^#/, '');
+    const [pathPart, queryPart] = rawHash.split('?');
+
+    const hashMatch = pathPart.match(/^(?:ujian|cbt|ujian-online)\/([^?&]+)$/i);
+    if (hashMatch && hashMatch[1]) {
+      examId = decodeURIComponent(hashMatch[1]);
+    }
+
+    if (queryPart) {
+      const hashParams = new URLSearchParams(queryPart);
+      if (!schoolId && hashParams.get('school')) schoolId = hashParams.get('school');
+      if (!schoolId && hashParams.get('schoolId')) schoolId = hashParams.get('schoolId');
+    }
   }
 
-  const params = new URLSearchParams(search);
-  const paramVal = params.get('ujian') || params.get('cbt');
-  if (paramVal) {
-    return paramVal;
-  }
-
-  return null;
+  return { examId, schoolId };
 };
 
 const isSuperAdminUrl = () => {
@@ -50,7 +71,7 @@ const isSuperAdminUrl = () => {
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(db.getCurrentUser());
-  const [studentExamId, setStudentExamId] = useState<string | null>(() => getExamIdFromUrl());
+  const [examRoute, setExamRoute] = useState<ExamUrlInfo>(() => getExamInfoFromUrl());
 
   // Super Admin view & auth state
   const [isSuperAdminRoute, setIsSuperAdminRoute] = useState<boolean>(() => isSuperAdminUrl());
@@ -73,8 +94,8 @@ export default function App() {
         setIsSuperAdminRoute(true);
       }
       setIsSuperAdminAuth(hasSession);
-      const examId = getExamIdFromUrl();
-      setStudentExamId(examId);
+      const info = getExamInfoFromUrl();
+      setExamRoute(info);
     };
 
     window.addEventListener('hashchange', handleLocationOrAuthChange);
@@ -133,13 +154,14 @@ export default function App() {
   };
 
   // 0. Student Exam Portal View (When accessing via exam link or QR code)
-  if (studentExamId) {
+  if (examRoute.examId) {
     return (
       <ErrorBoundary fallbackTitle="Kendala pada Halaman Ujian Siswa">
         <UjianSiswaView
-          ujianId={studentExamId}
+          ujianId={examRoute.examId}
+          schoolId={examRoute.schoolId || undefined}
           onExit={() => {
-            setStudentExamId(null);
+            setExamRoute({ examId: null, schoolId: null });
             if (
               window.location.hash.startsWith('#ujian') ||
               window.location.hash.startsWith('#cbt') ||

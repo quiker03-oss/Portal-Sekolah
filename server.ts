@@ -9,7 +9,7 @@ import {
   handleBuatSoal,
   handleBuatModul,
   handleBuatMateri,
-} from "./api/_lib/geminiBackend.ts";
+} from "./api/_lib/geminiBackend";
 
 dotenv.config();
 

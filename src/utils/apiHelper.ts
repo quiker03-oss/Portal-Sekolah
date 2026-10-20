@@ -116,10 +116,16 @@ export async function safeFetchJson<T = any>(
       parsed = JSON.parse(trimmed);
     } catch {
       console.warn(`[API Diagnostic] Failed to parse JSON from ${url}:`, trimmed.slice(0, 150));
+      let errorMsg = `Format balasan dari server bukan data JSON yang valid (HTTP ${status}).`;
+      if (status >= 500) {
+        errorMsg = `Server backend mengalami kendala internal (HTTP ${status}). Pastikan variabel lingkungan GEMINI_API_KEY sudah disetel di menu Project Settings > Environment Variables pada deployment Vercel Anda.`;
+      } else if (trimmed.length > 0 && trimmed.length < 180) {
+        errorMsg = `Respon server (HTTP ${status}): ${trimmed}`;
+      }
       return {
         ok: false,
         status,
-        error: `Format balasan dari server bukan data JSON yang valid (HTTP ${status}).`,
+        error: errorMsg,
       };
     }
 

@@ -1,4 +1,4 @@
-import { handleParseDocx } from "../_lib/geminiBackend.ts";
+import { handleParseDocx } from "../_lib/geminiBackend";
 
 export const config = {
   api: {

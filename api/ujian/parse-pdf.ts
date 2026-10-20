@@ -1,4 +1,4 @@
-import { handleParsePdf } from "../_lib/geminiBackend.ts";
+import { handleParsePdf } from "../_lib/geminiBackend";
 
 export const config = {
   api: {

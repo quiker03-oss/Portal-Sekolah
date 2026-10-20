@@ -1,4 +1,4 @@
-import { handleBuatSoal } from "../_lib/geminiBackend.ts";
+import { handleBuatSoal } from "../_lib/geminiBackend";
 
 export default async function handler(req: any, res: any) {
   res.setHeader("Access-Control-Allow-Origin", "*");

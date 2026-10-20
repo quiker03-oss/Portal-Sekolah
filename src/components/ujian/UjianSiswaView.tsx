@@ -30,11 +30,13 @@ import {
 
 interface UjianSiswaViewProps {
   ujianId: string;
+  schoolId?: string;
   onExit?: () => void;
 }
 
-export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({ ujianId, onExit }) => {
+export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({ ujianId, schoolId, onExit }) => {
   const [ujian, setUjian] = useState<UjianOnline | null>(null);
+  const [allStudents, setAllStudents] = useState<Siswa[]>(() => db.getSiswa());
   const [loading, setLoading] = useState<boolean>(true);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
@@ -72,47 +74,85 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({ ujianId, onExit 
   const blurTimeRef = useRef<number | null>(null);
   const maxAllowedViolations = ujian?.maksimalPelanggaran || 3;
 
-  // Load exam and check eligibility
+  // Load exam and check eligibility asynchronously with cloud fallback
   useEffect(() => {
-    try {
-      const exam = db.getUjianOnlineById(ujianId);
-      if (!exam) {
-        setErrorMsg('Ujian tidak ditemukan atau tautan ujian sudah tidak aktif.');
-        setLoading(false);
-        return;
-      }
-      setUjian(exam);
+    let isMounted = true;
 
-      // Check date bounds
-      const now = new Date();
-      if (exam.tanggalMulai && new Date(exam.tanggalMulai) > now) {
-        setErrorMsg(
-          `Ujian belum dimulai. Jadwal pelaksanaan ujian: ${new Date(exam.tanggalMulai).toLocaleString('id-ID', {
-            dateStyle: 'full',
-            timeStyle: 'short',
-          })}.`
-        );
-      } else if (exam.tanggalSelesai && new Date(exam.tanggalSelesai) < now) {
-        setErrorMsg(
-          `Masa pengerjaan ujian telah berakhir pada ${new Date(exam.tanggalSelesai).toLocaleString('id-ID', {
-            dateStyle: 'full',
-            timeStyle: 'short',
-          })}.`
-        );
-      } else if (exam.status === 'diarsipkan' || exam.status === 'draf') {
-        setErrorMsg('Ujian ini saat ini belum dibuka untuk peserta didik.');
+    const loadExamAsync = async () => {
+      setLoading(true);
+      setErrorMsg(null);
+
+      try {
+        // Extract schoolId from props, or window.location search/hash
+        let effectiveSchoolId = schoolId;
+        if (!effectiveSchoolId && typeof window !== 'undefined') {
+          const sp = new URLSearchParams(window.location.search);
+          effectiveSchoolId = sp.get('school') || sp.get('schoolId') || undefined;
+          if (!effectiveSchoolId && window.location.hash.includes('?')) {
+            const hashQ = window.location.hash.split('?')[1];
+            const hp = new URLSearchParams(hashQ);
+            effectiveSchoolId = hp.get('school') || hp.get('schoolId') || undefined;
+          }
+        }
+
+        const exam = await db.getUjianOnlineByIdAsync(ujianId, effectiveSchoolId);
+        if (!isMounted) return;
+
+        if (!exam) {
+          setErrorMsg('Akses Ujian Belum Tersedia. Ujian tidak ditemukan atau tautan ujian sudah tidak aktif.');
+          setLoading(false);
+          return;
+        }
+
+        setUjian(exam);
+
+        // Fetch student roster for this exam's school
+        const roster = await db.getSiswaForUjianAsync(exam);
+        if (isMounted && roster && roster.length > 0) {
+          setAllStudents(roster);
+        }
+
+        // Check date bounds
+        const now = new Date();
+        if (exam.tanggalMulai && new Date(exam.tanggalMulai) > now) {
+          setErrorMsg(
+            `Ujian belum dimulai. Jadwal pelaksanaan ujian: ${new Date(exam.tanggalMulai).toLocaleString('id-ID', {
+              dateStyle: 'full',
+              timeStyle: 'short',
+            })}.`
+          );
+        } else if (exam.tanggalSelesai && new Date(exam.tanggalSelesai) < now) {
+          setErrorMsg(
+            `Masa pengerjaan ujian telah berakhir pada ${new Date(exam.tanggalSelesai).toLocaleString('id-ID', {
+              dateStyle: 'full',
+              timeStyle: 'short',
+            })}.`
+          );
+        } else if (exam.status === 'diarsipkan' || exam.status === 'draf') {
+          setErrorMsg('Ujian ini saat ini belum dibuka untuk peserta didik.');
+        }
+      } catch (err) {
+        console.error('Error loading exam async:', err);
+        if (isMounted) {
+          setErrorMsg('Gagal memuat naskah ujian. Silakan periksa koneksi internet Anda dan muat ulang halaman.');
+        }
+      } finally {
+        if (isMounted) {
+          setLoading(false);
+        }
       }
-    } catch {
-      setErrorMsg('Gagal memuat naskah ujian.');
-    } finally {
-      setLoading(false);
-    }
-  }, [ujianId]);
+    };
+
+    loadExamAsync();
+
+    return () => {
+      isMounted = false;
+    };
+  }, [ujianId, schoolId]);
 
   // Filter students matching the exam's target classes
   const eligibleSiswaList = useMemo(() => {
     if (!ujian) return [];
-    const allStudents = db.getSiswa();
     const targets = ujian.kelasTarget || [];
     if (targets.length === 0 || targets.includes('Semua Siswa')) {
       return allStudents;
@@ -120,7 +160,7 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({ ujianId, onExit 
     return allStudents.filter((s) =>
       targets.some((t) => s.kelas.toLowerCase().includes(t.toLowerCase()) || t.toLowerCase().includes(s.kelas.toLowerCase()))
     );
-  }, [ujian]);
+  }, [ujian, allStudents]);
 
   const filteredStudents = useMemo(() => {
     if (!searchQuery.trim()) return eligibleSiswaList;

@@ -16,6 +16,7 @@ interface PrintRekapModalProps {
   signRole2?: string;
   signName2?: string;
   signNip2?: string;
+  footerNote?: string;
 }
 
 export const PrintRekapModal: React.FC<PrintRekapModalProps> = ({
@@ -30,6 +31,7 @@ export const PrintRekapModal: React.FC<PrintRekapModalProps> = ({
   signRole2 = 'Wali Kelas / Petugas Presensi',
   signName2,
   signNip2,
+  footerNote,
 }) => {
   if (!isOpen) return null;
 
@@ -223,7 +225,7 @@ export const PrintRekapModal: React.FC<PrintRekapModalProps> = ({
 
             {/* 6. CATATAN KETERANGAN */}
             <div className="text-[10px] text-slate-600 mb-8 italic">
-              * Laporan ini dicetak secara otomatis melalui Sistem Presensi Digital Terpadu {sekolah.nama} pada tanggal {todayFormatted}.
+              {footerNote || `* Dokumen ini dicetak secara resmi melalui Portal Sekolah Terpadu ${sekolah.nama} pada tanggal ${todayFormatted}.`}
             </div>
 
             {/* 7. TANDA TANGAN RESMI */}
