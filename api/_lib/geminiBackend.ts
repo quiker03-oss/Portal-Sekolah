@@ -119,6 +119,11 @@ export async function generateContentWithFallback(
 export async function extractFromDocx(buffer: Buffer) {
   const zip = await JSZip.loadAsync(buffer);
 
+  // Normalize path helper for reliable cross-matching
+  const normalizePath = (p: string): string => {
+    return p.replace(/^(\.\.\/)+/, '').replace(/^\//, '').replace(/^word\//, '').toLowerCase().trim();
+  };
+
   const relsFile = zip.file("word/_rels/document.xml.rels");
   const relsMap: { [rId: string]: string } = {};
   if (relsFile) {
@@ -130,22 +135,31 @@ export async function extractFromDocx(buffer: Buffer) {
   }
 
   const mediaImages: { [mediaPath: string]: string } = {};
-  const mediaFiles = zip.file(/^word\/media\//);
+  const mediaFiles = zip.file(/(?:^|\/)media\//);
   for (const f of mediaFiles) {
     const ext = f.name.split(".").pop()?.toLowerCase() || "png";
-    const mime =
-      ext === "jpg" || ext === "jpeg"
-        ? "image/jpeg"
-        : ext === "gif"
-        ? "image/gif"
-        : ext === "webp"
-        ? "image/webp"
-        : "image/png";
+    let mime = "image/png";
+    if (ext === "jpg" || ext === "jpeg") mime = "image/jpeg";
+    else if (ext === "gif") mime = "image/gif";
+    else if (ext === "webp") mime = "image/webp";
+    else if (ext === "svg") mime = "image/svg+xml";
+    else if (ext === "bmp") mime = "image/bmp";
+    else if (ext === "emf") mime = "image/x-emf";
+    else if (ext === "wmf") mime = "image/x-wmf";
+
     const b64 = await f.async("base64");
-    const relativePath = f.name.replace(/^word\//, "");
     const dataUri = `data:${mime};base64,${b64}`;
-    mediaImages[relativePath] = dataUri;
+    const relativePath = f.name.replace(/^(?:word|ppt)\//, "");
+    const baseName = f.name.split("/").pop() || f.name;
+
     mediaImages[f.name] = dataUri;
+    mediaImages[f.name.toLowerCase()] = dataUri;
+    mediaImages[relativePath] = dataUri;
+    mediaImages[relativePath.toLowerCase()] = dataUri;
+    mediaImages[baseName] = dataUri;
+    mediaImages[baseName.toLowerCase()] = dataUri;
+    mediaImages[normalizePath(f.name)] = dataUri;
+    mediaImages[normalizePath(relativePath)] = dataUri;
   }
 
   const docFile = zip.file("word/document.xml");
@@ -154,29 +168,94 @@ export async function extractFromDocx(buffer: Buffer) {
   }
   const docXml = await docFile.async("string");
 
-  const pMatches = docXml.split(/<\/w:p>/g);
-  const extractedParagraphs: { text: string; imageUri?: string }[] = [];
-
-  for (const p of pMatches) {
-    let imageUri: string | undefined = undefined;
-    const rIdMatch = p.match(/r:embed="([^"]+)"/);
-    if (rIdMatch) {
-      const rId = rIdMatch[1];
+  // Helper to extract image URIs from an XML fragment
+  const getImagesFromFragment = (frag: string): string[] => {
+    const uris: string[] = [];
+    const rIdMatches = [...frag.matchAll(/(?:[a-zA-Z0-9_]+:)?(?:embed|id|link|src|href)="([^"]+)"/g)];
+    for (const rMatch of rIdMatches) {
+      const rId = rMatch[1];
       const target = relsMap[rId];
-      if (target && mediaImages[target]) {
-        imageUri = mediaImages[target];
+      if (target) {
+        const norm = normalizePath(target);
+        const foundUri =
+          mediaImages[target] ||
+          mediaImages[target.toLowerCase()] ||
+          mediaImages[norm] ||
+          mediaImages[target.split("/").pop()?.toLowerCase() || ""];
+        if (foundUri && !uris.includes(foundUri)) {
+          uris.push(foundUri);
+        }
       }
     }
+    return uris;
+  };
 
-    const textMatches = p.match(/<w:t[^>]*>(.*?)<\/w:t>/g);
-    let text = "";
-    if (textMatches) {
-      text = textMatches.map((t) => t.replace(/<[^>]+>/g, "")).join("");
+  // Helper to extract text from w:t and m:t (formulas / math)
+  const getTextFromFragment = (frag: string): string => {
+    const textMatches = frag.match(/<[wm]:t[^>]*>(.*?)<\/[wm]:t>/g);
+    if (!textMatches) return "";
+    return textMatches.map((t) => t.replace(/<[^>]+>/g, "")).join("");
+  };
+
+  const extractedParagraphs: { text: string; imageUris: string[] }[] = [];
+
+  // Parse top-level blocks: <w:p> (paragraphs) and <w:tbl> (tables)
+  const blockRegex = /<(w:p|w:tbl)[^>]*>([\s\S]*?)<\/\1>/g;
+  let blockMatch: RegExpExecArray | null;
+
+  while ((blockMatch = blockRegex.exec(docXml)) !== null) {
+    const tag = blockMatch[1];
+    const content = blockMatch[2];
+
+    if (tag === "w:p") {
+      const imageUris = getImagesFromFragment(content);
+      const text = getTextFromFragment(content).trim();
+      if (text || imageUris.length > 0) {
+        extractedParagraphs.push({ text, imageUris });
+      }
+    } else if (tag === "w:tbl") {
+      const tableImageUris = getImagesFromFragment(content);
+      const rows: string[][] = [];
+      const trRegex = /<w:tr[^>]*>([\s\S]*?)<\/w:tr>/g;
+      let trMatch: RegExpExecArray | null;
+
+      while ((trMatch = trRegex.exec(content)) !== null) {
+        const cells: string[] = [];
+        const tcRegex = /<w:tc[^>]*>([\s\S]*?)<\/w:tc>/g;
+        let tcMatch: RegExpExecArray | null;
+
+        while ((tcMatch = tcRegex.exec(trMatch[1])) !== null) {
+          cells.push(getTextFromFragment(tcMatch[1]).trim());
+        }
+        if (cells.length > 0) {
+          rows.push(cells);
+        }
+      }
+
+      if (rows.length > 0) {
+        let mdTable = rows.map((r) => "| " + r.join(" | ") + " |").join("\n");
+        if (rows.length > 1) {
+          const sep = "| " + rows[0].map(() => "---").join(" | ") + " |";
+          const lines = mdTable.split("\n");
+          lines.splice(1, 0, sep);
+          mdTable = lines.join("\n");
+        }
+        extractedParagraphs.push({ text: mdTable, imageUris: tableImageUris });
+      } else if (tableImageUris.length > 0) {
+        extractedParagraphs.push({ text: "", imageUris: tableImageUris });
+      }
     }
+  }
 
-    const cleanText = text.trim();
-    if (cleanText || imageUri) {
-      extractedParagraphs.push({ text: cleanText, imageUri });
+  // Fallback: If no blocks matched by regex, fall back to split by </w:p>
+  if (extractedParagraphs.length === 0) {
+    const pMatches = docXml.split(/<\/w:p>/g);
+    for (const p of pMatches) {
+      const imageUris = getImagesFromFragment(p);
+      const text = getTextFromFragment(p).trim();
+      if (text || imageUris.length > 0) {
+        extractedParagraphs.push({ text, imageUris });
+      }
     }
   }
 
@@ -200,11 +279,14 @@ export async function handleParseDocx(fileBase64: string, fileName: string = "do
   const formattedLines = extractedParagraphs
     .map((p) => {
       let line = p.text;
-      if (p.imageUri) {
-        const marker = `[[IMAGE_SOAL_${imgCounter}]]`;
-        imageIndexMap[marker] = p.imageUri;
-        line = `${line} ${marker}`.trim();
-        imgCounter++;
+      if (p.imageUris && p.imageUris.length > 0) {
+        const markers = p.imageUris.map((uri) => {
+          const marker = `[[IMAGE_SOAL_${imgCounter}]]`;
+          imageIndexMap[marker] = uri;
+          imgCounter++;
+          return marker;
+        });
+        line = `${line} ${markers.join(" ")}`.trim();
       }
       return line;
     })
@@ -224,15 +306,20 @@ Bacalah dokumen naskah soal berikut secara teliti:
 ${rawDocumentText}
 --- AKHIR NASKAH DOKUMEN ---
 
-ATURAN WAJIB & KETAT:
-1. JANGAN PERNAH MENGARANG, MERUBAH, ATAU MENGGANTI kata, angka, pilihan jawaban, rumus, atau urutan soal dari dokumen asli!
-2. Kenali nomor soal, teks pertanyaan, pilihan A/B/C/D/E, instruksi, dan jenis soal ('pilihan_ganda' | 'benar_salah' | 'isian' | 'esai').
+ATURAN WAJIB & INTEGRITAS NASKAH SOAL:
+1. JANGAN PERNAH MENGARANG, MERUBAH, ATAU MENGURANGI kata, angka, pilihan jawaban, rumus, atau urutan soal dari dokumen asli!
+2. Kenali nomor soal, teks pertanyaan, instruksi, dan tipe soal secara akurat:
+   - 'pilihan_ganda' : Pilihan tunggal A, B, C, D, E.
+   - 'pilihan_ganda_kompleks' : Pilihan lebih dari satu jawaban benar (checkbox / centang). Contoh: "Pilihlah 2 pernyataan yang benar", "Centang semua yang sesuai". Masukkan daftar kunci benar di 'kunciPilihanKompleks' seperti ["A", "C"].
+   - 'benar_salah' : Pernyataan yang dinilai Benar atau Salah. Kunci: "Benar" atau "Salah".
+   - 'menjodohkan' : Soal menjodohkan kolom kiri dengan kolom kanan. Masukkan daftar pasangan di 'pasanganMenjodohkan' [{ "id": "1", "kiri": "teks kiri", "kanan": "teks kanan" }] dan 'kunciMenjodohkan'.
+   - 'isian' : Soal isian singkat (jawaban berupa kata/istilah/angka).
+   - 'esai' : Soal uraian panjang / penjelasan / hitungan.
 3. Urutan nomor soal WAJIB dipertahankan persis seperti dokumen asli (1, 2, 3, ...).
-4. Jika terdapat penanda gambar seperti '[[IMAGE_SOAL_1]]', tempatkan penanda tersebut pada soal yang tepat di field 'gambarMarker'.
-5. Deteksi kunci jawaban jika ada pada soal (misalnya cetak tebal, garis bawah, atau tabel kunci jawaban di akhir dokumen).
-6. Hubungkan setiap kunci jawaban dengan nomor soal yang benar. Jika kunci tidak terdeteksi, biarkan string kosong "" dan berikan peringatan di 'catatanVerifikasi'.
-7. Jika ada soal yang ambigu, nomor terpotong, atau kunci jawaban meragukan, tandai 'perluVerifikasi': true dengan 'catatanVerifikasi'.
-8. Format output WAJIB JSON valid:
+4. Jika terdapat penanda gambar seperti '[[IMAGE_SOAL_1]]', tempatkan penanda tersebut pada soal yang tepat di field 'gambarMarker' atau 'gambarMarkers' (array).
+5. Deteksi kunci jawaban jika ada pada soal (misalnya cetak tebal, tanda kurung, garis bawah, atau tabel kunci jawaban di akhir dokumen).
+6. Hubungkan setiap kunci jawaban dengan nomor soal yang benar. Jika kunci tidak terdeteksi, biarkan string kosong "" dan tandai 'perluVerifikasi': true dengan keterangan di 'catatanVerifikasi'.
+7. Format output WAJIB JSON valid sesuai skema:
 
 {
   "judul": "string judul naskah jika ada",
@@ -241,17 +328,23 @@ ATURAN WAJIB & KETAT:
   "soalList": [
     {
       "nomor": 1,
-      "tipe": "pilihan_ganda | benar_salah | isian | esai",
-      "pertanyaan": "teks pertanyaan lengkap",
+      "tipe": "pilihan_ganda | pilihan_ganda_kompleks | benar_salah | menjodohkan | isian | esai",
+      "pertanyaan": "teks pertanyaan lengkap beserta data tabel/rumus",
       "pilihan": {
         "A": "teks opsi A",
         "B": "teks opsi B",
         "C": "teks opsi C",
         "D": "teks opsi D"
       },
+      "kunciPilihanKompleks": ["A", "C"],
+      "pasanganMenjodohkan": [
+        { "id": "1", "kiri": "pernyataan kiri", "kanan": "pasangan kanan" }
+      ],
+      "kunciMenjodohkan": { "1": "pasangan kanan" },
       "kunciJawaban": "A | B | C | D | teks kunci",
       "pembahasan": "penjelasan jika ada di dokumen",
-      "gambarMarker": "[[IMAGE_SOAL_1]] jika ada pada soal ini, atau null",
+      "gambarMarker": "[[IMAGE_SOAL_1]] atau null",
+      "gambarMarkers": ["[[IMAGE_SOAL_1]]"],
       "bobot": 1,
       "perluVerifikasi": false,
       "catatanVerifikasi": "keterangan jika perlu verifikasi"
@@ -271,16 +364,35 @@ ATURAN WAJIB & KETAT:
   // Map back image markers to actual Base64 Data URIs
   const questions = (parsed.soalList || []).map((q: any, idx: number) => {
     let finalImage: string | undefined = undefined;
-    if (q.gambarMarker && imageIndexMap[q.gambarMarker]) {
-      finalImage = imageIndexMap[q.gambarMarker];
-    } else if (!finalImage && Object.keys(imageIndexMap).length > 0) {
+    const allImages: string[] = [];
+
+    // Check gambarMarkers array or singular gambarMarker
+    const markers: string[] = Array.isArray(q.gambarMarkers)
+      ? q.gambarMarkers
+      : q.gambarMarker
+      ? [q.gambarMarker]
+      : [];
+
+    markers.forEach((m) => {
+      if (imageIndexMap[m] && !allImages.includes(imageIndexMap[m])) {
+        allImages.push(imageIndexMap[m]);
+      }
+    });
+
+    // Also scan in question text
+    if (q.pertanyaan) {
       for (const [marker, uri] of Object.entries(imageIndexMap)) {
-        if (q.pertanyaan && q.pertanyaan.includes(marker)) {
-          finalImage = uri;
+        if (q.pertanyaan.includes(marker)) {
+          if (!allImages.includes(uri)) {
+            allImages.push(uri);
+          }
           q.pertanyaan = q.pertanyaan.replace(marker, "").trim();
-          break;
         }
       }
+    }
+
+    if (allImages.length > 0) {
+      finalImage = allImages[0];
     }
 
     return {
@@ -289,14 +401,21 @@ ATURAN WAJIB & KETAT:
       tipe: q.tipe || "pilihan_ganda",
       pertanyaan: q.pertanyaan || "",
       pilihan: q.pilihan || undefined,
-      kunciJawaban: q.kunciJawaban || "",
+      pilihanKompleks: q.pilihanKompleks || (q.tipe === 'pilihan_ganda_kompleks' ? q.pilihan : undefined),
+      kunciPilihanKompleks: q.kunciPilihanKompleks || undefined,
+      pasanganMenjodohkan: q.pasanganMenjodohkan || undefined,
+      kunciMenjodohkan: q.kunciMenjodohkan || undefined,
+      kunciJawaban: q.kunciJawaban || (q.kunciPilihanKompleks ? q.kunciPilihanKompleks.join(", ") : ""),
       pembahasan: q.pembahasan || "",
       bobot: Number(q.bobot) > 0 ? Number(q.bobot) : 1,
       gambar: finalImage,
-      perluVerifikasi: Boolean(q.perluVerifikasi || !q.kunciJawaban),
+      gambarList: allImages.length > 0 ? allImages : undefined,
+      perluVerifikasi: Boolean(q.perluVerifikasi || (!q.kunciJawaban && !q.kunciPilihanKompleks)),
       catatanVerifikasi:
         q.catatanVerifikasi ||
-        (!q.kunciJawaban ? "Kunci jawaban belum terdeteksi dari dokumen" : undefined),
+        (!q.kunciJawaban && !q.kunciPilihanKompleks
+          ? "Kunci jawaban belum terdeteksi dari dokumen"
+          : undefined),
     };
   });
 
@@ -324,15 +443,20 @@ export async function handleParsePdf(fileBase64: string, fileName: string = "dok
   const prompt = `Anda adalah sistem AI pemeriksa naskah ujian resmi sekolah Indonesia.
 Analisis berkas PDF terlampir secara menyeluruh (baik halaman berupa teks digital maupun hasil scan/gambar OCR).
 
-ATURAN WAJIB & INTEGRITAS SOAL:
+ATURAN WAJIB & INTEGRITAS NASKAH SOAL:
 1. JANGAN PERNAH MENGARANG ATAU MENGUBAH teks soal, angka, pilihan jawaban, rumus, atau urutan soal dari dokumen asli!
-2. Ekstrak nomor soal berurutan persis sesuai naskah dokumen asli.
-3. Kenali nomor soal, teks pertanyaan, rumus matematika/sains, tabel, dan pilihan A/B/C/D/E.
-4. Tentukan tipe soal: 'pilihan_ganda' | 'benar_salah' | 'isian' | 'esai'.
-5. Deteksi kunci jawaban jika tersedia (pada naskah soal langsung, cetak tebal, atau tabel kunci jawaban di akhir halaman).
-6. Jika dokumen memiliki diagram/gambar pada nomor soal tertentu, jelaskan deskripsi visual diagram tersebut pada field 'gambarDeskripsi'.
-7. Jika ada soal yang terpotong, buram, tidak terbaca jelas, atau kunci belum cocok, tandai 'perluVerifikasi': true dan isi 'catatanVerifikasi'.
-8. Format output WAJIB JSON valid sesuai skema:
+2. Ekstrak nomor soal berurutan persis sesuai naskah dokumen asli (1, 2, 3, ...).
+3. Kenali nomor soal, teks pertanyaan, rumus matematika/sains, tabel, dan tipe soal secara akurat:
+   - 'pilihan_ganda' : Pilihan tunggal A, B, C, D, E.
+   - 'pilihan_ganda_kompleks' : Pilihan dengan lebih dari 1 jawaban benar (centang/checkbox). Kunci di 'kunciPilihanKompleks': ["A", "C"].
+   - 'benar_salah' : Pernyataan yang dinilai Benar atau Salah. Kunci: "Benar" atau "Salah".
+   - 'menjodohkan' : Soal menjodohkan kolom kiri dan kanan. Masukkan daftar pasangan di 'pasanganMenjodohkan' [{ "id": "1", "kiri": "pernyataan", "kanan": "pasangan" }] dan 'kunciMenjodohkan'.
+   - 'isian' : Soal isian singkat (kata/istilah/angka).
+   - 'esai' : Soal uraian panjang / penjelasan / hitungan.
+4. Deteksi kunci jawaban jika tersedia (pada naskah soal langsung, cetak tebal, atau tabel kunci jawaban di akhir halaman).
+5. Jika dokumen memiliki diagram/gambar pada nomor soal tertentu, catat deskripsi visual diagram tersebut pada field 'gambarDeskripsi' dan 'nomorHalaman'.
+6. Jika ada soal yang terpotong, buram, tidak terbaca jelas, atau kunci belum cocok, tandai 'perluVerifikasi': true dan isi 'catatanVerifikasi'.
+7. Format output WAJIB JSON valid sesuai skema:
 
 {
   "judul": "string judul dokumen ujian",
@@ -341,7 +465,7 @@ ATURAN WAJIB & INTEGRITAS SOAL:
   "soalList": [
     {
       "nomor": 1,
-      "tipe": "pilihan_ganda | benar_salah | isian | esai",
+      "tipe": "pilihan_ganda | pilihan_ganda_kompleks | benar_salah | menjodohkan | isian | esai",
       "pertanyaan": "teks soal lengkap beserta rumus atau data tabel",
       "pilihan": {
         "A": "teks A",
@@ -349,9 +473,15 @@ ATURAN WAJIB & INTEGRITAS SOAL:
         "C": "teks C",
         "D": "teks D"
       },
+      "kunciPilihanKompleks": ["A", "C"],
+      "pasanganMenjodohkan": [
+        { "id": "1", "kiri": "pernyataan kiri", "kanan": "pasangan kanan" }
+      ],
+      "kunciMenjodohkan": { "1": "pasangan kanan" },
       "kunciJawaban": "A | B | C | D | teks kunci",
       "pembahasan": "pembahasan ringkas jika ada",
       "gambarDeskripsi": "keterangan gambar/diagram jika soal merujuk pada gambar tertentu",
+      "nomorHalaman": 1,
       "bobot": 1,
       "perluVerifikasi": false,
       "catatanVerifikasi": "catatan jika perlu dicek guru"
@@ -384,14 +514,21 @@ ATURAN WAJIB & INTEGRITAS SOAL:
     tipe: q.tipe || "pilihan_ganda",
     pertanyaan: q.pertanyaan || "",
     pilihan: q.pilihan || undefined,
-    kunciJawaban: q.kunciJawaban || "",
+    pilihanKompleks: q.pilihanKompleks || (q.tipe === 'pilihan_ganda_kompleks' ? q.pilihan : undefined),
+    kunciPilihanKompleks: q.kunciPilihanKompleks || undefined,
+    pasanganMenjodohkan: q.pasanganMenjodohkan || undefined,
+    kunciMenjodohkan: q.kunciMenjodohkan || undefined,
+    kunciJawaban: q.kunciJawaban || (q.kunciPilihanKompleks ? q.kunciPilihanKompleks.join(", ") : ""),
     pembahasan: q.pembahasan || "",
     gambarCaption: q.gambarDeskripsi || undefined,
+    nomorHalaman: q.nomorHalaman || undefined,
     bobot: Number(q.bobot) > 0 ? Number(q.bobot) : 1,
-    perluVerifikasi: Boolean(q.perluVerifikasi || !q.kunciJawaban),
+    perluVerifikasi: Boolean(q.perluVerifikasi || (!q.kunciJawaban && !q.kunciPilihanKompleks)),
     catatanVerifikasi:
       q.catatanVerifikasi ||
-      (!q.kunciJawaban ? "Kunci jawaban belum terdeteksi dari dokumen" : undefined),
+      (!q.kunciJawaban && !q.kunciPilihanKompleks
+        ? "Kunci jawaban belum terdeteksi dari dokumen"
+        : undefined),
   }));
 
   return {

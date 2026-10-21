@@ -1,4 +1,4 @@
-export type UserRole = 'admin' | 'guru' | 'superadmin';
+export type UserRole = 'admin' | 'guru' | 'siswa' | 'superadmin';
 
 export interface SchoolAccount {
   id: string; // e.g. 'sch-1', 'sch-2'
@@ -56,6 +56,9 @@ export interface User {
   nip?: string;
   guruId?: string; // linked to Teacher
   kelasId?: string; // assigned class id for teacher filtering
+  siswaId?: string; // linked to Student if role is siswa
+  kelas?: string;
+  nisn?: string;
 }
 
 export interface SekolahInfo {
@@ -408,8 +411,20 @@ export interface BahanAjarAI {
 }
 
 // ==================== UJIAN ONLINE / CBT MODULE ====================
-export type JenisSoal = 'pilihan_ganda' | 'benar_salah' | 'isian' | 'esai';
+export type JenisSoal =
+  | 'pilihan_ganda'
+  | 'pilihan_ganda_kompleks'
+  | 'benar_salah'
+  | 'menjodohkan'
+  | 'isian'
+  | 'esai';
 export type StatusUjian = 'draf' | 'terjadwal' | 'aktif' | 'selesai' | 'diarsipkan';
+
+export interface PasanganMenjodohkan {
+  id: string;
+  kiri: string;
+  kanan: string;
+}
 
 export interface SoalUjian {
   id: string;
@@ -417,15 +432,23 @@ export interface SoalUjian {
   tipe: JenisSoal;
   pertanyaan: string;
   gambar?: string; // Data URI (Base64) or URL
+  gambarList?: string[]; // Multiple figures / illustrations
   gambarCaption?: string;
   pilihan?: {
     [key: string]: string; // A, B, C, D, E
   };
+  pilihanKompleks?: {
+    [key: string]: string; // A, B, C, D, E for multi-checkbox
+  };
+  kunciPilihanKompleks?: string[]; // e.g. ["A", "C"]
+  pasanganMenjodohkan?: PasanganMenjodohkan[];
+  kunciMenjodohkan?: { [keyKiri: string]: string }; // Map key kiri to expected kanan
   kunciJawaban: string; // e.g. "A", "Benar", "kata kunci", atau rubrik esai
   pembahasan?: string;
   bobot: number; // default 1
   perluVerifikasi?: boolean; // flag if OCR/parser is uncertain
   catatanVerifikasi?: string;
+  nomorHalaman?: number;
 }
 
 export interface RiwayatPerubahanKunci {
@@ -491,7 +514,9 @@ export interface LogPelanggaranUjian {
 }
 
 export interface DetailJawabanSiswa {
-  jawabanDipilih: string;
+  jawabanDipilih: string; // Plain string or comma-separated keys for complex
+  jawabanKompleks?: string[]; // Array of selected option keys (e.g. ['A', 'C'])
+  jawabanMenjodohkan?: { [keyKiri: string]: string }; // Pair selections
   raguRagu?: boolean;
   isBenar?: boolean;
   skorDidapat?: number;

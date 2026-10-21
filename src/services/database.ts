@@ -1,4 +1,4 @@
-import { db as firestoreDb, doc, setDoc, getDoc, deleteDoc, collection, onSnapshot, query, getDocs } from './firebase';
+import { db as firestoreDb, doc, setDoc, getDoc, deleteDoc, collection, onSnapshot, query, getDocs, writeBatch } from './firebase';
 import {
   User,
   SekolahInfo,
@@ -1506,24 +1506,101 @@ class DatabaseService {
 
   saveSiswa(siswa: Siswa): Siswa {
     const list = this.getAllSiswaListUnfiltered();
-    const idx = list.findIndex((s) => s.id === siswa.id);
+    const schoolId = siswa.schoolId || this.getActiveSchoolId() || 'sch-1';
+    const prepared: Siswa = {
+      ...siswa,
+      schoolId,
+    };
+    const idx = list.findIndex((s) => s.id === prepared.id);
     if (idx >= 0) {
-      list[idx] = siswa;
+      list[idx] = prepared;
     } else {
-      list.unshift(siswa);
+      list.unshift(prepared);
     }
     this.setItem(STORAGE_KEYS.SISWA, list);
-    if (siswa.kelas) {
-      this.ensureClassesExist([siswa.kelas]);
+    if (prepared.kelas) {
+      this.ensureClassesExist([prepared.kelas]);
     }
+    this.syncToFirestore(schoolId, 'siswa', prepared).catch((e) =>
+      console.warn('[saveSiswa Firestore Sync Error]:', e)
+    );
     window.dispatchEvent(new Event('data_siswa_changed'));
-    return siswa;
+    return prepared;
   }
 
-  saveManySiswa(newSiswaList: Siswa[]): void {
+  async saveManySiswa(
+    newSiswaList: Siswa[],
+    options: { overwriteDuplicates?: boolean } = {}
+  ): Promise<{ savedCount: number; updatedCount: number; skippedCount: number }> {
     const list = this.getAllSiswaListUnfiltered();
-    const updated = [...newSiswaList, ...list];
-    this.setItem(STORAGE_KEYS.SISWA, updated);
+    const schoolId = this.getActiveSchoolId() || 'sch-1';
+    const overwrite = Boolean(options.overwriteDuplicates);
+
+    let savedCount = 0;
+    let updatedCount = 0;
+    let skippedCount = 0;
+
+    const updatedList = [...list];
+
+    // Prepare Firestore batch
+    let batch = writeBatch(firestoreDb);
+    let batchCount = 0;
+
+    for (const student of newSiswaList) {
+      const studentWithSchool: Siswa = {
+        ...student,
+        schoolId: student.schoolId || schoolId,
+      };
+
+      const existingIdx = updatedList.findIndex(
+        (s) =>
+          s.id === student.id ||
+          (s.nisn && student.nisn && s.nisn.trim() === student.nisn.trim()) ||
+          (s.nomorInduk && student.nomorInduk && s.nomorInduk.trim() === student.nomorInduk.trim())
+      );
+
+      if (existingIdx >= 0) {
+        if (overwrite) {
+          updatedList[existingIdx] = { ...updatedList[existingIdx], ...studentWithSchool };
+          updatedCount++;
+          // Add to batch
+          const docRef = doc(firestoreDb, `schools/${schoolId}/siswa`, updatedList[existingIdx].id);
+          batch.set(docRef, this.sanitizeForFirestore(updatedList[existingIdx]));
+          batchCount++;
+        } else {
+          skippedCount++;
+        }
+      } else {
+        updatedList.unshift(studentWithSchool);
+        savedCount++;
+        // Add to batch
+        const docRef = doc(firestoreDb, `schools/${schoolId}/siswa`, studentWithSchool.id);
+        batch.set(docRef, this.sanitizeForFirestore(studentWithSchool));
+        batchCount++;
+      }
+
+      // Commit batch in chunks of 400 to stay safely under Firestore 500 limit
+      if (batchCount >= 400) {
+        try {
+          await batch.commit();
+        } catch (e) {
+          console.warn('[saveManySiswa Batch Commit Error]:', e);
+        }
+        batch = writeBatch(firestoreDb);
+        batchCount = 0;
+      }
+    }
+
+    if (batchCount > 0) {
+      try {
+        await batch.commit();
+      } catch (e) {
+        console.warn('[saveManySiswa Final Batch Commit Error]:', e);
+      }
+    }
+
+    // Persist to local storage & cache
+    this.setItem(STORAGE_KEYS.SISWA, updatedList);
 
     // Otomatis sinkronisasi rombel kelas baru ke master data kelas
     const classes = Array.from(new Set(newSiswaList.map((s) => s.kelas).filter(Boolean)));
@@ -1532,11 +1609,16 @@ class DatabaseService {
     }
 
     window.dispatchEvent(new Event('data_siswa_changed'));
+    return { savedCount, updatedCount, skippedCount };
   }
 
   deleteSiswa(id: string): void {
     const list = this.getAllSiswaListUnfiltered().filter((s) => s.id !== id);
+    const schoolId = this.getActiveSchoolId() || 'sch-1';
     this.setItem(STORAGE_KEYS.SISWA, list);
+    this.deleteFromFirestore(schoolId, 'siswa', id).catch((e) =>
+      console.warn('[deleteSiswa Firestore Delete Error]:', e)
+    );
     window.dispatchEvent(new Event('data_siswa_changed'));
   }
 
@@ -3282,8 +3364,38 @@ class DatabaseService {
       }
 
       if (soal.tipe === 'pilihan_ganda' || soal.tipe === 'benar_salah') {
-        const isMatch =
-          jawabanUser.toUpperCase() === String(soal.kunciJawaban || '').trim().toUpperCase();
+        const rawKunci = String(soal.kunciJawaban || '').trim();
+        let isMatch = false;
+
+        if (soal.tipe === 'benar_salah') {
+          const norm = (str: string) => {
+            const u = str.toUpperCase().trim();
+            if (['BENAR', 'B', 'TRUE', 'T', '1', 'YA'].includes(u)) return 'BENAR';
+            if (['SALAH', 'S', 'FALSE', 'F', '0', 'TIDAK'].includes(u)) return 'SALAH';
+            return u;
+          };
+          isMatch = norm(jawabanUser) === norm(rawKunci);
+        } else {
+          // Pilihan Ganda: handle A/B/C/D key, "A. Text", or matching full option text
+          const userKey = jawabanUser.toUpperCase();
+          const expectedKey = rawKunci.toUpperCase();
+
+          isMatch =
+            userKey === expectedKey ||
+            expectedKey.startsWith(userKey + '.') ||
+            expectedKey.startsWith(userKey + ')') ||
+            expectedKey.startsWith(userKey + ' ');
+
+          // If still not matched, check if key is full text and matches chosen option's text
+          if (!isMatch && soal.pilihan) {
+            const chosenOptionText = String(soal.pilihan[userKey] || '').trim().toLowerCase();
+            const expectedText = rawKunci.toLowerCase();
+            if (chosenOptionText && chosenOptionText === expectedText) {
+              isMatch = true;
+            }
+          }
+        }
+
         if (isMatch) {
           jumlahBenar++;
           totalPoinDiperoleh += bobot;
@@ -3296,6 +3408,126 @@ class DatabaseService {
           jumlahSalah++;
           detailWithScores[soal.id] = {
             jawabanDipilih: jawabanUser,
+            isBenar: false,
+            skorDidapat: 0,
+          };
+        }
+      } else if (soal.tipe === 'pilihan_ganda_kompleks') {
+        // Multiple choice complex (checkboxes)
+        const userPicks = (
+          (resp as any)?.jawabanKompleks && Array.isArray((resp as any).jawabanKompleks)
+            ? (resp as any).jawabanKompleks
+            : jawabanUser.split(/[,;\s]+/)
+        )
+          .map((s: string) => s.trim().toUpperCase())
+          .filter(Boolean);
+
+        const expectedPicks = (
+          soal.kunciPilihanKompleks && Array.isArray(soal.kunciPilihanKompleks)
+            ? soal.kunciPilihanKompleks
+            : String(soal.kunciJawaban || '').split(/[,;\s]+/)
+        )
+          .map((s: string) => s.trim().toUpperCase())
+          .filter(Boolean);
+
+        const correctUserPicks = userPicks.filter((p: string) => expectedPicks.includes(p));
+        const wrongUserPicks = userPicks.filter((p: string) => !expectedPicks.includes(p));
+
+        const isExactMatch =
+          correctUserPicks.length === expectedPicks.length &&
+          wrongUserPicks.length === 0 &&
+          expectedPicks.length > 0;
+
+        if (isExactMatch) {
+          jumlahBenar++;
+          totalPoinDiperoleh += bobot;
+          detailWithScores[soal.id] = {
+            jawabanDipilih: userPicks.join(', '),
+            jawabanKompleks: userPicks,
+            isBenar: true,
+            skorDidapat: bobot,
+          };
+        } else if (correctUserPicks.length > 0 && wrongUserPicks.length === 0) {
+          const partialScore =
+            Math.round((correctUserPicks.length / Math.max(1, expectedPicks.length)) * bobot * 10) /
+            10;
+          totalPoinDiperoleh += partialScore;
+          if (partialScore >= bobot * 0.5) jumlahBenar++;
+          else jumlahSalah++;
+          detailWithScores[soal.id] = {
+            jawabanDipilih: userPicks.join(', '),
+            jawabanKompleks: userPicks,
+            isBenar: false,
+            skorDidapat: partialScore,
+          };
+        } else {
+          jumlahSalah++;
+          detailWithScores[soal.id] = {
+            jawabanDipilih: userPicks.join(', '),
+            jawabanKompleks: userPicks,
+            isBenar: false,
+            skorDidapat: 0,
+          };
+        }
+      } else if (soal.tipe === 'menjodohkan') {
+        // Matching pairs
+        let userPairs: Record<string, string> = {};
+        if ((resp as any)?.jawabanMenjodohkan && typeof (resp as any).jawabanMenjodohkan === 'object') {
+          userPairs = (resp as any).jawabanMenjodohkan;
+        } else {
+          try {
+            userPairs = JSON.parse(jawabanUser);
+          } catch {
+            userPairs = {};
+          }
+        }
+
+        const expectedPairs: Record<string, string> =
+          soal.kunciMenjodohkan ||
+          (soal.pasanganMenjodohkan || []).reduce((acc: any, p) => {
+            acc[p.id || p.kiri] = p.kanan;
+            return acc;
+          }, {});
+
+        const totalExpectedPairs = Object.keys(expectedPairs).length;
+        let matchedCount = 0;
+
+        for (const [kiriKey, expectedKanan] of Object.entries(expectedPairs)) {
+          const userKanan = userPairs[kiriKey];
+          if (
+            userKanan &&
+            String(userKanan).trim().toLowerCase() === String(expectedKanan).trim().toLowerCase()
+          ) {
+            matchedCount++;
+          }
+        }
+
+        if (totalExpectedPairs > 0 && matchedCount === totalExpectedPairs) {
+          jumlahBenar++;
+          totalPoinDiperoleh += bobot;
+          detailWithScores[soal.id] = {
+            jawabanDipilih: JSON.stringify(userPairs),
+            jawabanMenjodohkan: userPairs,
+            isBenar: true,
+            skorDidapat: bobot,
+          };
+        } else if (totalExpectedPairs > 0 && matchedCount > 0) {
+          const partial =
+            Math.round((matchedCount / totalExpectedPairs) * bobot * 10) / 10;
+          totalPoinDiperoleh += partial;
+          if (partial >= bobot * 0.5) jumlahBenar++;
+          else jumlahSalah++;
+          detailWithScores[soal.id] = {
+            jawabanDipilih: JSON.stringify(userPairs),
+            jawabanMenjodohkan: userPairs,
+            isBenar: false,
+            skorDidapat: partial,
+          };
+        } else {
+          jumlahSalah++;
+          detailWithScores[soal.id] = {
+            jawabanDipilih: JSON.stringify(userPairs),
+            jawabanMenjodohkan: userPairs,
             isBenar: false,
             skorDidapat: 0,
           };

@@ -32,6 +32,7 @@ interface ParsedRow {
   namaOrangTua: string;
   alamat: string;
   isValid: boolean;
+  isDuplicate?: boolean;
   errors: string[];
 }
 
@@ -40,8 +41,30 @@ interface ImportSiswaViewProps {
   initialKelas?: string;
 }
 
-// Helper: robust column value extractor
-function extractField(row: Record<string, unknown>, aliases: string[]): string {
+interface ColumnMapping {
+  namaLengkap?: string;
+  nisn?: string;
+  nomorInduk?: string;
+  kelas?: string;
+  jenisKelamin?: string;
+  tempatLahir?: string;
+  tanggalLahir?: string;
+  namaOrangTua?: string;
+  alamat?: string;
+}
+
+// Helper: robust column value extractor with support for explicit custom mapping
+function extractField(
+  row: Record<string, unknown>,
+  aliases: string[],
+  customMappedKey?: string
+): string {
+  // 0. Explicit user custom mapping
+  if (customMappedKey && row[customMappedKey] !== undefined && row[customMappedKey] !== null) {
+    const val = String(row[customMappedKey]).trim();
+    if (val !== '') return val;
+  }
+
   // 1. Exact match
   for (const alias of aliases) {
     if (row[alias] !== undefined && row[alias] !== null && String(row[alias]).trim() !== '') {
@@ -173,7 +196,6 @@ function normalizeAndMatchKelas(
 
   // 4. If no exact existing class matched, standardize name format
   if (withArabic.toLowerCase().startsWith('kelas')) {
-    // Standardize casing to "Kelas X"
     return withArabic.replace(/^[kK][eE][lL][aA][sS]\s*/, 'Kelas ');
   }
 
@@ -188,6 +210,14 @@ export const ImportSiswaView: React.FC<ImportSiswaViewProps> = ({ onSuccess, ini
   const [assignmentMode, setAssignmentMode] = useState<'auto' | 'fixed'>('auto');
   const [selectedFixedKelas, setSelectedFixedKelas] = useState<string>(defaultClass);
   const [fallbackKelas, setFallbackKelas] = useState<string>(defaultClass);
+
+  // Duplicate resolution mode
+  const [duplicateMode, setDuplicateMode] = useState<'skip' | 'update' | 'reject'>('skip');
+
+  // Column mapping states
+  const [availableColumns, setAvailableColumns] = useState<string[]>([]);
+  const [customMapping, setCustomMapping] = useState<ColumnMapping>({});
+  const [showMappingModal, setShowMappingModal] = useState<boolean>(false);
 
   // Raw items cache so user can re-apply settings without re-uploading file
   const [cachedRawItems, setCachedRawItems] = useState<Record<string, unknown>[]>([]);
@@ -243,6 +273,27 @@ export const ImportSiswaView: React.FC<ImportSiswaViewProps> = ({ onSuccess, ini
     exportToExcel(templateData, 'Template_Import_Siswa_Sekolah', 'Template');
   };
 
+  // Download Error / Duplicate Log Report
+  const handleDownloadErrorReport = () => {
+    const errorData = rows
+      .filter((r) => !r.isValid || r.isDuplicate)
+      .map((r) => ({
+        'No. Baris': r.index,
+        'Nama Lengkap': r.namaLengkap || '(Kosong)',
+        'NISN': r.nisn || '(Kosong)',
+        'Nomor Induk': r.nomorInduk || '(Kosong)',
+        'Kelas Terdeteksi': r.kelas,
+        'Status Baris': r.isDuplicate ? 'Duplikat Terdeteksi' : 'Gagal Validasi',
+        'Rincian Kendala': r.errors.join('; ') || (r.isDuplicate ? 'Siswa sudah ada di database' : ''),
+      }));
+
+    if (errorData.length === 0) {
+      alert('Semua baris siswa dalam file valid dan tidak memiliki kendala.');
+      return;
+    }
+    exportToExcel(errorData, `Laporan_Kendala_Import_Siswa_${Date.now()}`, 'Log Kendala');
+  };
+
   // Quick load sample data showcasing multiple classes
   const handleLoadSample = () => {
     const sampleRaw = [
@@ -250,7 +301,7 @@ export const ImportSiswaView: React.FC<ImportSiswaViewProps> = ({ onSuccess, ini
         'Nama Lengkap': 'Naufal Farhan',
         NISN: '0165999001',
         'Nomor Induk': '23240155',
-        Rombel: '1A', // Will smartly map to 'Kelas 1A'
+        Rombel: '1A',
         'Jenis Kelamin': 'L',
         'Tempat Lahir': 'Bandung',
         'Tanggal Lahir': '2017-04-10',
@@ -261,7 +312,7 @@ export const ImportSiswaView: React.FC<ImportSiswaViewProps> = ({ onSuccess, ini
         'Nama Lengkap': 'Rania Humaira',
         NISN: '0165999002',
         'Nomor Induk': '23240156',
-        Rombel: '1B', // Will smartly map to 'Kelas 1B'
+        Rombel: '1B',
         'Jenis Kelamin': 'P',
         'Tempat Lahir': 'Bandung',
         'Tanggal Lahir': '2017-11-15',
@@ -272,7 +323,7 @@ export const ImportSiswaView: React.FC<ImportSiswaViewProps> = ({ onSuccess, ini
         'Nama Lengkap': 'Bagas Pratama',
         NISN: '0165999003',
         'Nomor Induk': '23240157',
-        'Rombongan Belajar': 'Kelas 2', // Will smartly map to 'Kelas 2'
+        'Rombongan Belajar': 'Kelas 2',
         'Jenis Kelamin': 'L',
         'Tempat Lahir': 'Bandung',
         'Tanggal Lahir': '2016-08-20',
@@ -283,7 +334,7 @@ export const ImportSiswaView: React.FC<ImportSiswaViewProps> = ({ onSuccess, ini
         'Nama Lengkap': 'Citra Kirana',
         NISN: '0165999004',
         'Nomor Induk': '23240158',
-        Kelas: 'Kelas 3', // Will map to 'Kelas 3'
+        Kelas: 'Kelas 3',
         'Jenis Kelamin': 'P',
         'Tempat Lahir': 'Bandung',
         'Tanggal Lahir': '2015-05-12',
@@ -292,7 +343,7 @@ export const ImportSiswaView: React.FC<ImportSiswaViewProps> = ({ onSuccess, ini
       },
       {
         'Nama Lengkap': 'Siswa Duplikat Uji',
-        NISN: '0165432101', // Duplicate NISN from initial seed database
+        NISN: '0165432101',
         'Nomor Induk': '23240101',
         Kelas: 'Kelas 1A',
         'Jenis Kelamin': 'L',
@@ -303,11 +354,12 @@ export const ImportSiswaView: React.FC<ImportSiswaViewProps> = ({ onSuccess, ini
       },
     ];
     setFileName('contoh_data_siswa_multikelas.xlsx');
+    setAvailableColumns(Object.keys(sampleRaw[0]));
     setCachedRawItems(sampleRaw);
-    parseRecords(sampleRaw, assignmentMode, selectedFixedKelas, fallbackKelas);
+    parseRecords(sampleRaw, assignmentMode, selectedFixedKelas, fallbackKelas, duplicateMode, customMapping);
   };
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
@@ -315,165 +367,208 @@ export const ImportSiswaView: React.FC<ImportSiswaViewProps> = ({ onSuccess, ini
     setIsProcessing(true);
     setSaveSuccessMessage('');
 
-    const reader = new FileReader();
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      let ws: XLSX.WorkSheet;
 
-    reader.onload = (evt) => {
-      try {
-        const bstr = evt.target?.result;
-        const wb = XLSX.read(bstr, { type: 'binary' });
-        const wsname = wb.SheetNames[0];
-        const ws = wb.Sheets[wsname];
-        const rawJson = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws);
-        setCachedRawItems(rawJson);
-        parseRecords(rawJson, assignmentMode, selectedFixedKelas, fallbackKelas);
-      } catch (err) {
-        console.error('Parsing error:', err);
-        alert('Gagal membaca file Excel/CSV! Pastikan format file sesuai.');
-      } finally {
-        setIsProcessing(false);
+      if (file.name.toLowerCase().endsWith('.csv')) {
+        // Robust CSV delimiter sniffer (handles ;, ,, \t)
+        const text = new TextDecoder('utf-8').decode(arrayBuffer);
+        const firstLines = text.split('\n').slice(0, 5).join('\n');
+        const commaCount = (firstLines.match(/,/g) || []).length;
+        const semiCount = (firstLines.match(/;/g) || []).length;
+        const tabCount = (firstLines.match(/\t/g) || []).length;
+        const delimiter = semiCount > commaCount ? ';' : tabCount > commaCount ? '\t' : ',';
+        const wb = XLSX.read(text, { type: 'string', FS: delimiter, raw: false });
+        ws = wb.Sheets[wb.SheetNames[0]];
+      } else {
+        // XLSX and XLS reader with string retention for leading zeros
+        const wb = XLSX.read(arrayBuffer, {
+          type: 'array',
+          cellDates: true,
+          cellText: true,
+          raw: false,
+        });
+        ws = wb.Sheets[wb.SheetNames[0]];
       }
-    };
 
-    reader.readAsBinaryString(file);
+      if (!ws) {
+        throw new Error('Lembar kerja kosong atau tidak dapat dibaca.');
+      }
+
+      const rawJson = XLSX.utils.sheet_to_json<Record<string, unknown>>(ws, {
+        raw: false,
+        defval: '',
+      });
+
+      if (rawJson.length === 0) {
+        throw new Error('Tidak ada baris data siswa yang ditemukan pada file.');
+      }
+
+      const cols = Object.keys(rawJson[0] || {});
+      setAvailableColumns(cols);
+      setCachedRawItems(rawJson);
+      parseRecords(rawJson, assignmentMode, selectedFixedKelas, fallbackKelas, duplicateMode, customMapping);
+    } catch (err: any) {
+      console.error('Parsing error:', err);
+      alert('Gagal membaca file Excel/CSV: ' + (err?.message || 'Pastikan format berkas valid.'));
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   const parseRecords = (
     rawItems: Record<string, unknown>[],
     mode: 'auto' | 'fixed',
     fixedKelas: string,
-    fallback: string
+    fallback: string,
+    dupMode: 'skip' | 'update' | 'reject' = duplicateMode,
+    mapping: ColumnMapping = customMapping
   ) => {
     const existingSiswa = db.getAllSiswaListUnfiltered();
-    const existingNisns = new Set(existingSiswa.map((s) => s.nisn.trim()));
-    const existingNoInduk = new Set(existingSiswa.map((s) => s.nomorInduk.trim()));
+    const existingNisns = new Set(existingSiswa.map((s) => s.nisn?.trim()).filter(Boolean));
+    const existingNoInduk = new Set(existingSiswa.map((s) => s.nomorInduk?.trim()).filter(Boolean));
 
     const seenFileNisn = new Set<string>();
     const batchQrIds = db.generateBatchSiswaQrIds(rawItems.length);
 
     const parsed: ParsedRow[] = rawItems.map((item, idx) => {
       // 1. Flexible key matching for student names
-      const nama = extractField(item, [
-        'Nama Lengkap',
-        'namaLengkap',
-        'Nama Peserta Didik',
-        'Nama Siswa',
-        'Nama Murid',
-        'Nama',
-        'NAMA',
-        'Peserta Didik',
-      ]);
+      const nama = extractField(
+        item,
+        [
+          'Nama Lengkap',
+          'namaLengkap',
+          'Nama Peserta Didik',
+          'Nama Siswa',
+          'Nama Murid',
+          'Nama',
+          'NAMA',
+          'Peserta Didik',
+        ],
+        mapping.namaLengkap
+      );
 
       // 2. NISN
-      const nisnVal = extractField(item, [
-        'NISN',
-        'nisn',
-        'No. NISN',
-        'No NISN',
-        'Nomor NISN',
-      ]);
+      const nisnVal = extractField(
+        item,
+        ['NISN', 'nisn', 'No. NISN', 'No NISN', 'Nomor NISN'],
+        mapping.nisn
+      );
 
       // 3. Nomor Induk
-      const noIndukVal = extractField(item, [
-        'Nomor Induk',
-        'nomorInduk',
-        'No Induk',
-        'No. Induk',
-        'NIPD',
-        'NIS',
-        'No Induk Siswa',
-      ]);
+      const noIndukVal = extractField(
+        item,
+        ['Nomor Induk', 'nomorInduk', 'No Induk', 'No. Induk', 'NIPD', 'NIS', 'No Induk Siswa'],
+        mapping.nomorInduk
+      );
 
-      // 4. Kelas / Rombel: handles 'Kelas', 'Rombel', 'Rombongan Belajar', 'Tingkat', etc.
+      // 4. Kelas / Rombel
       let finalKelas: string;
       if (mode === 'fixed') {
         finalKelas = fixedKelas || defaultClass;
       } else {
-        const rawKelas = extractField(item, [
-          'Kelas',
-          'kelas',
-          'KELAS',
-          'Rombel',
-          'rombel',
-          'ROMBEL',
-          'Rombongan Belajar',
-          'rombongan_belajar',
-          'ROMBONGAN BELAJAR',
-          'Nama Rombel',
-          'nama_rombel',
-          'Tingkat',
-          'tingkat',
-          'Tingkat Kelas',
-          'Kelas / Rombel',
-          'Kelas/Rombel',
-          'Rombel/Kelas',
-          'Ruang',
-          'Ruang Kelas',
-        ]);
+        const rawKelas = extractField(
+          item,
+          [
+            'Kelas',
+            'kelas',
+            'KELAS',
+            'Rombel',
+            'rombel',
+            'ROMBEL',
+            'Rombongan Belajar',
+            'rombongan_belajar',
+            'ROMBONGAN BELAJAR',
+            'Nama Rombel',
+            'nama_rombel',
+            'Tingkat',
+            'tingkat',
+            'Tingkat Kelas',
+            'Kelas / Rombel',
+            'Kelas/Rombel',
+            'Rombel/Kelas',
+            'Ruang',
+            'Ruang Kelas',
+          ],
+          mapping.kelas
+        );
         finalKelas = normalizeAndMatchKelas(rawKelas, kelasList, fallback);
       }
 
       // 5. Gender
-      const rawJk = extractField(item, [
-        'Jenis Kelamin (L/P)',
-        'Jenis Kelamin',
-        'JK',
-        'jk',
-        'L/P',
-        'Gender',
-      ]).toUpperCase();
+      const rawJk = extractField(
+        item,
+        ['Jenis Kelamin (L/P)', 'Jenis Kelamin', 'JK', 'jk', 'L/P', 'Gender'],
+        mapping.jenisKelamin
+      ).toUpperCase();
       const jkVal: 'L' | 'P' = rawJk.startsWith('P') || rawJk === 'PEREMPUAN' || rawJk === 'F' ? 'P' : 'L';
 
       // 6. Tempat & Tanggal Lahir
-      const tmpLahir = extractField(item, [
-        'Tempat Lahir',
-        'tempatLahir',
-        'Tempat Lahir Siswa',
-        'Kota Lahir',
-      ]) || 'Bandung';
+      const tmpLahir =
+        extractField(
+          item,
+          ['Tempat Lahir', 'tempatLahir', 'Tempat Lahir Siswa', 'Kota Lahir'],
+          mapping.tempatLahir
+        ) || 'Bandung';
 
-      const rawTglLahir = item['Tanggal Lahir (YYYY-MM-DD)'] ??
-        item['Tanggal Lahir'] ??
-        item['tanggalLahir'] ??
-        item['Tgl Lahir'] ??
-        item['TGL LAHIR'];
+      const rawTglLahir =
+        (mapping.tanggalLahir && item[mapping.tanggalLahir]) ||
+        item['Tanggal Lahir (YYYY-MM-DD)'] ||
+        item['Tanggal Lahir'] ||
+        item['tanggalLahir'] ||
+        item['Tgl Lahir'] ||
+        item['TGL LAHIR'] ||
+        '';
       const tglLahir = formatBirthDate(rawTglLahir);
 
       // 7. Orang Tua & Alamat
-      const ortuVal = extractField(item, [
-        'Nama Orang Tua / Wali',
-        'Nama Orang Tua',
-        'Orang Tua',
-        'Nama Ayah',
-        'Nama Ibu',
-        'Wali',
-        'Orang Tua / Wali',
-      ]);
+      const ortuVal = extractField(
+        item,
+        [
+          'Nama Orang Tua / Wali',
+          'Nama Orang Tua',
+          'Orang Tua',
+          'Nama Ayah',
+          'Nama Ibu',
+          'Wali',
+          'Orang Tua / Wali',
+        ],
+        mapping.namaOrangTua
+      );
 
-      const alamatVal = extractField(item, [
-        'Alamat',
-        'alamat',
-        'Alamat Siswa',
-        'Alamat Tempat Tinggal',
-        'Domisili',
-      ]) || '-';
+      const alamatVal =
+        extractField(
+          item,
+          ['Alamat', 'alamat', 'Alamat Siswa', 'Alamat Tempat Tinggal', 'Domisili'],
+          mapping.alamat
+        ) || '-';
 
       const errors: string[] = [];
+      let isDuplicate = false;
 
       // Validations
       if (!nama) errors.push('Nama siswa kosong');
       if (!nisnVal) errors.push('NISN siswa kosong');
 
-      if (nisnVal && existingNisns.has(nisnVal)) {
-        errors.push(`NISN ${nisnVal} sudah terdaftar di database`);
-      }
-      if (noIndukVal && existingNoInduk.has(noIndukVal)) {
-        errors.push(`Nomor Induk ${noIndukVal} sudah ada di database`);
+      const isRegisteredInDb =
+        (nisnVal && existingNisns.has(nisnVal)) ||
+        (noIndukVal && existingNoInduk.has(noIndukVal));
+
+      if (isRegisteredInDb) {
+        isDuplicate = true;
+        if (dupMode === 'reject') {
+          errors.push(`Siswa sudah terdaftar di database (${nisnVal || noIndukVal})`);
+        }
       }
 
       if (nisnVal && seenFileNisn.has(nisnVal)) {
         errors.push(`Duplikat NISN ${nisnVal} di baris lain dalam file ini`);
       }
       if (nisnVal) seenFileNisn.add(nisnVal);
+
+      // Row validity depends on error count and duplicate mode
+      const isValid = errors.length === 0 && (dupMode !== 'reject' || !isDuplicate);
 
       return {
         index: idx + 1,
@@ -487,7 +582,8 @@ export const ImportSiswaView: React.FC<ImportSiswaViewProps> = ({ onSuccess, ini
         tanggalLahir: tglLahir,
         namaOrangTua: ortuVal,
         alamat: alamatVal,
-        isValid: errors.length === 0,
+        isValid,
+        isDuplicate,
         errors,
       };
     });

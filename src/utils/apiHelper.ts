@@ -182,8 +182,9 @@ export async function safeFetchJson<T = any>(
  */
 export async function extractDocxInBrowser(file: File): Promise<{
   text: string;
-  paragraphs: { text: string; imageUri?: string }[];
+  paragraphs: { text: string; imageUri?: string; imageUris?: string[] }[];
   mediaImages: { [key: string]: string };
+  imageMarkerMap: { [marker: string]: string };
 }> {
   const arrayBuffer = await file.arrayBuffer();
   const zip = await JSZip.loadAsync(arrayBuffer);
@@ -199,24 +200,38 @@ export async function extractDocxInBrowser(file: File): Promise<{
     }
   }
 
+  // Normalize path helper for reliable cross-matching
+  const normalizePath = (p: string): string => {
+    return p.replace(/^(\.\.\/)+/, '').replace(/^\//, '').replace(/^word\//, '').toLowerCase().trim();
+  };
+
   // Extract embedded media images as base64 data URIs
   const mediaImages: { [mediaPath: string]: string } = {};
-  const mediaFiles = zip.file(/^word\/media\//);
+  const mediaFiles = zip.file(/(?:^|\/)media\//);
   for (const f of mediaFiles) {
     const ext = f.name.split('.').pop()?.toLowerCase() || 'png';
-    const mime =
-      ext === 'jpg' || ext === 'jpeg'
-        ? 'image/jpeg'
-        : ext === 'gif'
-        ? 'image/gif'
-        : ext === 'webp'
-        ? 'image/webp'
-        : 'image/png';
+    let mime = 'image/png';
+    if (ext === 'jpg' || ext === 'jpeg') mime = 'image/jpeg';
+    else if (ext === 'gif') mime = 'image/gif';
+    else if (ext === 'webp') mime = 'image/webp';
+    else if (ext === 'svg') mime = 'image/svg+xml';
+    else if (ext === 'bmp') mime = 'image/bmp';
+    else if (ext === 'emf') mime = 'image/x-emf';
+    else if (ext === 'wmf') mime = 'image/x-wmf';
+
     const b64 = await f.async('base64');
-    const relativePath = f.name.replace(/^word\//, '');
     const dataUri = `data:${mime};base64,${b64}`;
-    mediaImages[relativePath] = dataUri;
+    const relativePath = f.name.replace(/^(?:word|ppt)\//, '');
+    const baseName = f.name.split('/').pop() || f.name;
+
     mediaImages[f.name] = dataUri;
+    mediaImages[f.name.toLowerCase()] = dataUri;
+    mediaImages[relativePath] = dataUri;
+    mediaImages[relativePath.toLowerCase()] = dataUri;
+    mediaImages[baseName] = dataUri;
+    mediaImages[baseName.toLowerCase()] = dataUri;
+    mediaImages[normalizePath(f.name)] = dataUri;
+    mediaImages[normalizePath(relativePath)] = dataUri;
   }
 
   const docFile = zip.file('word/document.xml');
@@ -225,42 +240,147 @@ export async function extractDocxInBrowser(file: File): Promise<{
   }
   const docXml = await docFile.async('string');
 
-  const pMatches = docXml.split(/<\/w:p>/g);
-  const paragraphs: { text: string; imageUri?: string }[] = [];
-
-  for (const p of pMatches) {
-    let imageUri: string | undefined = undefined;
-    const rIdMatch = p.match(/r:embed="([^"]+)"/);
-    if (rIdMatch) {
-      const rId = rIdMatch[1];
+  // Helper to extract image URIs from an XML fragment
+  const getImagesFromFragment = (frag: string): string[] => {
+    const uris: string[] = [];
+    const rIdMatches = [...frag.matchAll(/(?:[a-zA-Z0-9_]+:)?(?:embed|id|link|src|href)="([^"]+)"/g)];
+    for (const rMatch of rIdMatches) {
+      const rId = rMatch[1];
       const target = relsMap[rId];
-      if (target && mediaImages[target]) {
-        imageUri = mediaImages[target];
+      if (target) {
+        const norm = normalizePath(target);
+        const foundUri =
+          mediaImages[target] ||
+          mediaImages[target.toLowerCase()] ||
+          mediaImages[norm] ||
+          mediaImages[target.split('/').pop()?.toLowerCase() || ''];
+        if (foundUri && !uris.includes(foundUri)) {
+          uris.push(foundUri);
+        }
       }
     }
+    return uris;
+  };
 
-    const textMatches = p.match(/<w:t[^>]*>(.*?)<\/w:t>/g);
-    let text = '';
-    if (textMatches) {
-      text = textMatches.map((t) => t.replace(/<[^>]+>/g, '')).join('');
-    }
+  // Helper to extract text from w:t and m:t (formulas / math)
+  const getTextFromFragment = (frag: string): string => {
+    const textMatches = frag.match(/<[wm]:t[^>]*>(.*?)<\/[wm]:t>/g);
+    if (!textMatches) return '';
+    return textMatches.map((t) => t.replace(/<[^>]+>/g, '')).join('');
+  };
 
-    const cleanText = text.trim();
-    if (cleanText || imageUri) {
-      paragraphs.push({ text: cleanText, imageUri });
+  const paragraphs: { text: string; imageUri?: string; imageUris?: string[] }[] = [];
+  const imageMarkerMap: { [marker: string]: string } = {};
+  let imgIndex = 1;
+  const formattedLines: string[] = [];
+
+  // Parse top-level blocks: <w:p> and <w:tbl>
+  const blockRegex = /<(w:p|w:tbl)[^>]*>([\s\S]*?)<\/\1>/g;
+  let blockMatch: RegExpExecArray | null;
+
+  while ((blockMatch = blockRegex.exec(docXml)) !== null) {
+    const tag = blockMatch[1];
+    const content = blockMatch[2];
+
+    if (tag === 'w:p') {
+      const imageUris = getImagesFromFragment(content);
+      const text = getTextFromFragment(content).trim();
+      if (text || imageUris.length > 0) {
+        paragraphs.push({ text, imageUri: imageUris[0], imageUris });
+        let line = text;
+        if (imageUris.length > 0) {
+          const markers = imageUris.map((uri) => {
+            const marker = `[[IMAGE_SOAL_${imgIndex++}]]`;
+            imageMarkerMap[marker] = uri;
+            return marker;
+          });
+          line = `${line} ${markers.join(' ')}`.trim();
+        }
+        if (line) {
+          formattedLines.push(line);
+        }
+      }
+    } else if (tag === 'w:tbl') {
+      const tableImageUris = getImagesFromFragment(content);
+      const rows: string[][] = [];
+      const trRegex = /<w:tr[^>]*>([\s\S]*?)<\/w:tr>/g;
+      let trMatch: RegExpExecArray | null;
+
+      while ((trMatch = trRegex.exec(content)) !== null) {
+        const cells: string[] = [];
+        const tcRegex = /<w:tc[^>]*>([\s\S]*?)<\/w:tc>/g;
+        let tcMatch: RegExpExecArray | null;
+
+        while ((tcMatch = tcRegex.exec(trMatch[1])) !== null) {
+          cells.push(getTextFromFragment(tcMatch[1]).trim());
+        }
+        if (cells.length > 0) {
+          rows.push(cells);
+        }
+      }
+
+      if (rows.length > 0) {
+        let mdTable = rows.map((r) => '| ' + r.join(' | ') + ' |').join('\n');
+        if (rows.length > 1) {
+          const sep = '| ' + rows[0].map(() => '---').join(' | ') + ' |';
+          const lines = mdTable.split('\n');
+          lines.splice(1, 0, sep);
+          mdTable = lines.join('\n');
+        }
+
+        if (tableImageUris.length > 0) {
+          const markers = tableImageUris.map((uri) => {
+            const marker = `[[IMAGE_SOAL_${imgIndex++}]]`;
+            imageMarkerMap[marker] = uri;
+            return marker;
+          });
+          mdTable = `${mdTable}\n${markers.join(' ')}`;
+        }
+
+        paragraphs.push({ text: mdTable, imageUri: tableImageUris[0], imageUris: tableImageUris });
+        formattedLines.push(mdTable);
+      }
     }
   }
 
-  const plainText = paragraphs.map((p) => p.text).filter(Boolean).join('\n');
-  return { text: plainText, paragraphs, mediaImages };
+  // Fallback if no blocks matched
+  if (formattedLines.length === 0) {
+    const pMatches = docXml.split(/<\/w:p>/g);
+    for (const p of pMatches) {
+      const imageUris = getImagesFromFragment(p);
+      const text = getTextFromFragment(p).trim();
+      if (text || imageUris.length > 0) {
+        paragraphs.push({ text, imageUri: imageUris[0], imageUris });
+        let line = text;
+        if (imageUris.length > 0) {
+          const markers = imageUris.map((uri) => {
+            const marker = `[[IMAGE_SOAL_${imgIndex++}]]`;
+            imageMarkerMap[marker] = uri;
+            return marker;
+          });
+          line = `${line} ${markers.join(' ')}`.trim();
+        }
+        if (line) {
+          formattedLines.push(line);
+        }
+      }
+    }
+  }
+
+  const plainText = formattedLines.join('\n');
+  return { text: plainText, paragraphs, mediaImages, imageMarkerMap };
 }
 
 /**
  * Emergency local rule-based question parser.
  * Extracts questions, multiple choice options (A, B, C, D), and answer keys
  * purely client-side without needing an AI server.
+ * Preserves images by associating markers or map references with questions.
  */
-export function parseQuestionsWithRegex(rawText: string): SoalUjian[] {
+export function parseQuestionsWithRegex(
+  rawText: string,
+  imageMap?: Record<string, string>
+): SoalUjian[] {
   if (!rawText || !rawText.trim()) return [];
 
   const lines = rawText
@@ -271,18 +391,42 @@ export function parseQuestionsWithRegex(rawText: string): SoalUjian[] {
   const questions: SoalUjian[] = [];
   let currentSoal: Partial<SoalUjian> | null = null;
   let currentPilihan: Record<string, string> = {};
+  let currentImages: string[] = [];
+
+  const extractImagesFromText = (text: string): { cleanText: string; images: string[] } => {
+    let clean = text;
+    const foundImages: string[] = [];
+    if (imageMap) {
+      for (const [marker, uri] of Object.entries(imageMap)) {
+        if (clean.includes(marker)) {
+          if (!foundImages.includes(uri)) {
+            foundImages.push(uri);
+          }
+          clean = clean.split(marker).join('').trim();
+        }
+      }
+    }
+    return { cleanText: clean, images: foundImages };
+  };
 
   const finalizeCurrent = () => {
     if (currentSoal && currentSoal.pertanyaan) {
+      const { cleanText, images } = extractImagesFromText(currentSoal.pertanyaan);
+      const allImages = [...currentImages, ...images].filter(
+        (val, idx, self) => self.indexOf(val) === idx
+      );
+
       const hasOptions = Object.keys(currentPilihan).length > 0;
       questions.push({
         id: `soal-local-${Date.now()}-${questions.length + 1}`,
         nomor: questions.length + 1,
         tipe: hasOptions ? 'pilihan_ganda' : 'esai',
-        pertanyaan: currentSoal.pertanyaan.trim(),
+        pertanyaan: cleanText.trim(),
         pilihan: hasOptions ? { ...currentPilihan } : undefined,
         kunciJawaban: currentSoal.kunciJawaban || '',
         bobot: 1,
+        gambar: allImages.length > 0 ? allImages[0] : undefined,
+        gambarList: allImages.length > 0 ? allImages : undefined,
         perluVerifikasi: !currentSoal.kunciJawaban,
         catatanVerifikasi: !currentSoal.kunciJawaban
           ? 'Kunci jawaban belum terdeteksi. Silakan periksa kunci jawaban.'
@@ -291,22 +435,32 @@ export function parseQuestionsWithRegex(rawText: string): SoalUjian[] {
     }
     currentSoal = null;
     currentPilihan = {};
+    currentImages = [];
   };
 
   for (const line of lines) {
+    // Check if line contains standalone image markers
+    const { cleanText: lineWithoutMarkers, images: lineImages } = extractImagesFromText(line);
+    if (lineImages.length > 0) {
+      currentImages.push(...lineImages);
+    }
+
     // 1. Detect question number start (e.g., "1. ", "1) ", "Soal 1: ")
-    const numMatch = line.match(/^(?:Soal\s*)?(\d+)[\.\)]\s*(.+)/i);
+    const numMatch = lineWithoutMarkers.match(/^(?:Soal\s*)?(\d+)[\.\)]\s*(.+)/i);
     if (numMatch) {
       finalizeCurrent();
       currentSoal = {
         nomor: parseInt(numMatch[1], 10),
         pertanyaan: numMatch[2],
       };
+      if (lineImages.length > 0) {
+        currentImages.push(...lineImages);
+      }
       continue;
     }
 
     // 2. Detect multiple choice option (e.g., "A. ", "a. ", "A) ")
-    const optMatch = line.match(/^([A-Ea-e])[\.\)]\s*(.+)/);
+    const optMatch = lineWithoutMarkers.match(/^([A-Ea-e])[\.\)]\s*(.+)/);
     if (optMatch && currentSoal) {
       const optLetter = optMatch[1].toUpperCase();
       currentPilihan[optLetter] = optMatch[2].trim();
@@ -314,13 +468,13 @@ export function parseQuestionsWithRegex(rawText: string): SoalUjian[] {
     }
 
     // 3. Detect answer key (e.g., "Kunci: A", "Kunci Jawaban: B", "Jawaban: C")
-    const keyMatch = line.match(/^(?:Kunci(?:\s+Jawaban)?|Jawaban)\s*[:=]\s*([A-Ea-e])/i);
+    const keyMatch = lineWithoutMarkers.match(/^(?:Kunci(?:\s+Jawaban)?|Jawaban)\s*[:=]\s*([A-Ea-e])/i);
     if (keyMatch && currentSoal) {
       currentSoal.kunciJawaban = keyMatch[1].toUpperCase();
       continue;
     }
 
-    // 4. Continued question text or stimulus reading
+    // 4. Continued question text, table, or stimulus
     if (currentSoal) {
       if (Object.keys(currentPilihan).length === 0) {
         currentSoal.pertanyaan = `${currentSoal.pertanyaan || ''}\n${line}`;

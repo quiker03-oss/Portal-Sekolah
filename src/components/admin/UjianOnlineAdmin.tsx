@@ -461,7 +461,11 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
       }
 
       // Pre-extract docx in browser for maximum resilience
-      let docxBrowserData: { text: string; mediaImages: Record<string, string> } | null = null;
+      let docxBrowserData: {
+        text: string;
+        mediaImages: Record<string, string>;
+        imageMarkerMap?: Record<string, string>;
+      } | null = null;
       if (isDocx) {
         try {
           docxBrowserData = await extractDocxInBrowser(file);
@@ -542,7 +546,7 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
         }
 
         // Emergency local rule-based regex fallback (works 100% offline without any server)
-        const localQuestions = parseQuestionsWithRegex(docxBrowserData.text);
+        const localQuestions = parseQuestionsWithRegex(docxBrowserData.text, docxBrowserData.imageMarkerMap);
         if (localQuestions.length > 0) {
           setImportResult({
             judul: file.name.replace(/\.[^/.]+$/, ''),
