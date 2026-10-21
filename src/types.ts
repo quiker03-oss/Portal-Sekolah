@@ -205,8 +205,19 @@ export interface NilaiHarianItem {
   catatan?: string;
   semester?: 'Ganjil' | 'Genap';
   tahunAjaran?: string;
-  assessmentId?: string; // Identifier for this specific assessment column/session
-  keterangan?: string;
+}
+
+export interface BelJadwal {
+  id: string;
+  schoolId?: string;
+  waktu: string; // HH:MM format
+  keterangan: string;
+  pesanSuara: string;
+  aktif: boolean;
+  tipeBel: 'masuk' | 'istirahat' | 'pulang' | 'ganti_jam' | 'upacara' | string;
+  hari?: string[]; // e.g. ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu']
+  durasiDetik?: number;
+  updatedAt?: string;
 }
 
 export interface CatatanRapor {

@@ -88,6 +88,22 @@
         "status": { "type": "string" },
         "nilaiAkhir": { "type": "number" }
       }
+    },
+    "BelJadwal": {
+      "title": "BelJadwal",
+      "description": "School bell schedule entry",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "schoolId": { "type": "string" },
+        "waktu": { "type": "string" },
+        "keterangan": { "type": "string" },
+        "pesanSuara": { "type": "string" },
+        "aktif": { "type": "boolean" },
+        "tipeBel": { "type": "string" },
+        "hari": { "type": "array", "items": { "type": "string" } }
+      },
+      "required": ["id", "waktu", "keterangan"]
     }
   },
   "firestore": {
@@ -118,6 +134,10 @@
     "/schools/{schoolId}/jawaban_ujian/{jawabanId}": {
       "schema": { "$ref": "#/entities/JawabanSiswaUjian" },
       "description": "Exam submissions"
+    },
+    "/schools/{schoolId}/bel_jadwal/{belId}": {
+      "schema": { "$ref": "#/entities/BelJadwal" },
+      "description": "School automatic bell schedules"
     }
   }
 }

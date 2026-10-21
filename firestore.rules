@@ -30,7 +30,8 @@ service cloud.firestore {
         'log_ujian',
         'ai_soal',
         'ai_modul',
-        'ai_materi'
+        'ai_materi',
+        'bel_jadwal'
       ];
     }
 
