@@ -29,6 +29,7 @@ import {
   SoalUjian,
   RiwayatPerubahanKunci,
   LogPelanggaranUjian,
+  BelJadwal,
 } from '../types';
 
 const STORAGE_KEYS = {
@@ -60,6 +61,7 @@ const STORAGE_KEYS = {
   AI_MATERI: 'sdn2_ai_materi',
   UJIAN_ONLINE: 'sdn2_ujian_online',
   JAWABAN_UJIAN: 'sdn2_jawaban_ujian',
+  BEL_JADWAL: 'sdn2_bel_jadwal',
 };
 
 // Default school emblem
@@ -835,6 +837,72 @@ const INITIAL_SUPERADMIN_LOGS: SuperAdminLog[] = [
   },
 ];
 
+const INITIAL_BEL_JADWAL: BelJadwal[] = [
+  {
+    id: 'bel-1',
+    waktu: '07:00',
+    keterangan: 'Bel Masuk Kelas & Pembiasaan Pagi',
+    pesanSuara: 'Saatnya jam masuk kelas dimulai. Kepada seluruh siswa, harap segera masuk ke kelas masing-masing dengan tertib.',
+    aktif: true,
+    tipeBel: 'masuk',
+    hari: ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'],
+  },
+  {
+    id: 'bel-2',
+    waktu: '09:30',
+    keterangan: 'Bel Istirahat Pertama',
+    pesanSuara: 'Saatnya jam istirahat pertama. Selamat beristirahat dan tetap menjaga kebersihan lingkungan sekolah.',
+    aktif: true,
+    tipeBel: 'istirahat',
+    hari: ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'],
+  },
+  {
+    id: 'bel-3',
+    waktu: '10:00',
+    keterangan: 'Bel Masuk Setelah Istirahat Pertama',
+    pesanSuara: 'Waktu istirahat pertama telah selesai. Seluruh siswa diharapkan kembali ke ruang kelas untuk melanjutkan pembelajaran.',
+    aktif: true,
+    tipeBel: 'masuk',
+    hari: ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'],
+  },
+  {
+    id: 'bel-4',
+    waktu: '11:30',
+    keterangan: 'Bel Pulang Hari Jumat (Sholat Jumat)',
+    pesanSuara: 'Waktu kegiatan belajar hari Jumat telah selesai. Kepada seluruh siswa, selamat berakhir pekan dan hati-hati di jalan.',
+    aktif: true,
+    tipeBel: 'pulang',
+    hari: ['Jumat'],
+  },
+  {
+    id: 'bel-5',
+    waktu: '12:00',
+    keterangan: 'Bel Istirahat Kedua (Dhuhur & Makan Siang)',
+    pesanSuara: 'Saatnya jam istirahat kedua dan sholat Dhuhur berjamaah. Selamat beristirahat.',
+    aktif: true,
+    tipeBel: 'istirahat',
+    hari: ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Sabtu'],
+  },
+  {
+    id: 'bel-6',
+    waktu: '12:30',
+    keterangan: 'Bel Masuk Setelah Istirahat Kedua',
+    pesanSuara: 'Waktu istirahat kedua telah selesai. Harap seluruh siswa kembali memasuki ruang kelas.',
+    aktif: true,
+    tipeBel: 'masuk',
+    hari: ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Sabtu'],
+  },
+  {
+    id: 'bel-7',
+    waktu: '14:00',
+    keterangan: 'Bel Pulang Sekolah',
+    pesanSuara: 'Waktu kegiatan belajar mengajar hari ini telah selesai. Saatnya pulang, rapikan meja Anda, dan berhati-hati di jalan.',
+    aktif: true,
+    tipeBel: 'pulang',
+    hari: ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Sabtu'],
+  },
+];
+
 class DatabaseService {
   
   private cache: Map<string, unknown> = new Map();
@@ -967,6 +1035,7 @@ class DatabaseService {
       [STORAGE_KEYS.LANDING_CONFIG]: 'landing_config',
       [STORAGE_KEYS.UJIAN_ONLINE]: 'ujian_online',
       [STORAGE_KEYS.JAWABAN_UJIAN]: 'jawaban_ujian',
+      [STORAGE_KEYS.BEL_JADWAL]: 'bel_jadwal',
     };
 
     Object.entries(collectionsMap).forEach(([storageKey, colName]) => {
@@ -1033,6 +1102,31 @@ class DatabaseService {
 
             const list = snapshot.docs.map(d => d.data());
             const actualKey = this.getSchoolScopedKey(schoolId, storageKey);
+
+            // CRITICAL SAFEGUARD:
+            // If snapshot is empty (e.g. freshly initialized Firestore collection or network sync start),
+            // check if local storage or cache has existing items.
+            // DO NOT wipe out existing local items with an empty array!
+            // Instead, preserve local items and sync them to Firestore!
+            if (list.length === 0) {
+              let existingLocal: any[] = [];
+              try {
+                const stored = localStorage.getItem(actualKey);
+                if (stored) existingLocal = JSON.parse(stored);
+              } catch {}
+              if (!existingLocal || existingLocal.length === 0) {
+                existingLocal = (this.cache.get(actualKey) as any[]) || [];
+              }
+              if (Array.isArray(existingLocal) && existingLocal.length > 0) {
+                existingLocal.forEach((item: any) => {
+                  if (item && item.id) {
+                    this.syncToFirestore(schoolId, colName, item);
+                  }
+                });
+                return;
+              }
+            }
+
             this.cache.set(actualKey, list);
             try {
               localStorage.setItem(actualKey, JSON.stringify(list));
@@ -1045,6 +1139,10 @@ class DatabaseService {
             }
             if (colName === 'jawaban_ujian') {
               window.dispatchEvent(new CustomEvent('jawaban_ujian_updated', { detail: list }));
+            }
+            if (colName === 'bel_jadwal') {
+              window.dispatchEvent(new CustomEvent('bel_jadwal_updated', { detail: list }));
+              window.dispatchEvent(new Event('bel_jadwal_updated'));
             }
           },
           (err) => {
@@ -1221,7 +1319,7 @@ class DatabaseService {
        }
     }
 
-    if (colName === 'absensi_siswa' || colName === 'kas' || colName === 'siswa' || colName === 'guru' || colName === 'kelas' || colName === 'mapel' || colName === 'nilai' || colName === 'nilai_harian' || colName === 'catatan_rapor' || colName === 'pengumuman' || colName === 'berita' || colName === 'galeri' || colName === 'users' || colName === 'school_accounts' || colName === 'ujian_online' || colName === 'jawaban_ujian') {
+    if (colName === 'absensi_siswa' || colName === 'kas' || colName === 'siswa' || colName === 'guru' || colName === 'kelas' || colName === 'mapel' || colName === 'nilai' || colName === 'nilai_harian' || colName === 'catatan_rapor' || colName === 'pengumuman' || colName === 'berita' || colName === 'galeri' || colName === 'users' || colName === 'school_accounts' || colName === 'ujian_online' || colName === 'jawaban_ujian' || colName === 'bel_jadwal') {
       if (Array.isArray(value)) {
         const previous = (this.cache.get(actualKey) as any[]) || [];
         
@@ -2106,6 +2204,52 @@ class DatabaseService {
     });
     this.setItem(STORAGE_KEYS.NILAI_HARIAN, list);
     window.dispatchEvent(new Event('nilai_harian_updated'));
+  }
+
+  // Bel Sekolah Otomatis Methods
+  getBelJadwalList(): BelJadwal[] {
+    const list = this.getItem<BelJadwal[]>(STORAGE_KEYS.BEL_JADWAL, INITIAL_BEL_JADWAL);
+    return Array.isArray(list) ? list.sort((a, b) => a.waktu.localeCompare(b.waktu)) : [];
+  }
+
+  saveBelJadwal(item: BelJadwal): void {
+    const schoolId = this.getActiveSchoolId();
+    const withSchool: BelJadwal = {
+      ...item,
+      schoolId: item.schoolId || schoolId,
+      updatedAt: new Date().toISOString(),
+    };
+    const list = [...this.getBelJadwalList()];
+    const idx = list.findIndex((j) => j.id === withSchool.id);
+    if (idx >= 0) {
+      list[idx] = withSchool;
+    } else {
+      list.push(withSchool);
+    }
+    list.sort((a, b) => a.waktu.localeCompare(b.waktu));
+    this.setItem(STORAGE_KEYS.BEL_JADWAL, list);
+    window.dispatchEvent(new CustomEvent('bel_jadwal_updated', { detail: list }));
+    window.dispatchEvent(new Event('bel_jadwal_updated'));
+  }
+
+  deleteBelJadwal(id: string): void {
+    const list = this.getBelJadwalList().filter((j) => j.id !== id);
+    this.setItem(STORAGE_KEYS.BEL_JADWAL, list);
+    window.dispatchEvent(new CustomEvent('bel_jadwal_updated', { detail: list }));
+    window.dispatchEvent(new Event('bel_jadwal_updated'));
+  }
+
+  saveBulkBelJadwal(items: BelJadwal[]): void {
+    const schoolId = this.getActiveSchoolId();
+    const prepared = items.map((it) => ({
+      ...it,
+      schoolId: it.schoolId || schoolId,
+      updatedAt: new Date().toISOString(),
+    }));
+    prepared.sort((a, b) => a.waktu.localeCompare(b.waktu));
+    this.setItem(STORAGE_KEYS.BEL_JADWAL, prepared);
+    window.dispatchEvent(new CustomEvent('bel_jadwal_updated', { detail: prepared }));
+    window.dispatchEvent(new Event('bel_jadwal_updated'));
   }
 
   // App Settings & Unified Settings

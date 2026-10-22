@@ -68,27 +68,45 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
   const [targetQrId, setTargetQrId] = useState<string | undefined>();
 
   useEffect(() => {
-    let lastCheckedMinute = "";
+    let lastCheckedMinute = '';
     const interval = setInterval(() => {
-      const now = new Date();
-      const currentMinute = `${String(now.getHours()).padStart(2, "0")}:${String(now.getMinutes()).padStart(2, "0")}`;
-      if (currentMinute !== lastCheckedMinute) {
-        lastCheckedMinute = currentMinute;
-        try {
-          const raw = localStorage.getItem("bel_otomatis");
-          if (!raw) return;
-          const jadwal = JSON.parse(raw);
-          const matches = jadwal.filter((j: any) => j.aktif && j.waktu === currentMinute);
+      try {
+        const now = new Date();
+        const currentMinute = new Intl.DateTimeFormat('id-ID', {
+          timeZone: 'Asia/Jakarta',
+          hour: '2-digit',
+          minute: '2-digit',
+          hour12: false,
+        })
+          .format(now)
+          .replace(/\./g, ':');
+
+        const currentDay = new Intl.DateTimeFormat('id-ID', {
+          timeZone: 'Asia/Jakarta',
+          weekday: 'long',
+        }).format(now);
+
+        if (currentMinute !== lastCheckedMinute) {
+          lastCheckedMinute = currentMinute;
+          const jadwal = db.getBelJadwalList();
+          const matches = jadwal.filter((j) => {
+            if (!j.aktif || j.waktu !== currentMinute) return false;
+            if (!j.hari || j.hari.length === 0) return true;
+            return j.hari.includes(currentDay);
+          });
+
           if (matches.length > 0) {
-            import("../../services/audio").then(m => {
-              m.sound.playBell(matches[0].tipeBel || "masuk");
+            import('../../services/audio').then((m) => {
+              m.sound.playBell(matches[0].tipeBel || 'masuk');
               const msg = matches[0].pesanSuara;
               if (msg) {
                 m.sound.speak(msg);
               }
             });
           }
-        } catch { }
+        }
+      } catch (err) {
+        console.warn('[Bel Background Check Warn]:', err);
       }
     }, 10000);
     return () => clearInterval(interval);

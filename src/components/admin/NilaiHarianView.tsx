@@ -64,6 +64,7 @@ export const NilaiHarianView: React.FC = () => {
   // List of active assessments for current filtered context
   const [assessments, setAssessments] = useState<AssessmentMeta[]>([]);
   const [hasUnsavedChanges, setHasUnsavedChanges] = useState<boolean>(false);
+  const [isSaving, setIsSaving] = useState<boolean>(false);
   const [successMsg, setSuccessMsg] = useState<string>('');
   const [errorMsg, setErrorMsg] = useState<string>('');
 
@@ -124,7 +125,20 @@ export const NilaiHarianView: React.FC = () => {
 
   const studentsInClass = useMemo(() => {
     if (!activeKelas) return [];
-    return siswaList.filter((s) => s.kelas === activeKelas.nama);
+    return siswaList.filter((s) => {
+      if (!s.kelas) return false;
+      const sKelas = s.kelas.trim().toLowerCase();
+      const kNama = (activeKelas.nama || '').trim().toLowerCase();
+      const kId = (activeKelas.id || '').trim().toLowerCase();
+
+      if (sKelas === kNama || sKelas === kId) return true;
+
+      const sClean = sKelas.replace(/^kelas\s*/i, '').replace(/[\s\-_]/g, '');
+      const kClean = kNama.replace(/^kelas\s*/i, '').replace(/[\s\-_]/g, '');
+      if (sClean && kClean && sClean === kClean) return true;
+
+      return kNama.includes(sKelas) || sKelas.includes(kNama);
+    });
   }, [siswaList, activeKelas]);
 
   const filteredStudents = useMemo(() => {
@@ -156,7 +170,6 @@ export const NilaiHarianView: React.FC = () => {
     const scoresMap: Record<string, Record<string, number>> = {};
 
     relevantEntries.forEach((entry) => {
-      // Build unique identifier per assessment column
       const assId =
         entry.assessmentId ||
         `ass_${entry.tanggal}_${entry.materi.replace(/\s+/g, '_')}_${entry.jenisPenilaian}`;
@@ -177,15 +190,34 @@ export const NilaiHarianView: React.FC = () => {
       scoresMap[assId][entry.siswaId] = entry.nilai;
     });
 
-    // Convert map to array and sort chronologically by date
     const sortedAssessments = Array.from(assessmentMap.values()).sort((a, b) =>
       a.tanggal.localeCompare(b.tanggal)
     );
 
+    // If no existing assessments found, provide a ready-to-input first column automatically
+    if (sortedAssessments.length === 0) {
+      const defaultAssId = `ass_ph1_${activeKelas.id}_${activeMapel.id}`;
+      const defaultAss: AssessmentMeta = {
+        assessmentId: defaultAssId,
+        tanggal: new Date().toISOString().split('T')[0],
+        materi: 'Formatif 1 / Lingkup Materi 1',
+        jenisPenilaian: 'Formatif',
+        keterangan: 'Penilaian Harian Pertama',
+      };
+      setAssessments([defaultAss]);
+      const initialScores: Record<string, number> = {};
+      studentsInClass.forEach((s) => {
+        initialScores[s.id] = 0;
+      });
+      setAssessmentScores({ [defaultAssId]: initialScores });
+      setHasUnsavedChanges(false);
+      return;
+    }
+
     setAssessments(sortedAssessments);
     setAssessmentScores(scoresMap);
     setHasUnsavedChanges(false);
-  }, [activeKelas, activeMapel, selectedSemester, selectedTahunAjaran, nilaiHarianList]);
+  }, [activeKelas, activeMapel, selectedSemester, selectedTahunAjaran, nilaiHarianList, studentsInClass.length]);
 
   // Filtered assessment columns by date range
   const displayedAssessments = useMemo(() => {
@@ -366,48 +398,64 @@ export const NilaiHarianView: React.FC = () => {
 
   // Core Save to Database
   const handleSaveAll = () => {
-    if (!activeKelas || !activeMapel) return;
-    const schoolId = currentUser?.schoolId || db.getActiveSchoolId() || 'sch-default';
+    if (!activeKelas || !activeMapel || isSaving) return;
+    setIsSaving(true);
+    setErrorMsg('');
 
-    const itemsToSave: NilaiHarianItem[] = [];
+    try {
+      const schoolId = currentUser?.schoolId || db.getActiveSchoolId() || 'sch-default';
+      const itemsToSave: NilaiHarianItem[] = [];
 
-    // For every assessment and every student, build persistent entity
-    assessments.forEach((ass) => {
-      const colScores = assessmentScores[ass.assessmentId] || {};
+      // For every assessment and every student, build persistent entity
+      assessments.forEach((ass) => {
+        const colScores = assessmentScores[ass.assessmentId] || {};
 
-      studentsInClass.forEach((siswa) => {
-        const scoreVal = colScores[siswa.id] !== undefined ? colScores[siswa.id] : 0;
-        // Deterministic unique ID complying with requirement #11:
-        // school_id + student_id + class_id + subject_id + semester + academic_year + assessment_date
-        const cleanTahun = selectedTahunAjaran.replace(/[^a-zA-Z0-9]/g, '-');
-        const deterministicId = `nh_${schoolId}_${siswa.id}_${activeKelas.id}_${activeMapel.id}_${selectedSemester}_${cleanTahun}_${ass.assessmentId}`;
+        studentsInClass.forEach((siswa) => {
+          let scoreVal = colScores[siswa.id] !== undefined ? colScores[siswa.id] : 0;
+          if (isNaN(scoreVal) || scoreVal < 0) scoreVal = 0;
+          if (scoreVal > 100) scoreVal = 100;
 
-        itemsToSave.push({
-          id: deterministicId,
-          schoolId,
-          siswaId: siswa.id,
-          namaSiswa: siswa.namaLengkap,
-          kelasId: activeKelas.id,
-          namaKelas: activeKelas.nama,
-          mapelId: activeMapel.id,
-          namaMapel: activeMapel.nama,
-          jenisPenilaian: ass.jenisPenilaian,
-          materi: ass.materi,
-          tanggal: ass.tanggal,
-          nilai: scoreVal,
-          catatan: ass.keterangan || '',
-          semester: selectedSemester,
-          tahunAjaran: selectedTahunAjaran,
-          assessmentId: ass.assessmentId,
-          keterangan: ass.keterangan,
+          const cleanTahun = selectedTahunAjaran.replace(/[^a-zA-Z0-9]/g, '-');
+          const deterministicId = `nh_${schoolId}_${siswa.id}_${activeKelas.id}_${activeMapel.id}_${selectedSemester}_${cleanTahun}_${ass.assessmentId}`;
+
+          itemsToSave.push({
+            id: deterministicId,
+            schoolId,
+            siswaId: siswa.id,
+            namaSiswa: siswa.namaLengkap,
+            kelasId: activeKelas.id,
+            namaKelas: activeKelas.nama,
+            mapelId: activeMapel.id,
+            namaMapel: activeMapel.nama,
+            jenisPenilaian: ass.jenisPenilaian,
+            materi: ass.materi,
+            tanggal: ass.tanggal,
+            nilai: scoreVal,
+            catatan: ass.keterangan || '',
+            semester: selectedSemester,
+            tahunAjaran: selectedTahunAjaran,
+            assessmentId: ass.assessmentId,
+            keterangan: ass.keterangan,
+          });
         });
       });
-    });
 
-    db.saveBulkNilaiHarian(itemsToSave);
-    setHasUnsavedChanges(false);
-    setSuccessMsg(`Seluruh nilai jurnal harian ${activeKelas.nama} - ${activeMapel.nama} berhasil disimpan ke database!`);
-    setTimeout(() => setSuccessMsg(''), 3500);
+      if (itemsToSave.length === 0) {
+        setErrorMsg('Belum ada data nilai siswa atau rombel yang dapat disimpan.');
+        setIsSaving(false);
+        return;
+      }
+
+      db.saveBulkNilaiHarian(itemsToSave);
+      setNilaiHarianList(db.getNilaiHarianList());
+      setHasUnsavedChanges(false);
+      setSuccessMsg(`Seluruh nilai harian (${itemsToSave.length} entri) ${activeKelas.nama} - ${activeMapel.nama} berhasil disimpan dan dikonfirmasi ke database!`);
+      setTimeout(() => setSuccessMsg(''), 4000);
+    } catch (err: any) {
+      setErrorMsg(`Gagal menyimpan nilai ke database: ${err?.message || 'Terjadi kesalahan sistem'}`);
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   // Calculate Student Average
@@ -626,15 +674,18 @@ export const NilaiHarianView: React.FC = () => {
           <button
             id="btn-simpan-nilai-jurnal"
             type="button"
+            disabled={isSaving}
             onClick={handleSaveAll}
             className={`px-4 py-2.5 rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs transition-all cursor-pointer ${
-              hasUnsavedChanges
+              isSaving
+                ? 'bg-emerald-400 text-white cursor-wait opacity-80'
+                : hasUnsavedChanges
                 ? 'bg-emerald-600 hover:bg-emerald-700 text-white animate-bounce ring-2 ring-emerald-400/40'
                 : 'bg-slate-800 hover:bg-slate-900 text-white'
             }`}
           >
             <Save className="w-4 h-4" />
-            <span>Simpan Nilai</span>
+            <span>{isSaving ? 'Menyimpan ke Database...' : hasUnsavedChanges ? 'Simpan Perubahan Nilai' : 'Simpan Nilai'}</span>
           </button>
 
           <button
@@ -689,7 +740,7 @@ export const NilaiHarianView: React.FC = () => {
           {/* Kelas */}
           <div className="space-y-1">
             <label className="text-[11px] font-bold text-slate-600 uppercase tracking-wider">Kelas</label>
-            {isGuru && currentUser?.kelasId ? (
+            {isGuru && currentUser?.kelasId && kelasList.length === 1 ? (
               <div className="w-full px-3 py-2 border border-slate-200 rounded-xl text-xs font-bold bg-slate-50 text-blue-900 flex items-center justify-between">
                 <span>{activeKelas.nama}</span>
                 <span className="text-[10px] text-blue-600 font-semibold px-2 py-0.5 rounded-md bg-blue-100">
@@ -1082,15 +1133,18 @@ export const NilaiHarianView: React.FC = () => {
           <div className="flex items-center gap-2 w-full sm:w-auto justify-end">
             <button
               type="button"
+              disabled={isSaving}
               onClick={handleSaveAll}
               className={`w-full sm:w-auto px-5 py-2.5 rounded-xl text-xs font-bold flex items-center justify-center gap-2 shadow-xs transition-all cursor-pointer ${
-                hasUnsavedChanges
+                isSaving
+                  ? 'bg-emerald-400 text-white cursor-wait opacity-80'
+                  : hasUnsavedChanges
                   ? 'bg-emerald-600 hover:bg-emerald-700 text-white shadow-emerald-600/20'
                   : 'bg-blue-600 hover:bg-blue-700 text-white'
               }`}
             >
               <Save className="w-4 h-4" />
-              <span>Simpan Perubahan Nilai</span>
+              <span>{isSaving ? 'Menyimpan ke Database...' : 'Simpan Nilai ke Database'}</span>
             </button>
           </div>
         </div>

@@ -205,7 +205,10 @@ export interface NilaiHarianItem {
   catatan?: string;
   semester?: 'Ganjil' | 'Genap';
   tahunAjaran?: string;
+  assessmentId?: string;
+  keterangan?: string;
 }
+
 
 export interface BelJadwal {
   id: string;
