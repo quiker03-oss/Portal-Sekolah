@@ -1296,28 +1296,29 @@ class DatabaseService {
 
   
   
-  private setItem<T>(key: string, value: T): void {
+  private setItem<T>(key: string, value: T, syncRemote = true): void {
     const actualKey = this.resolveStorageKey(key);
     
     // FIRESTORE SYNC LOGIC
-    let schoolId = 'superadmin';
-    let colName = '';
+    if (syncRemote) {
+      let schoolId = 'superadmin';
+      let colName = '';
 
-    if (!this.isSchoolScopedKey(key)) {
-       // Global keys
-       colName = key.replace('sdn2_', ''); // e.g. 'school_accounts'
-    } else {
-       // Scoped keys like school_sch-1_users
-       const match = actualKey.match(/^school_(.+?)_(.+)$/);
-       if (match) {
-          schoolId = match[1];
-          colName = match[2];
-       } else {
-          // fallback
-          colName = actualKey.replace('sdn2_', '');
-          schoolId = this.getActiveSchoolId();
-       }
-    }
+      if (!this.isSchoolScopedKey(key)) {
+         // Global keys
+         colName = key.replace('sdn2_', ''); // e.g. 'school_accounts'
+      } else {
+         // Scoped keys like school_sch-1_users
+         const match = actualKey.match(/^school_(.+?)_(.+)$/);
+         if (match) {
+            schoolId = match[1];
+            colName = match[2];
+         } else {
+            // fallback
+            colName = actualKey.replace('sdn2_', '');
+            schoolId = this.getActiveSchoolId();
+         }
+      }
 
     if (colName === 'absensi_siswa' || colName === 'kas' || colName === 'siswa' || colName === 'guru' || colName === 'kelas' || colName === 'mapel' || colName === 'nilai' || colName === 'nilai_harian' || colName === 'catatan_rapor' || colName === 'pengumuman' || colName === 'berita' || colName === 'galeri' || colName === 'users' || colName === 'school_accounts' || colName === 'ujian_online' || colName === 'jawaban_ujian' || colName === 'bel_jadwal') {
       if (Array.isArray(value)) {
@@ -1343,6 +1344,7 @@ class DatabaseService {
        this.syncToFirestore(schoolId, colName, { ...(value as any), id: 'default' });
     } else if (colName === 'superadmin_user') {
        this.syncToFirestore('superadmin', 'superadmin_user', { ...(value as any), id: 'default' });
+    }
     }
 
     this.cache.set(actualKey, Array.isArray(value) ? [...value] : value);
@@ -1628,23 +1630,29 @@ class DatabaseService {
 
   async saveManySiswa(
     newSiswaList: Siswa[],
-    options: { overwriteDuplicates?: boolean } = {}
-  ): Promise<{ savedCount: number; updatedCount: number; skippedCount: number }> {
+    options: {
+      overwriteDuplicates?: boolean;
+      onProgress?: (processed: number, total: number, message: string) => void;
+    } = {}
+  ): Promise<{ savedCount: number; updatedCount: number; skippedCount: number; errors: string[] }> {
     const list = this.getAllSiswaListUnfiltered();
     const schoolId = this.getActiveSchoolId() || 'sch-1';
     const overwrite = Boolean(options.overwriteDuplicates);
+    const errors: string[] = [];
 
     let savedCount = 0;
     let updatedCount = 0;
     let skippedCount = 0;
 
     const updatedList = [...list];
+    const total = newSiswaList.length;
 
     // Prepare Firestore batch
     let batch = writeBatch(firestoreDb);
     let batchCount = 0;
 
-    for (const student of newSiswaList) {
+    for (let i = 0; i < total; i++) {
+      const student = newSiswaList[i];
       const studentWithSchool: Siswa = {
         ...student,
         schoolId: student.schoolId || schoolId,
@@ -1653,17 +1661,26 @@ class DatabaseService {
       const existingIdx = updatedList.findIndex(
         (s) =>
           s.id === student.id ||
-          (s.nisn && student.nisn && s.nisn.trim() === student.nisn.trim()) ||
-          (s.nomorInduk && student.nomorInduk && s.nomorInduk.trim() === student.nomorInduk.trim())
+          (s.nisn && student.nisn && s.nisn.trim() !== '' && s.nisn.trim() === student.nisn.trim()) ||
+          (s.nomorInduk && student.nomorInduk && s.nomorInduk.trim() !== '' && s.nomorInduk.trim() === student.nomorInduk.trim())
       );
 
       if (existingIdx >= 0) {
         if (overwrite) {
-          updatedList[existingIdx] = { ...updatedList[existingIdx], ...studentWithSchool };
+          // Preserve existing id and qrId to prevent breaking historical links
+          const existing = updatedList[existingIdx];
+          const merged: Siswa = {
+            ...existing,
+            ...studentWithSchool,
+            id: existing.id,
+            qrId: existing.qrId || studentWithSchool.qrId,
+            schoolId,
+          };
+          updatedList[existingIdx] = merged;
           updatedCount++;
-          // Add to batch
-          const docRef = doc(firestoreDb, `schools/${schoolId}/siswa`, updatedList[existingIdx].id);
-          batch.set(docRef, this.sanitizeForFirestore(updatedList[existingIdx]));
+
+          const docRef = doc(firestoreDb, `schools/${schoolId}/siswa`, merged.id);
+          batch.set(docRef, this.sanitizeForFirestore(merged));
           batchCount++;
         } else {
           skippedCount++;
@@ -1671,18 +1688,27 @@ class DatabaseService {
       } else {
         updatedList.unshift(studentWithSchool);
         savedCount++;
-        // Add to batch
+
         const docRef = doc(firestoreDb, `schools/${schoolId}/siswa`, studentWithSchool.id);
         batch.set(docRef, this.sanitizeForFirestore(studentWithSchool));
         batchCount++;
       }
 
+      // Notify progress periodically
+      if (options.onProgress && (i % 25 === 0 || i === total - 1)) {
+        options.onProgress(i + 1, total, `Menyiapkan data siswa ${i + 1} dari ${total}...`);
+      }
+
       // Commit batch in chunks of 400 to stay safely under Firestore 500 limit
       if (batchCount >= 400) {
         try {
+          if (options.onProgress) {
+            options.onProgress(i + 1, total, `Menyimpan batch siswa ke database cloud...`);
+          }
           await batch.commit();
-        } catch (e) {
+        } catch (e: any) {
           console.warn('[saveManySiswa Batch Commit Error]:', e);
+          errors.push(`Gagal menyimpan batch cloud (${e?.message || 'Koneksi error'})`);
         }
         batch = writeBatch(firestoreDb);
         batchCount = 0;
@@ -1691,14 +1717,18 @@ class DatabaseService {
 
     if (batchCount > 0) {
       try {
+        if (options.onProgress) {
+          options.onProgress(total, total, `Menyelesaikan penyimpanan final ke cloud...`);
+        }
         await batch.commit();
-      } catch (e) {
+      } catch (e: any) {
         console.warn('[saveManySiswa Final Batch Commit Error]:', e);
+        errors.push(`Gagal commit final database (${e?.message || 'Koneksi error'})`);
       }
     }
 
-    // Persist to local storage & cache
-    this.setItem(STORAGE_KEYS.SISWA, updatedList);
+    // Persist to local storage & cache without triggering redundant individual writes
+    this.setItem(STORAGE_KEYS.SISWA, updatedList, false);
 
     // Otomatis sinkronisasi rombel kelas baru ke master data kelas
     const classes = Array.from(new Set(newSiswaList.map((s) => s.kelas).filter(Boolean)));
@@ -1707,7 +1737,7 @@ class DatabaseService {
     }
 
     window.dispatchEvent(new Event('data_siswa_changed'));
-    return { savedCount, updatedCount, skippedCount };
+    return { savedCount, updatedCount, skippedCount, errors };
   }
 
   deleteSiswa(id: string): void {

@@ -100,6 +100,7 @@ export interface Siswa {
   alamat: string;
   kelas: string; // e.g. "1A", "2", "6"
   namaOrangTua: string;
+  nomorHp?: string;
   foto?: string;
   createdAt: string;
 }

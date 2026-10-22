@@ -66,6 +66,7 @@ export const DataSiswaView: React.FC<DataSiswaViewProps> = ({
   const [alamat, setAlamat] = useState('');
   const [kelas, setKelas] = useState(initialFilterKelas || 'Kelas 1A');
   const [namaOrangTua, setNamaOrangTua] = useState('');
+  const [nomorHp, setNomorHp] = useState('');
   const [foto, setFoto] = useState('');
   const [isUploadingFoto, setIsUploadingFoto] = useState(false);
 
@@ -133,6 +134,7 @@ export const DataSiswaView: React.FC<DataSiswaViewProps> = ({
     setAlamat('');
     setKelas(filterKelas || kelasList[0]?.nama || 'Kelas 1A');
     setNamaOrangTua('');
+    setNomorHp('');
     setFoto('');
     setIsModalOpen(true);
   };
@@ -148,6 +150,7 @@ export const DataSiswaView: React.FC<DataSiswaViewProps> = ({
     setAlamat(siswa.alamat);
     setKelas(siswa.kelas);
     setNamaOrangTua(siswa.namaOrangTua);
+    setNomorHp(siswa.nomorHp || '');
     setFoto(siswa.foto || '');
     setIsModalOpen(true);
   };
@@ -190,6 +193,7 @@ export const DataSiswaView: React.FC<DataSiswaViewProps> = ({
         alamat,
         kelas,
         namaOrangTua,
+        nomorHp,
         foto,
       };
       db.saveSiswa(updated);
@@ -210,6 +214,7 @@ export const DataSiswaView: React.FC<DataSiswaViewProps> = ({
         alamat,
         kelas,
         namaOrangTua,
+        nomorHp,
         foto,
         createdAt: new Date().toISOString().split('T')[0],
       };
@@ -257,6 +262,7 @@ export const DataSiswaView: React.FC<DataSiswaViewProps> = ({
       'Tanggal Lahir': s.tanggalLahir,
       'Orang Tua / Wali': s.namaOrangTua,
       Alamat: s.alamat,
+      'Nomor Telepon / WA': s.nomorHp || '-',
     }));
     exportToExcel(data, `Data_Siswa_Sekolah_${new Date().toISOString().split('T')[0]}`);
   };
@@ -274,6 +280,7 @@ export const DataSiswaView: React.FC<DataSiswaViewProps> = ({
       'Tanggal Lahir': s.tanggalLahir,
       'Orang Tua / Wali': s.namaOrangTua,
       Alamat: s.alamat,
+      'Nomor Telepon / WA': s.nomorHp || '-',
     }));
     exportToCsv(data, `Data_Siswa_Sekolah_${new Date().toISOString().split('T')[0]}`);
   };
@@ -688,6 +695,19 @@ export const DataSiswaView: React.FC<DataSiswaViewProps> = ({
                     placeholder="Nama ayah / ibu / wali"
                     value={namaOrangTua}
                     onChange={(e) => setNamaOrangTua(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-blue-600"
+                  />
+                </div>
+
+                <div>
+                  <label className="block text-xs font-semibold text-slate-700 mb-1">
+                    Nomor Telepon / WhatsApp
+                  </label>
+                  <input
+                    type="text"
+                    placeholder="Contoh: 081234567890"
+                    value={nomorHp}
+                    onChange={(e) => setNomorHp(e.target.value)}
                     className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-blue-600"
                   />
                 </div>
