@@ -6,6 +6,15 @@ import {
   handleBuatModul,
   handleBuatMateri,
 } from "./_lib/geminiBackend";
+import {
+  handleStartExamSession,
+  handleSaveAnswerSession,
+  handleHeartbeatSession,
+  handleSubmitSession,
+  handleUnlockSession,
+  handleGetProctoringAuditLogs,
+  handleResetExamSession,
+} from "./_lib/examSessionBackend";
 
 export const config = {
   api: {
@@ -114,6 +123,61 @@ export default async function handler(req: any, res: any) {
         return res.status(405).json({ success: false, error: "Metode harus POST." });
       }
       const result = await handleBuatMateri(body);
+      return res.status(200).json(result);
+    }
+
+    // 8. Session: Start / Recover
+    if (pathname === "/ujian/session/start") {
+      if (req.method !== "POST") return res.status(405).json({ success: false, error: "Metode harus POST." });
+      const clientIp = (req.headers && req.headers["x-forwarded-for"]) || req.socket?.remoteAddress;
+      const result = await handleStartExamSession(body, clientIp);
+      if (result.locked) return res.status(403).json(result);
+      return res.status(200).json(result);
+    }
+
+    // 9. Session: Save Answer
+    if (pathname === "/ujian/session/save-answer") {
+      if (req.method !== "POST") return res.status(405).json({ success: false, error: "Metode harus POST." });
+      const result = await handleSaveAnswerSession(body);
+      if (result.locked) return res.status(403).json(result);
+      return res.status(200).json(result);
+    }
+
+    // 10. Session: Heartbeat
+    if (pathname === "/ujian/session/heartbeat") {
+      if (req.method !== "POST") return res.status(405).json({ success: false, error: "Metode harus POST." });
+      const result = await handleHeartbeatSession(body);
+      return res.status(200).json(result);
+    }
+
+    // 11. Session: Submit
+    if (pathname === "/ujian/session/submit") {
+      if (req.method !== "POST") return res.status(405).json({ success: false, error: "Metode harus POST." });
+      const result = await handleSubmitSession(body);
+      if (result.locked) return res.status(403).json(result);
+      return res.status(200).json(result);
+    }
+
+    // 12. Session: Unlock
+    if (pathname === "/ujian/session/unlock") {
+      if (req.method !== "POST") return res.status(405).json({ success: false, error: "Metode harus POST." });
+      const result = await handleUnlockSession(body);
+      return res.status(200).json(result);
+    }
+
+    // 13. Session: Reset
+    if (pathname === "/ujian/session/reset") {
+      if (req.method !== "POST") return res.status(405).json({ success: false, error: "Metode harus POST." });
+      const { ujianId, siswaId, guruNama } = body || {};
+      const result = await handleResetExamSession(ujianId, siswaId, guruNama);
+      return res.status(200).json(result);
+    }
+
+    // 14. Session: Audit Logs
+    if (pathname === "/ujian/session/audit-logs") {
+      const urlObj = new URL(rawUrl, "http://localhost");
+      const ujianId = urlObj.searchParams.get("ujianId") || undefined;
+      const result = handleGetProctoringAuditLogs(ujianId);
       return res.status(200).json(result);
     }
 

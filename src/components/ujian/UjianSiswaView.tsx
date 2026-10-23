@@ -28,6 +28,54 @@ import {
   FileText,
 } from 'lucide-react';
 
+export function getOrCreateDeviceId(): string {
+  if (typeof window === 'undefined') return 'server-dev';
+  try {
+    let id = localStorage.getItem('portal_sekolah_device_id');
+    if (!id) {
+      id =
+        'dev-' +
+        (typeof crypto !== 'undefined' && crypto.randomUUID
+          ? crypto.randomUUID()
+          : Math.random().toString(36).substring(2, 10) + Date.now().toString(36));
+      localStorage.setItem('portal_sekolah_device_id', id);
+    }
+    return id;
+  } catch {
+    return 'temp-dev-' + Date.now();
+  }
+}
+
+export function collectDeviceInfo() {
+  const deviceId = getOrCreateDeviceId();
+  const ua = typeof navigator !== 'undefined' ? navigator.userAgent || '' : '';
+  let browser = 'Browser Web';
+  if (ua.includes('Edg/')) browser = 'Microsoft Edge';
+  else if (ua.includes('Chrome/')) browser = 'Google Chrome';
+  else if (ua.includes('Safari/') && !ua.includes('Chrome')) browser = 'Apple Safari';
+  else if (ua.includes('Firefox/')) browser = 'Mozilla Firefox';
+
+  let os = 'Perangkat';
+  if (ua.includes('Windows')) os = 'Windows';
+  else if (ua.includes('Android')) os = 'Android';
+  else if (ua.includes('iPhone') || ua.includes('iPad')) os = 'iOS';
+  else if (ua.includes('Mac OS')) os = 'macOS';
+  else if (ua.includes('Linux')) os = 'Linux';
+
+  const screenRes =
+    typeof window !== 'undefined' ? `${window.screen.width}x${window.screen.height}` : 'Standar';
+
+  return {
+    deviceId,
+    userAgent: ua,
+    platform: typeof navigator !== 'undefined' ? navigator.platform || os : os,
+    screenResolution: screenRes,
+    language: typeof navigator !== 'undefined' ? navigator.language || 'id-ID' : 'id-ID',
+    browserSummary: `${browser} (${os}, ${screenRes})`,
+    loginAt: new Date().toISOString(),
+  };
+}
+
 interface UjianSiswaViewProps {
   ujianId: string;
   schoolId?: string;
@@ -201,12 +249,15 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({ ujianId, schoolI
   useEffect(() => {
     if (!hasStarted || !ujian || !selectedSiswa || isSubmitted) return;
 
-    const checkTeacherUnlock = () => {
+    const checkTeacherUnlock = async () => {
       const currentSession = db.getJawabanSiswaByUjian(ujian.id, selectedSiswa.id);
       if (currentSession) {
         if (currentSession.status === 'terkunci') {
           setIsSessionLocked(true);
-          setLockReason(currentSession.alasanTerkunci || 'Sesi dikunci oleh pengawas');
+          setLockReason(
+            currentSession.alasanTerkunci ||
+              'Ujian dikunci sementara karena terdeteksi akses dari perangkat atau sesi lain. Silakan hubungi guru pengawas.'
+          );
         } else if (currentSession.status === 'sedang_mengerjakan' && isSessionLocked) {
           // Teacher unlocked the session!
           setIsSessionLocked(false);
@@ -217,6 +268,37 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({ ujianId, schoolI
         if (currentSession.jumlahPelanggaran !== undefined) {
           setViolationsCount(currentSession.jumlahPelanggaran);
         }
+      }
+
+      // Query server heartbeat for multi-device detection & remote locks
+      try {
+        const storedToken = localStorage.getItem(`portal_exam_token_${ujian.id}_${selectedSiswa.id}`);
+        const res = await fetch('/api/ujian/session/heartbeat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            ujianId: ujian.id,
+            siswaId: selectedSiswa.id,
+            sessionToken: storedToken || undefined,
+            deviceId: getOrCreateDeviceId(),
+          }),
+        });
+        if (res.ok) {
+          const data = await res.json();
+          if (data.isLocked || data.status === 'terkunci') {
+            setIsSessionLocked(true);
+            setLockReason(
+              data.alasanTerkunci ||
+                'Ujian dikunci sementara karena terdeteksi akses dari perangkat atau sesi lain. Silakan hubungi guru pengawas.'
+            );
+          } else if (data.status === 'sedang_mengerjakan' && isSessionLocked) {
+            setIsSessionLocked(false);
+            setLockReason('');
+            setShowViolationModal(false);
+          }
+        }
+      } catch {
+        // network resilience
       }
     };
 
@@ -369,7 +451,7 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({ ujianId, schoolI
     }
   };
 
-  // Auto-save changes locally and debounce sync
+  // Auto-save changes locally and sync with server
   const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const handleAnswerSelect = (soalId: string, value: string) => {
     if (isSessionLocked) return;
@@ -388,7 +470,7 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({ ujianId, schoolI
         try {
           if (ujian && selectedSiswa) {
             localStorage.setItem(`draft_ujian_${ujian.id}_${selectedSiswa.id}`, JSON.stringify(updated));
-            // Update session active timestamp
+            // Update session active timestamp locally
             const currentSession = db.getJawabanSiswaByUjian(ujian.id, selectedSiswa.id);
             if (currentSession && currentSession.status === 'sedang_mengerjakan') {
               db.saveJawabanSiswaUjian({
@@ -396,12 +478,41 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({ ujianId, schoolI
                 terakhirAktif: new Date().toISOString(),
               });
             }
+
+            // Sync answer with server endpoint (strictly rejected if locked on server)
+            const token = localStorage.getItem(`portal_exam_token_${ujian.id}_${selectedSiswa.id}`) || undefined;
+            fetch('/api/ujian/session/save-answer', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                ujianId: ujian.id,
+                siswaId: selectedSiswa.id,
+                sessionToken: token,
+                deviceId: getOrCreateDeviceId(),
+                soalId,
+                jawaban: { jawabanDipilih: value },
+                allAnswers: updated,
+              }),
+            })
+              .then(async (res) => {
+                if (res.status === 403) {
+                  const data = await res.json();
+                  if (data.locked) {
+                    setIsSessionLocked(true);
+                    setLockReason(
+                      data.message ||
+                        'Ujian dikunci sementara karena terdeteksi akses dari perangkat atau sesi lain. Silakan hubungi guru pengawas.'
+                    );
+                  }
+                }
+              })
+              .catch(() => {});
           }
           setSaveStatus('tersimpan');
         } catch {
           setSaveStatus('offline');
         }
-      }, 500);
+      }, 400);
 
       return updated;
     });
@@ -427,7 +538,7 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({ ujianId, schoolI
     } catch {}
   };
 
-  const handleStartExam = () => {
+  const handleStartExam = async () => {
     if (!ujian || !selectedSiswa) return;
 
     // Check token if required
@@ -449,16 +560,19 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({ ujianId, schoolI
       }
     }
 
-    // Check if locked
+    // Check if locked locally
     if (existing && existing.status === 'terkunci') {
       setIsSessionLocked(true);
-      setLockReason(existing.alasanTerkunci || 'Sesi ujian Anda sedang dikunci.');
+      setLockReason(
+        existing.alasanTerkunci ||
+          'Ujian dikunci sementara karena terdeteksi akses dari perangkat atau sesi lain. Silakan hubungi guru pengawas.'
+      );
       setViolationsCount(existing.jumlahPelanggaran || 0);
       setHasStarted(true);
       return;
     }
 
-    // Recover draft if previously started
+    // Recover draft if previously started locally
     try {
       const savedDraft = localStorage.getItem(`draft_ujian_${ujian.id}_${selectedSiswa.id}`);
       if (savedDraft) {
@@ -466,12 +580,67 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({ ujianId, schoolI
       }
     } catch {}
 
-    // Register active session in database so proctor sees student as 'sedang_mengerjakan'
+    // SERVER-AUTHORITATIVE SESSION VERIFICATION & MULTI-DEVICE DETECTION
+    const device = collectDeviceInfo();
+    const storedToken = localStorage.getItem(`portal_exam_token_${ujian.id}_${selectedSiswa.id}`) || undefined;
+
+    try {
+      const res = await fetch('/api/ujian/session/start', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          ujianId: ujian.id,
+          siswaId: selectedSiswa.id,
+          namaSiswa: selectedSiswa.namaLengkap || (selectedSiswa as any).nama || '',
+          nisn: selectedSiswa.nisn,
+          nomorInduk: selectedSiswa.nomorInduk || (selectedSiswa as any).nis || '',
+          kelas: selectedSiswa.kelas,
+          schoolId: ujian.schoolId,
+          device,
+          sessionToken: storedToken,
+        }),
+      });
+
+      const serverData = await res.json();
+
+      // Case: Server detected multi-device access or previous lock!
+      if (serverData.locked || res.status === 403) {
+        setIsSessionLocked(true);
+        setLockReason(
+          serverData.message ||
+            serverData.alasanTerkunci ||
+            'Ujian dikunci sementara karena terdeteksi akses dari perangkat atau sesi lain. Silakan hubungi guru pengawas.'
+        );
+        if (serverData.answers && Object.keys(serverData.answers).length > 0) {
+          setAnswers(serverData.answers);
+        }
+        setHasStarted(true);
+        return;
+      }
+
+      if (serverData.finished) {
+        setIsSubmitted(true);
+        setHasStarted(true);
+        return;
+      }
+
+      if (serverData.success && serverData.sessionToken) {
+        localStorage.setItem(`portal_exam_token_${ujian.id}_${selectedSiswa.id}`, serverData.sessionToken);
+        if (serverData.answers && Object.keys(serverData.answers).length > 0) {
+          setAnswers((prev) => ({ ...prev, ...serverData.answers }));
+        }
+      }
+    } catch (err) {
+      console.warn('Verifikasi server session offline/transient:', err);
+    }
+
+    // Register active session in local database & sync
     const now = new Date().toISOString();
     const initSession: JawabanSiswaUjian = existing
       ? {
           ...existing,
           status: 'sedang_mengerjakan',
+          deviceInfo: device,
           terakhirAktif: now,
           updatedAt: now,
         }
@@ -487,6 +656,7 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({ ujianId, schoolI
           jawaban: {},
           waktuMulai: now,
           status: 'sedang_mengerjakan',
+          deviceInfo: device,
           jumlahPelanggaran: 0,
           logPelanggaran: [],
           terakhirAktif: now,
@@ -1577,38 +1747,71 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({ ujianId, schoolI
       {/* Proctoring Locked Screen (Fullscreen overlay when session locked) */}
       {isSessionLocked && (
         <div className="fixed inset-0 z-50 bg-slate-950/95 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="bg-slate-900 border-2 border-red-500/60 rounded-3xl p-6 sm:p-8 max-w-lg w-full text-center shadow-2xl">
-            <div className="w-20 h-20 bg-red-500/20 border-2 border-red-500/40 text-red-400 rounded-3xl flex items-center justify-center mx-auto mb-5 shadow-lg">
-              <Lock className="w-10 h-10" />
+          <div className="bg-slate-900 border-2 border-red-500/70 rounded-3xl p-6 sm:p-8 max-w-xl w-full text-center shadow-2xl animate-in fade-in zoom-in-95 duration-200">
+            <div className="w-20 h-20 bg-red-500/20 border-2 border-red-500/50 text-red-400 rounded-3xl flex items-center justify-center mx-auto mb-5 shadow-lg shadow-red-500/20">
+              <ShieldAlert className="w-10 h-10 animate-pulse text-red-400" />
             </div>
 
-            <h2 className="text-2xl font-black text-red-400 mb-2">SESI UJIAN DIKUNCI</h2>
-            <p className="text-slate-300 text-xs sm:text-sm mb-6 leading-relaxed">
-              Halo <strong>{selectedSiswa?.namaLengkap || (selectedSiswa as any)?.nama}</strong>, sesi ujian Anda telah
-              dikunci oleh sistem pengawasan sekolah.
-            </p>
+            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-red-500/20 border border-red-500/40 text-red-300 text-xs font-bold mb-3">
+              <Lock className="w-3.5 h-3.5" />
+              <span>PENGUNCIAN OTOMATIS SERVER AKTIF</span>
+            </div>
 
-            <div className="bg-red-950/40 border border-red-500/30 rounded-2xl p-4 text-left text-xs text-red-200 mb-6 space-y-2">
-              <div className="font-bold text-red-300 flex items-center gap-1.5">
-                <AlertCircle className="w-4 h-4 text-red-400 shrink-0" />
-                <span>Alasan Penguncian:</span>
+            <h2 className="text-xl sm:text-2xl font-black text-white mb-2 tracking-tight">
+              Ujian Dikunci Sementara
+            </h2>
+
+            {/* MANDATORY VERBATIM USER MESSAGE */}
+            <div className="bg-red-950/60 border-2 border-red-500/60 rounded-2xl p-4 sm:p-5 text-left text-sm text-red-100 mb-5 shadow-md">
+              <div className="font-extrabold text-red-200 flex items-start gap-2 text-sm sm:text-base leading-snug">
+                <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
+                <span>
+                  Ujian dikunci sementara karena terdeteksi akses dari perangkat atau sesi lain. Silakan hubungi guru pengawas.
+                </span>
               </div>
-              <p className="text-slate-200">{lockReason}</p>
-              <div className="text-[11px] text-slate-400 pt-2 border-t border-red-500/20">
-                Total Pelanggaran Tercatat: <strong>{violationsCount} kali</strong>
+              {lockReason && (
+                <div className="mt-2.5 pt-2.5 border-t border-red-500/30 text-xs text-red-300/90">
+                  <span className="font-semibold text-red-200">Catatan Sistem: </span>
+                  {lockReason}
+                </div>
+              )}
+            </div>
+
+            {/* Answer Preservation & Anti-Bypass Clarification */}
+            <div className="bg-slate-800/80 border border-slate-700/80 rounded-2xl p-4 text-xs text-slate-300 text-left mb-6 space-y-2.5">
+              <div className="font-bold text-white text-xs sm:text-sm flex items-center gap-1.5">
+                <CheckCircle2 className="w-4 h-4 text-emerald-400" />
+                <span>Data Jawaban Anda Aman & Terlindungi:</span>
+              </div>
+              <ul className="space-y-1.5 text-[11px] sm:text-xs text-slate-300 list-disc list-inside">
+                <li>
+                  <strong className="text-emerald-300">Jawaban tersimpan utuh:</strong> Seluruh butir soal yang telah Anda isi sebelum penguncian tetap tersimpan di server sekolah tanpa ada yang hilang atau terhapus.
+                </li>
+                <li>
+                  <strong className="text-amber-300">Akses perangkat kedua ditolak:</strong> Server menolak perubahan atau pengiriman jawaban dari perangkat lain.
+                </li>
+                <li>
+                  <strong className="text-slate-200">Keamanan server:</strong> Menyegarkan halaman (refresh), login ulang, atau membuka link yang sama tidak akan membuka kunci sebelum diverifikasi oleh guru.
+                </li>
+              </ul>
+            </div>
+
+            <div className="bg-slate-950/60 border border-slate-800 rounded-2xl p-3.5 text-xs text-slate-400 text-left mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
+              <div>
+                <span className="text-slate-500 block text-[10px] uppercase font-bold tracking-wider">Guru Pengawas:</span>
+                <span className="font-bold text-slate-200">{ujian.guruNama}</span>
+              </div>
+              <div className="sm:text-right">
+                <span className="text-slate-500 block text-[10px] uppercase font-bold tracking-wider">Status Peserta:</span>
+                <span className="font-semibold text-slate-300">
+                  {selectedSiswa?.namaLengkap || (selectedSiswa as any)?.nama} ({selectedSiswa?.kelas})
+                </span>
               </div>
             </div>
 
-            <div className="bg-slate-800/60 border border-slate-700/60 rounded-2xl p-4 text-xs text-slate-300 text-left mb-6 space-y-2">
-              <div className="font-semibold text-white">Langkah Selanjutnya:</div>
-              <div>1. Segera laporkan kepada Guru Pengawas ({ujian.guruNama}).</div>
-              <div>2. Guru dapat membuka kunci sesi Anda melalui dashboard pengawasan.</div>
-              <div>3. Layar ini akan otomatis terbuka setelah guru menekan tombol "Buka Kunci Sesi".</div>
-            </div>
-
-            <div className="flex items-center justify-center gap-2 text-xs text-slate-400">
-              <RefreshCw className="w-4 h-4 text-blue-400 animate-spin" />
-              <span>Menunggu pembukaan kunci oleh pengawas...</span>
+            <div className="flex items-center justify-center gap-2 text-xs font-semibold text-blue-400 bg-blue-950/40 border border-blue-500/30 py-2.5 px-4 rounded-xl">
+              <RefreshCw className="w-4 h-4 animate-spin text-blue-400" />
+              <span>Memantau status pembukaan kunci dari Guru Pengawas secara real-time...</span>
             </div>
           </div>
         </div>

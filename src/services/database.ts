@@ -912,7 +912,7 @@ class DatabaseService {
   private sanitizeForFirestore(val: any): any {
     if (val === undefined) return null;
     if (val === null || typeof val !== 'object') {
-      if (typeof val === 'string' && val.length > 350000) {
+      if (typeof val === 'string' && val.length > 250000) {
         return `[Teks melebihi batas simpan Cloud Firestore (${Math.round(val.length / 1024)} KB); isi teks diperingkas untuk keandalan server]`;
       }
       return val;
@@ -921,14 +921,24 @@ class DatabaseService {
     if (Array.isArray(val)) {
       return val
         .filter((x) => x !== undefined)
-        .map((x) => this.sanitizeForFirestore(x));
+        .map((x) => {
+          if (Array.isArray(x)) {
+            // Firestore strictly forbids nested arrays (e.g. Array<Array<string>>).
+            // Convert sub-array into an object wrapper so Firestore saves it safely.
+            return {
+              cells: x.map((cell) => (Array.isArray(cell) ? JSON.stringify(cell) : this.sanitizeForFirestore(cell))),
+            };
+          }
+          return this.sanitizeForFirestore(x);
+        });
     }
     const res: Record<string, any> = {};
     for (const key of Object.keys(val)) {
       const propVal = val[key];
       if (propVal === undefined) continue;
-      // Do not store massive base64 in firestore document if > 350KB
-      if (typeof propVal === 'string' && propVal.length > 350000 && key.toLowerCase().includes('base64')) {
+      // Do not store heavy base64 images (such as rendered pngDataUri > 100KB) in Firestore
+      // Documents in Firestore have a 1MB limit; pngDataUri is generated/cached on client canvas
+      if (key === 'pngDataUri' || (typeof propVal === 'string' && propVal.length > 150000 && (key.toLowerCase().includes('base64') || key.toLowerCase().includes('datauri')))) {
         continue;
       }
       res[key] = this.sanitizeForFirestore(propVal);
@@ -3522,7 +3532,12 @@ class DatabaseService {
     return this.saveJawabanSiswaUjian(updatedSession);
   }
 
-  bukaKunciSesiSiswa(ujianId: string, siswaId: string): JawabanSiswaUjian | undefined {
+  bukaKunciSesiSiswa(
+    ujianId: string,
+    siswaId: string,
+    guruNama?: string,
+    catatan?: string
+  ): JawabanSiswaUjian | undefined {
     const existing = this.getJawabanSiswaByUjian(ujianId, siswaId);
     if (!existing) return undefined;
     const now = new Date().toISOString();
@@ -3533,20 +3548,64 @@ class DatabaseService {
       dibukaOlehGuru: true,
       alasanTerkunci: undefined,
       waktuTerkunci: undefined,
+      waktuAktivitasMencurigakan: undefined,
       terakhirAktif: now,
       updatedAt: now,
     };
+
+    // Notify backend server to release lock on server store
+    fetch('/api/ujian/session/unlock', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ujianId,
+        siswaId,
+        guruNama: guruNama || 'Guru Pengawas',
+        catatan: catatan || 'Kunci ujian dibuka oleh guru pengawas.',
+      }),
+    }).catch((err) => {
+      console.warn('Gagal sinkronisasi buka kunci ke server:', err);
+    });
+
     return this.saveJawabanSiswaUjian(updated);
   }
 
-  resetSesiSiswa(ujianId: string, siswaId: string): void {
+  resetSesiSiswa(ujianId: string, siswaId: string, guruNama?: string): void {
     const list = this.getItem<JawabanSiswaUjian[]>(STORAGE_KEYS.JAWABAN_UJIAN, []);
     const updated = list.filter((j) => !(j.ujianId === ujianId && j.siswaId === siswaId));
     this.setItem(STORAGE_KEYS.JAWABAN_UJIAN, updated);
     window.dispatchEvent(new CustomEvent('jawaban_ujian_updated', { detail: updated }));
     try {
       localStorage.removeItem(`draft_ujian_${ujianId}_${siswaId}`);
+      localStorage.removeItem(`portal_exam_token_${ujianId}_${siswaId}`);
     } catch {}
+
+    // Reset on server
+    fetch('/api/ujian/session/reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        ujianId,
+        siswaId,
+        guruNama: guruNama || 'Guru Pengawas',
+      }),
+    }).catch(() => {});
+  }
+
+  async getProctoringAuditLogsAsync(ujianId?: string): Promise<{ logs: any[]; sessions: any[] }> {
+    try {
+      const url = ujianId
+        ? `/api/ujian/session/audit-logs?ujianId=${encodeURIComponent(ujianId)}`
+        : '/api/ujian/session/audit-logs';
+      const res = await fetch(url);
+      if (res.ok) {
+        const data = await res.json();
+        return { logs: data.logs || [], sessions: data.sessions || [] };
+      }
+    } catch (e) {
+      console.warn('Gagal memuat audit log dari server:', e);
+    }
+    return { logs: [], sessions: [] };
   }
 
   gradeJawabanSiswa(

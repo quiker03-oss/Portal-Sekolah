@@ -543,12 +543,17 @@ async function renderAktivitasItem(
         ctx.stroke();
       }
 
-      // Value if present
-      const rowData = rows[rIdx];
-      if (rowData) {
+      // Value if present (supports plain string array or { cells: string[] } from Firestore)
+      const rawRow = rows[rIdx];
+      const rowData: string[] = Array.isArray(rawRow)
+        ? rawRow
+        : Array.isArray((rawRow as any)?.cells)
+        ? (rawRow as any).cells
+        : [];
+      if (rowData && rowData.length > 0) {
         ctx.fillStyle = '#1E293B';
         rowData.forEach((val, vIdx) => {
-          if (val) ctx.fillText(val, leftX + 10 + (vIdx * colW) + (colW / 2), rY + 9);
+          if (val) ctx.fillText(String(val), leftX + 10 + (vIdx * colW) + (colW / 2), rY + 9);
         });
       }
     }

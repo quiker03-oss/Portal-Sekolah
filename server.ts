@@ -10,6 +10,15 @@ import {
   handleBuatModul,
   handleBuatMateri,
 } from "./api/_lib/geminiBackend";
+import {
+  handleStartExamSession,
+  handleSaveAnswerSession,
+  handleHeartbeatSession,
+  handleSubmitSession,
+  handleUnlockSession,
+  handleGetProctoringAuditLogs,
+  handleResetExamSession,
+} from "./api/_lib/examSessionBackend";
 
 dotenv.config();
 
@@ -134,6 +143,99 @@ async function startServer() {
         success: false,
         error: err.message || "Gagal memproses teks soal.",
       });
+    }
+  });
+
+  // =========================================================================
+  // SISTEM KEAMANAN SESI UJIAN: DETEKSI PERANGKAT BERBEDA & PENGUNCIAN SERVER
+  // =========================================================================
+
+  // Endpoint: Mulai / Pulihkan Sesi Ujian (Deteksi Perangkat Ganda Secara Atomik)
+  app.post("/api/ujian/session/start", async (req, res) => {
+    try {
+      const clientIp = (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || req.ip;
+      const result = await handleStartExamSession(req.body, clientIp);
+      if (result.locked) {
+        return res.status(403).json(result);
+      }
+      res.json(result);
+    } catch (err: any) {
+      console.error("API /api/ujian/session/start error:", err);
+      res.status(500).json({ success: false, error: err.message || "Gagal memverifikasi sesi ujian." });
+    }
+  });
+
+  // Endpoint: Simpan Jawaban Siswa (Ditolak Jika Terkunci)
+  app.post("/api/ujian/session/save-answer", async (req, res) => {
+    try {
+      const result = await handleSaveAnswerSession(req.body);
+      if (result.locked) {
+        return res.status(403).json(result);
+      }
+      res.json(result);
+    } catch (err: any) {
+      console.error("API /api/ujian/session/save-answer error:", err);
+      res.status(500).json({ success: false, error: err.message || "Gagal menyimpan jawaban ke server." });
+    }
+  });
+
+  // Endpoint: Heartbeat & Pemantauan Penguncian Real-Time
+  app.post("/api/ujian/session/heartbeat", async (req, res) => {
+    try {
+      const result = await handleHeartbeatSession(req.body);
+      res.json(result);
+    } catch (err: any) {
+      console.error("API /api/ujian/session/heartbeat error:", err);
+      res.status(500).json({ success: false, error: err.message || "Gagal memeriksa status sesi." });
+    }
+  });
+
+  // Endpoint: Selesai / Kumpulkan Lembar Ujian
+  app.post("/api/ujian/session/submit", async (req, res) => {
+    try {
+      const result = await handleSubmitSession(req.body);
+      if (result.locked) {
+        return res.status(403).json(result);
+      }
+      res.json(result);
+    } catch (err: any) {
+      console.error("API /api/ujian/session/submit error:", err);
+      res.status(500).json({ success: false, error: err.message || "Gagal menyelesaikan ujian di server." });
+    }
+  });
+
+  // Endpoint: Buka Kunci Ujian oleh Guru Pengawas yang Berwenang
+  app.post("/api/ujian/session/unlock", async (req, res) => {
+    try {
+      const result = await handleUnlockSession(req.body);
+      res.json(result);
+    } catch (err: any) {
+      console.error("API /api/ujian/session/unlock error:", err);
+      res.status(500).json({ success: false, error: err.message || "Gagal membuka kunci ujian." });
+    }
+  });
+
+  // Endpoint: Reset Sesi Siswa oleh Guru Pengawas
+  app.post("/api/ujian/session/reset", async (req, res) => {
+    try {
+      const { ujianId, siswaId, guruNama } = req.body || {};
+      const result = await handleResetExamSession(ujianId, siswaId, guruNama);
+      res.json(result);
+    } catch (err: any) {
+      console.error("API /api/ujian/session/reset error:", err);
+      res.status(500).json({ success: false, error: err.message || "Gagal mereset sesi." });
+    }
+  });
+
+  // Endpoint: Ambil Audit Log & Sesi Aktif untuk Dashboard Guru Pengawas
+  app.get("/api/ujian/session/audit-logs", (req, res) => {
+    try {
+      const ujianId = req.query.ujianId as string | undefined;
+      const result = handleGetProctoringAuditLogs(ujianId);
+      res.json(result);
+    } catch (err: any) {
+      console.error("API /api/ujian/session/audit-logs error:", err);
+      res.status(500).json({ success: false, error: err.message || "Gagal memuat log audit." });
     }
   });
 

@@ -594,6 +594,40 @@ export interface DetailJawabanSiswa {
   dinilaiOlehGuru?: boolean;
 }
 
+export interface DeviceSessionInfo {
+  deviceId: string;
+  userAgent: string;
+  platform: string;
+  screenResolution: string;
+  language?: string;
+  browserSummary?: string;
+  ip?: string;
+  loginAt: string;
+  lastActiveAt?: string;
+}
+
+export interface AuditLogUjian {
+  id: string;
+  ujianId: string;
+  siswaId: string;
+  namaSiswa: string;
+  kelas: string;
+  waktu: string;
+  tipe:
+    | 'login_awal'
+    | 'pemulihan_sesi'
+    | 'deteksi_perangkat_ganda'
+    | 'kunci_otomatis'
+    | 'buka_kunci_guru'
+    | 'simpan_jawaban_ditolak'
+    | 'selesai_ujian';
+  deskripsi: string;
+  alasan?: string;
+  deviceAwal?: Partial<DeviceSessionInfo>;
+  deviceMencurigakan?: Partial<DeviceSessionInfo>;
+  aktor?: string; // 'Sistem Server (Otomatis)' or 'Guru Pengawas: ...'
+}
+
 export interface JawabanSiswaUjian {
   id: string;
   schoolId?: string;
@@ -607,7 +641,7 @@ export interface JawabanSiswaUjian {
   waktuMulai: string;
   waktuSelesai?: string;
   durasiDetik?: number;
-  status: 'sedang_mengerjakan' | 'selesai' | 'waktu_habis' | 'terkunci';
+  status: 'sedang_mengerjakan' | 'selesai' | 'waktu_habis' | 'terkunci' | 'mencurigakan';
   jumlahBenar?: number;
   jumlahSalah?: number;
   jumlahKosong?: number;
@@ -615,7 +649,12 @@ export interface JawabanSiswaUjian {
   lulusKkm?: boolean;
   adaEsaiBelumDinilai?: boolean;
   catatanGuru?: string;
-  // Pengawasan & Status Sesi
+  // Pengawasan & Status Sesi Perangkat
+  sessionToken?: string;
+  deviceInfo?: DeviceSessionInfo;
+  deviceMencurigakan?: DeviceSessionInfo;
+  waktuAktivitasMencurigakan?: string;
+  riwayatAudit?: AuditLogUjian[];
   jumlahPelanggaran?: number;
   logPelanggaran?: LogPelanggaranUjian[];
   terkunciOlehSistem?: boolean;
