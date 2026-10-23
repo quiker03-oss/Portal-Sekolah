@@ -601,64 +601,88 @@ ATURAN:
   };
 }
 
-// 4. Core handler: Buat Soal AI
+// 4. Core handler: Buat Soal AI (Tingkat Tinggi & Dukungan Gambar)
 export async function handleBuatSoal(body: any) {
   const {
     mataPelajaran = "Tematik / Umum",
     kelas = "4",
+    fase = "Fase B",
+    semester = "Ganjil",
     kurikulum = "Kurikulum Merdeka",
     jenisUjian = "Ulangan Harian",
+    durasiMenit = 60,
     tingkatKesulitan = "Sedang",
     topikMateri = "",
+    tujuanPembelajaran = "",
     jumlahPg = 5,
     jumlahEsai = 2,
+    jenisSoalPilihan = ["pilihan_ganda", "esai"],
+    sertakanGambar = true,
     instruksiTambahan = "",
   } = body || {};
 
   const ai = getGeminiClient();
 
-  const prompt = `Anda adalah seorang instruktur ahli kurikulum dan pembuat instrumen evaluasi pembelajaran di Indonesia (${kurikulum}).
-Buatlah naskah soal ulangan/evaluasi resmi dengan rincian berikut:
+  const prompt = `Anda adalah seorang instruktur ahli kurikulum resmi dan pakar asesmen pembelajaran di Indonesia (${kurikulum}).
+Rancanglah naskah soal ulangan/evaluasi resmi berstandar tinggi dengan rincian:
 - Mata Pelajaran: ${mataPelajaran}
-- Tingkat Kelas: ${kelas}
+- Tingkat Kelas & Fase: ${kelas} (${fase}) | Semester: ${semester}
 - Kurikulum: ${kurikulum}
 - Jenis Ujian/Asesmen: ${jenisUjian}
+- Alokasi Durasi Ujian: ${durasiMenit} Menit
 - Tingkat Kesulitan: ${tingkatKesulitan}
-- Topik / Materi Pembahasan: ${topikMateri || "Materi standar sesuai silabus"}
-- Jumlah Soal Pilihan Ganda: ${jumlahPg} butir (opsi pilihan A, B, C, D)
+- Materi Pokok / Topik: ${topikMateri || "Materi silabus standar"}
+${tujuanPembelajaran ? `- Tujuan Pembelajaran (TP): ${tujuanPembelajaran}` : ""}
+- Jumlah Soal Pilihan Ganda: ${jumlahPg} butir
 - Jumlah Soal Esai / Uraian: ${jumlahEsai} butir
+- Tipe Soal yang Didukung: ${jenisSoalPilihan.join(", ")}
 ${instruksiTambahan ? `- Catatan Khusus Guru: ${instruksiTambahan}` : ""}
 
-Kriteria Kualitas Soal:
-1. Soal harus relevan dengan usia siswa dan capaian pembelajaran tingkat kelas ${kelas}.
-2. Untuk tingkat kesulitan ${tingkatKesulitan}, sertakan stimulus kontekstual (studi kasus singkat, teks bacaan, atau ilustrasi situasi nyata) terutama pada soal HOTS.
-3. Kunci jawaban harus tepat dan tidak ambigu.
-4. Sertakan penjelasan/pembahasan ringkas untuk setiap butir soal sebagai pegangan guru.
-5. Format output WAJIB JSON yang valid sesuai skema berikut tanpa teks di luar JSON:
+KETENTUAN KHUSUS GAMBAR PADA SOAL:
+1. ${sertakanGambar ? "Tentukan sekurang-kurangnya 1-2 butir soal yang MEMERLUKAN GAMBAR (stimulus visual). Contoh: Matematika (bangun datar/ruang, pecahan, jam, diagram batang), IPAS (bagian tumbuhan, siklus air, rantai makanan, tata surya, hewan), Pancasila/Bahasa (gotong royong, musyawarah, situasi cerita)." : "Jangan wajibkan gambar."}
+2. Untuk soal yang memiliki gambar, isi properti "perluGambar": true, "gambarKeyword": "pecahan_setengah | jam_0300 | segitiga_siku | balok | tabung | diagram_batang | bagian_tumbuhan | siklus_air | rantai_makanan | tata_surya | gotong_royong | musyawarah", dan "gambarCaption": "string deskripsi singkat gambar".
+3. Soal bervariasi (LOTS hingga HOTS), tidak ambigu, dan sesuai usia siswa kelas ${kelas}.
+4. Sediakan kisi-kisi soal dan rubrik penilaian.
 
+Format output WAJIB JSON yang valid tanpa teks pembungkus di luar JSON:
 {
-  "judul": "string (Contoh: Naskah Ulangan Harian IPAS Kelas 4 - Siklus Air)",
-  "petunjukUmum": "string (Petunjuk pengerjaan bagi siswa)",
+  "judul": "string judul naskah ujian",
+  "petunjukUmum": "string petunjuk pengerjaan ujian",
+  "durasiMenit": ${durasiMenit},
+  "fase": "${fase}",
+  "semester": "${semester}",
+  "kisiKisi": [
+    { "nomor": 1, "materi": "string", "indikator": "string", "tingkatKognitif": "C1 | C2 | C3 | C4", "bentukSoal": "PG | Esai" }
+  ],
+  "rubrikPenilaian": "string penjelasan panduan penilaian total dan kriteria nilai",
   "pilihanGanda": [
     {
       "nomor": 1,
-      "pertanyaan": "string",
+      "tipe": "pilihan_ganda",
+      "pertanyaan": "string pertanyaan",
+      "perluGambar": false,
+      "gambarKeyword": "string keyword jika ada",
+      "gambarCaption": "string caption gambar",
       "pilihan": {
         "A": "string",
         "B": "string",
         "C": "string",
         "D": "string"
       },
-      "kunciJawaban": "A | B | C | D",
-      "pembahasan": "string"
+      "kunciJawaban": "A",
+      "pembahasan": "string pembahasan lengkap"
     }
   ],
   "esai": [
     {
       "nomor": 1,
-      "pertanyaan": "string",
-      "pedomanPenskoran": "string (contoh: Skor 0-5, penjelasan kriteria skor)",
-      "kunciJawaban": "string (uraian jawaban ideal)"
+      "tipe": "esai",
+      "pertanyaan": "string pertanyaan uraian",
+      "perluGambar": false,
+      "gambarKeyword": "string keyword jika ada",
+      "gambarCaption": "string caption gambar",
+      "pedomanPenskoran": "string kriteria skor (0-5)",
+      "kunciJawaban": "string uraian jawaban ideal"
     }
   ]
 }`;
@@ -848,110 +872,129 @@ Format WAJIB JSON murni tanpa markdown pembungkus di luar JSON:
   };
 }
 
-// 6. Core handler: Buat Materi / LKPD AI
+// 6. Core handler: Buat Materi & LKPD Visual Gambar AI
 export async function handleBuatMateri(body: any) {
   const {
     mataPelajaran = "Matematika",
     kelas = "5",
     topikMateri = "",
-    tipe = "ringkasan",
+    tipe = "lkpd_gambar", // 'ringkasan' | 'lkpd_gambar' | 'bahan_plus_lkpd' | 'remedial'
     instruksiTambahan = "",
     sertakanGambar = true,
   } = body || {};
 
   const ai = getGeminiClient();
 
-  let tipeDeskripsi = "Ringkasan Materi & Panduan Guru Mengajar";
-  if (tipe === "lkpd") {
-    tipeDeskripsi = "Lembar Kerja Peserta Didik (LKPD) Interaktif Bergambar dan Berdiferensiasi";
-  } else if (tipe === "remedial") {
-    tipeDeskripsi = "Materi Pengayaan & Remedial untuk Siswa yang Membutuhkan Pendampingan";
-  }
+  const isVisualLkpd = tipe === "lkpd_gambar" || tipe === "bahan_plus_lkpd" || tipe === "lkpd";
 
-  const getSubjectIllustration = (sub: string, top: string) => {
-    const query = (sub + " " + top).toLowerCase();
-    if (query.includes("matematika") || query.includes("hitung") || query.includes("geometri") || query.includes("pecahan")) {
-      return {
-        url: "https://images.unsplash.com/photo-1635070041078-e363dbe005cb?auto=format&fit=crop&w=700&q=80",
-        caption: "Ilustrasi Konsep Pola dan Geometri Matematika",
-      };
-    } else if (query.includes("tumbuhan") || query.includes("flora") || query.includes("daun") || query.includes("pohon")) {
-      return {
-        url: "https://images.unsplash.com/photo-1530595467537-0b5996c41f2d?auto=format&fit=crop&w=700&q=80",
-        caption: "Pengamatan Morfologi Tumbuhan dan Bagian-Bagian Tanaman",
-      };
-    } else if (query.includes("hewan") || query.includes("fauna") || query.includes("satwa") || query.includes("rantai makanan")) {
-      return {
-        url: "https://images.unsplash.com/photo-1535083783855-76ae62b2914e?auto=format&fit=crop&w=700&q=80",
-        caption: "Pengamatan Keanekaragaman Hewan dan Ekosistem",
-      };
-    } else if (query.includes("ipa") || query.includes("sains") || query.includes("percobaan") || query.includes("eksperimen")) {
-      return {
-        url: "https://images.unsplash.com/photo-1532094349884-543bc11b234d?auto=format&fit=crop&w=700&q=80",
-        caption: "Eksplorasi Sains dan Penyelidikan Ilmiah",
-      };
-    } else if (query.includes("bumi") || query.includes("tata surya") || query.includes("planet") || query.includes("cuaca")) {
-      return {
-        url: "https://images.unsplash.com/photo-1614728894747-a83421e2b9c9?auto=format&fit=crop&w=700&q=80",
-        caption: "Eksplorasi Ruang Angkasa dan Fenomena Bumi",
-      };
-    } else if (query.includes("seni") || query.includes("sbdp") || query.includes("gambar") || query.includes("rupa")) {
-      return {
-        url: "https://images.unsplash.com/photo-1513364776144-60967b0f800f?auto=format&fit=crop&w=700&q=80",
-        caption: "Aktivitas Seni Rupa dan Kreativitas Siswa",
-      };
-    }
-    return {
-      url: "https://images.unsplash.com/photo-1497633762265-9d179a990aa6?auto=format&fit=crop&w=700&q=80",
-      caption: "Media Belajar dan Penyelidikan Peserta Didik",
-    };
-  };
-
-  const illustration = getSubjectIllustration(mataPelajaran, topikMateri);
-
-  const prompt = `Anda adalah asisten guru profesional sekolah dasar dan menengah di Indonesia yang ahli dalam Kurikulum Merdeka.
-Buatlah materi pembelajaran berkualitas tinggi dalam format Markdown yang rapi, lengkap, dan siap dicetak:
-- Jenis Dokumen: ${tipeDeskripsi}
+  const prompt = isVisualLkpd
+    ? `Anda adalah instruktur kurikulum resmi dan pakar desain Lembar Kerja Peserta Didik (LKPD) visual interaktif di Indonesia.
+Rancanglah materi dan dokumen LKPD Visual interaktif siap cetak A4 ramah anak:
 - Mata Pelajaran: ${mataPelajaran}
 - Kelas: ${kelas}
 - Topik / Materi: ${topikMateri}
-${instruksiTambahan ? `- Catatan Khusus Guru: ${instruksiTambahan}` : ""}
+- Tipe Dokumen: LKPD Visual Gambar Anak
+${instruksiTambahan ? `- Instruksi Khusus: ${instruksiTambahan}` : ""}
 
-PANDUAN KHUSUS LKPD & BAHAN AJAR BERGAMBAR:
-1. SERTAKAN GAMBAR & ILUSTRASI VISUAL:
-   Untuk LKPD atau bahan ajar bergambar, sertakan gambar pendukung menggunakan format Markdown:
-   ![${illustration.caption}](${illustration.url})
-   Berikan keterangan gambar yang jelas, ajak siswa mengamati gambar tersebut ("Amati gambar di atas: apa yang kamu temukan?").
-2. AKTIVITAS SISWA BERGAMBAR / LEMBAR PENGAMATAN:
-   Sertakan bagian aktivitas visual untuk anak, seperti:
-   - "🖼️ Lembar Pengamatan & Analisis Gambar"
-   - "🎨 Ruang Menggambar / Diagram Siswa" (berupa instruksi menggambar konsep/bagian yang dipelajari)
-   - Tabel lembar kerja siswa yang siap diisi langsung
-3. FORMAT KONTEN:
-   Gunakan heading (#, ##, ###), daftar bernomor, kotak perhatian/tips, dan petunjuk langkah pengerjaan yang ramah anak.
-4. Sajikan naskah lengkap dari identitas lembar kerja sampai rubrik penilaian sederhana.`;
+Kriteria LKPD Visual Gambar:
+1. Lembar kerja berorientasi visual, terstruktur dengan instruksi jelas.
+2. Sediakan 1 sampai 2 Halaman LKPD yang memuat aneka aktivitas variatif:
+   - Tanya Gambar (soal berbasis pengamatan gambar)
+   - Cocokkan / Tarik Garis (menjodohkan konsep kiri dan kanan)
+   - Hitung Objek (menghitung jumlah objek/benda dan mengisi kotak angka)
+   - Urutkan (menyusun urutan tahapan / peristiwa ke dalam lingkaran urutan)
+   - Tabel Pengamatan (tabel observasi konsep nyata)
+3. Berikan juga ringkasan materi konseptual dalam format markdown.
+
+Format WAJIB JSON murni tanpa teks pembungkus di luar JSON:
+{
+  "judul": "string judul dokumen LKPD",
+  "markdown": "string naskah bahan ajar ringkas berformat markdown",
+  "lkpdData": {
+    "judulLkpd": "string judul lembar kerja",
+    "mataPelajaran": "${mataPelajaran}",
+    "kelas": "${kelas}",
+    "topikMateri": "${topikMateri}",
+    "warnaAksen": "#1E40AF",
+    "temaVisual": "ceria",
+    "tujuanKegiatan": ["string butir tujuan kegiatan 1", "string butir tujuan kegiatan 2"],
+    "petunjukPengerjaan": [
+      "Tuliskan identitas nama dan kelas pada kolom di atas",
+      "Amati setiap gambar dan diagram dengan teliti sebelum menjawab",
+      "Gunakan pensil untuk menarik garis dan mengisi kotak jawaban"
+    ],
+    "halamanList": [
+      {
+        "nomorHalaman": 1,
+        "subJudul": "Aktivitas Eksplorasi Konsep & Pengamatan",
+        "aktivitas": [
+          {
+            "id": "act-1",
+            "nomor": 1,
+            "tipe": "tanya_gambar",
+            "instruksi": "Amati ilustrasi berikut dan jawablah pertanyaan dengan teliti!",
+            "pertanyaan": "Berdasarkan pemahamanmu, jelaskan apa yang terjadi dan mengapa hal tersebut penting?",
+            "garisJawaban": 3
+          },
+          {
+            "id": "act-2",
+            "nomor": 2,
+            "tipe": "cocokkan",
+            "instruksi": "Hubungkan pernyataan di sebelah kiri dengan pasangan yang tepat di sebelah kanan!",
+            "pilihanKiri": ["Konsep A", "Konsep B", "Konsep C"],
+            "pilihanKanan": ["Penjelasan B", "Penjelasan C", "Penjelasan A"]
+          }
+        ]
+      },
+      {
+        "nomorHalaman": 2,
+        "subJudul": "Aktivitas Penyelidikan Mandiri & Refleksi",
+        "aktivitas": [
+          {
+            "id": "act-3",
+            "nomor": 3,
+            "tipe": "tabel_pengamatan",
+            "instruksi": "Lengkapi tabel analisis berikut berdasarkan hasil pengamatanmu:",
+            "kolomTabel": ["No", "Objek / Ciri", "Karakteristik", "Keterangan"],
+            "barisTabel": [
+              ["1", "Pengamatan 1", "", ""],
+              ["2", "Pengamatan 2", "", ""],
+              ["3", "Pengamatan 3", "", ""]
+            ]
+          }
+        ]
+      }
+    ]
+  }
+}`
+    : `Anda adalah guru ahli dan penyusun bahan ajar resmi sekolah di Indonesia.
+Buatlah rangkuman materi pembelajaran komprehensif, menarik, dan terstruktur dalam format JSON:
+- Mata Pelajaran: ${mataPelajaran}
+- Kelas: ${kelas}
+- Topik / Materi: ${topikMateri}
+- Tipe Dokumen: ${tipe}
+${instruksiTambahan ? `- Catatan Khusus: ${instruksiTambahan}` : ""}
+
+Format WAJIB JSON:
+{
+  "judul": "string judul materi",
+  "markdown": "string isi materi lengkap dalam format Markdown dengan heading, list, tips, dan penjelasan mendalam.",
+  "tujuanPembelajaran": ["string butir tujuan 1", "string butir tujuan 2"]
+}`;
 
   const responseText = await generateContentWithFallback(ai, {
     contents: prompt,
+    config: {
+      responseMimeType: "application/json",
+    },
   });
 
-  let finalMarkdown = responseText || "";
-
-  if (sertakanGambar && !finalMarkdown.includes("![")) {
-    const imgMarkdown = `\n\n![${illustration.caption}](${illustration.url})\n*Gambar: ${illustration.caption}*\n\n`;
-    const firstHeadingIndex = finalMarkdown.indexOf("\n## ");
-    if (firstHeadingIndex !== -1) {
-      finalMarkdown =
-        finalMarkdown.slice(0, firstHeadingIndex) +
-        imgMarkdown +
-        finalMarkdown.slice(firstHeadingIndex);
-    } else {
-      finalMarkdown = imgMarkdown + finalMarkdown;
-    }
-  }
+  const parsed = cleanAndParseJson(responseText);
 
   return {
     success: true,
-    markdown: finalMarkdown,
+    data: parsed,
+    markdown: parsed.markdown || parsed.isiMarkdown || "",
+    lkpdData: parsed.lkpdData || null,
   };
 }

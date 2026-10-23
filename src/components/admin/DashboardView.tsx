@@ -68,8 +68,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ currentUser, onNav
 
   // Breakdown by class
   const classBreakdown = kelasList.map((k) => {
-    const countInClass = siswaList.filter((s) => s.kelas === k.nama).length;
-    const presentInClass = todaySiswaAbsensi.filter((a) => a.kelas === k.nama && (a.status === 'Hadir' || a.status === 'Terlambat')).length;
+    const kNorm = k.nama.toLowerCase().replace(/[^a-z0-9]/g, '');
+    const countInClass = siswaList.filter((s) => {
+      if (!s.kelas) return false;
+      if (s.kelas === k.nama) return true;
+      const sNorm = s.kelas.toLowerCase().replace(/[^a-z0-9]/g, '');
+      return sNorm === kNorm || sNorm === `kelas${kNorm}` || `kelas${sNorm}` === kNorm;
+    }).length;
+    const presentInClass = todaySiswaAbsensi.filter((a) => {
+      if (!a.kelas) return false;
+      const match = a.kelas === k.nama || a.kelas.toLowerCase().replace(/[^a-z0-9]/g, '') === kNorm;
+      return match && (a.status === 'Hadir' || a.status === 'Terlambat');
+    }).length;
     return {
       nama: k.nama,
       total: countInClass,

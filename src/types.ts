@@ -328,25 +328,34 @@ export interface LandingConfig {
   showKontak: boolean;
 }
 
-// ==================== ASISTEN AI GURU (SOAL & MODUL) ====================
+// ==================== ASISTEN AI GURU (SOAL, MODUL, LKPD) ====================
 export interface SoalPilihanGanda {
   nomor: number;
   pertanyaan: string;
+  gambar?: string; // High-res image data URI (Base64) or URL
+  gambarCaption?: string;
+  tipe?: 'pilihan_ganda' | 'pilihan_ganda_kompleks' | 'benar_salah' | 'menjodohkan' | 'isian' | 'esai' | string;
   pilihan: {
     A: string;
     B: string;
     C: string;
     D: string;
+    E?: string;
+    [key: string]: string | undefined;
   };
-  kunciJawaban: 'A' | 'B' | 'C' | 'D';
+  kunciJawaban: string;
   pembahasan: string;
 }
 
 export interface SoalEsai {
   nomor: number;
   pertanyaan: string;
+  gambar?: string;
+  gambarCaption?: string;
+  tipe?: string;
   pedomanPenskoran: string;
   kunciJawaban: string;
+  pembahasan?: string;
 }
 
 export interface NaskahUjianAI {
@@ -357,13 +366,19 @@ export interface NaskahUjianAI {
   judul: string;
   mataPelajaran: string;
   kelas: string;
+  fase?: string;
+  semester?: 'Ganjil' | 'Genap';
+  durasiMenit?: number;
   kurikulum: 'Kurikulum Merdeka' | 'Kurikulum 2013';
-  jenisUjian: 'Ulangan Harian' | 'Penilaian Tengah Semester (PTS/STS)' | 'Penilaian Akhir Semester (PAS/SAS)' | 'Kuis / Latihan Harian';
-  tingkatKesulitan: 'Mudah' | 'Sedang' | 'HOTS (Analisis Tinggi)';
+  jenisUjian: string;
+  tingkatKesulitan: string;
   topikMateri: string;
+  tujuanPembelajaran?: string;
   petunjukUmum: string;
   pilihanGanda: SoalPilihanGanda[];
   esai: SoalEsai[];
+  kisiKisi?: { nomor: number; materi: string; indikator: string; tingkatKognitif: string; bentukSoal: string }[];
+  rubrikPenilaian?: string;
   createdAt: string;
 }
 
@@ -411,6 +426,42 @@ export interface ModulAjarAI {
   createdAt: string;
 }
 
+export interface LkpdAktivitasItem {
+  id: string;
+  nomor: number;
+  tipe: 'tanya_gambar' | 'cocokkan' | 'hitung_objek' | 'urutkan' | 'isi_kosong' | 'tabel_pengamatan' | 'uraian_kreatif';
+  instruksi: string;
+  gambar?: string; // data URI / SVG
+  gambarCaption?: string;
+  pertanyaan?: string;
+  pilihanKiri?: string[]; // untuk mencocokkan garis
+  pilihanKanan?: string[];
+  objekHitung?: { nama: string; jumlah: number; emojiOrShape?: string }[];
+  itemUrutan?: { teks: string; gambar?: string }[];
+  kolomTabel?: string[];
+  barisTabel?: string[][];
+  garisJawaban?: number; // jumlah garis bergaris untuk menulis
+}
+
+export interface LkpdHalaman {
+  nomorHalaman: number;
+  subJudul?: string;
+  aktivitas: LkpdAktivitasItem[];
+  pngDataUri?: string; // High-res rendered PNG image
+}
+
+export interface LkpdData {
+  judulLkpd: string;
+  mataPelajaran: string;
+  kelas: string;
+  topikMateri: string;
+  tujuanKegiatan: string[];
+  petunjukPengerjaan: string[];
+  halamanList: LkpdHalaman[];
+  warnaAksen?: string;
+  temaVisual?: 'ceria' | 'saintifik' | 'alam' | 'minimalis';
+}
+
 export interface BahanAjarAI {
   id: string;
   schoolId?: string;
@@ -419,9 +470,12 @@ export interface BahanAjarAI {
   judul: string;
   mataPelajaran: string;
   kelas: string;
+  fase?: string;
   topikMateri: string;
-  tipe: 'ringkasan' | 'lkpd' | 'remedial';
+  tipe: 'ringkasan' | 'lkpd' | 'remedial' | 'lkpd_gambar' | 'bahan_plus_lkpd';
+  tujuanPembelajaran?: string[];
   isiMarkdown: string;
+  lkpdData?: LkpdData;
   createdAt: string;
 }
 

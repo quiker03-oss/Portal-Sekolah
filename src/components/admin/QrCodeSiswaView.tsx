@@ -136,7 +136,10 @@ export const QrCodeSiswaView: React.FC<QrCodeSiswaViewProps> = ({ initialSiswaId
       s.namaLengkap.toLowerCase().includes(search.toLowerCase()) ||
       s.qrId.toLowerCase().includes(search.toLowerCase()) ||
       (s.nisn && s.nisn.includes(search));
-    const matchKelas = filterKelas ? s.kelas === filterKelas : true;
+    const matchKelas = filterKelas
+      ? s.kelas === filterKelas ||
+        s.kelas.toLowerCase().replace(/[^a-z0-9]/g, '') === filterKelas.toLowerCase().replace(/[^a-z0-9]/g, '')
+      : true;
     return matchSearch && matchKelas;
   });
 

@@ -3086,23 +3086,39 @@ class DatabaseService {
 
   saveNaskahSoal(item: NaskahUjianAI): NaskahUjianAI {
     const list = this.getNaskahSoalList();
+    const activeSchoolId = this.getActiveSchoolId();
+    const preparedItem: NaskahUjianAI = {
+      ...item,
+      schoolId: item.schoolId || activeSchoolId,
+    };
     const existingIndex = list.findIndex((s) => s.id === item.id);
     let updated: NaskahUjianAI[];
     if (existingIndex >= 0) {
       updated = [...list];
-      updated[existingIndex] = item;
+      updated[existingIndex] = preparedItem;
     } else {
-      updated = [item, ...list];
+      updated = [preparedItem, ...list];
     }
     this.setItem(STORAGE_KEYS.AI_SOAL, updated);
+
+    // Sync to Firestore
+    this.syncToFirestore(preparedItem.schoolId || activeSchoolId, 'ai_soal', preparedItem).catch((e) => {
+      console.warn('Sync ai_soal to firestore warning:', e);
+    });
+
     window.dispatchEvent(new CustomEvent('ai_soal_updated', { detail: updated }));
-    return item;
+    return preparedItem;
   }
 
   deleteNaskahSoal(id: string): void {
     const list = this.getNaskahSoalList();
+    const target = list.find((s) => s.id === id);
     const updated = list.filter((s) => s.id !== id);
     this.setItem(STORAGE_KEYS.AI_SOAL, updated);
+
+    const schoolId = target?.schoolId || this.getActiveSchoolId();
+    this.deleteFromFirestore(schoolId, 'ai_soal', id).catch(() => {});
+
     window.dispatchEvent(new CustomEvent('ai_soal_updated', { detail: updated }));
   }
 
@@ -3112,23 +3128,39 @@ class DatabaseService {
 
   saveModulAjar(item: ModulAjarAI): ModulAjarAI {
     const list = this.getModulAjarList();
+    const activeSchoolId = this.getActiveSchoolId();
+    const preparedItem: ModulAjarAI = {
+      ...item,
+      schoolId: item.schoolId || activeSchoolId,
+    };
     const existingIndex = list.findIndex((m) => m.id === item.id);
     let updated: ModulAjarAI[];
     if (existingIndex >= 0) {
       updated = [...list];
-      updated[existingIndex] = item;
+      updated[existingIndex] = preparedItem;
     } else {
-      updated = [item, ...list];
+      updated = [preparedItem, ...list];
     }
     this.setItem(STORAGE_KEYS.AI_MODUL, updated);
+
+    // Sync to Firestore
+    this.syncToFirestore(preparedItem.schoolId || activeSchoolId, 'ai_modul', preparedItem).catch((e) => {
+      console.warn('Sync ai_modul to firestore warning:', e);
+    });
+
     window.dispatchEvent(new CustomEvent('ai_modul_updated', { detail: updated }));
-    return item;
+    return preparedItem;
   }
 
   deleteModulAjar(id: string): void {
     const list = this.getModulAjarList();
+    const target = list.find((m) => m.id === id);
     const updated = list.filter((m) => m.id !== id);
     this.setItem(STORAGE_KEYS.AI_MODUL, updated);
+
+    const schoolId = target?.schoolId || this.getActiveSchoolId();
+    this.deleteFromFirestore(schoolId, 'ai_modul', id).catch(() => {});
+
     window.dispatchEvent(new CustomEvent('ai_modul_updated', { detail: updated }));
   }
 
@@ -3138,23 +3170,39 @@ class DatabaseService {
 
   saveBahanAjar(item: BahanAjarAI): BahanAjarAI {
     const list = this.getBahanAjarList();
+    const activeSchoolId = this.getActiveSchoolId();
+    const preparedItem: BahanAjarAI = {
+      ...item,
+      schoolId: item.schoolId || activeSchoolId,
+    };
     const existingIndex = list.findIndex((m) => m.id === item.id);
     let updated: BahanAjarAI[];
     if (existingIndex >= 0) {
       updated = [...list];
-      updated[existingIndex] = item;
+      updated[existingIndex] = preparedItem;
     } else {
-      updated = [item, ...list];
+      updated = [preparedItem, ...list];
     }
     this.setItem(STORAGE_KEYS.AI_MATERI, updated);
+
+    // Sync to Firestore
+    this.syncToFirestore(preparedItem.schoolId || activeSchoolId, 'ai_materi', preparedItem).catch((e) => {
+      console.warn('Sync ai_materi to firestore warning:', e);
+    });
+
     window.dispatchEvent(new CustomEvent('ai_materi_updated', { detail: updated }));
-    return item;
+    return preparedItem;
   }
 
   deleteBahanAjar(id: string): void {
     const list = this.getBahanAjarList();
+    const target = list.find((m) => m.id === id);
     const updated = list.filter((m) => m.id !== id);
     this.setItem(STORAGE_KEYS.AI_MATERI, updated);
+
+    const schoolId = target?.schoolId || this.getActiveSchoolId();
+    this.deleteFromFirestore(schoolId, 'ai_materi', id).catch(() => {});
+
     window.dispatchEvent(new CustomEvent('ai_materi_updated', { detail: updated }));
   }
 

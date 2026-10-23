@@ -144,7 +144,13 @@ export const UangKasView: React.FC = () => {
   // Students in selected class
   const studentsInClass = useMemo(() => {
     if (!activeKelas) return [];
-    return siswaList.filter((s) => s.kelas === activeKelas.nama || s.kelas === activeKelas.id);
+    const normActive = activeKelas.nama.toLowerCase().replace(/[^a-z0-9]/g, '');
+    return siswaList.filter((s) => {
+      if (!s.kelas) return false;
+      if (s.kelas === activeKelas.nama || s.kelas === activeKelas.id) return true;
+      const normS = s.kelas.toLowerCase().replace(/[^a-z0-9]/g, '');
+      return normS === normActive || normS === `kelas${normActive}` || `kelas${normS}` === normActive;
+    });
   }, [siswaList, activeKelas]);
 
   // Filtered students by search

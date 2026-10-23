@@ -35,7 +35,13 @@ export const ERaporView: React.FC = () => {
   const [valCatatan, setValCatatan] = useState<string>('');
 
   useEffect(() => {
-    const studentsInClass = db.getSiswaList().filter((s) => s.kelas === selectedKelas);
+    const normTarget = (selectedKelas || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+    const studentsInClass = db.getSiswaList().filter((s) => {
+      if (!s.kelas) return false;
+      if (s.kelas === selectedKelas) return true;
+      const normS = s.kelas.toLowerCase().replace(/[^a-z0-9]/g, '');
+      return normS === normTarget || normS === `kelas${normTarget}` || `kelas${normS}` === normTarget;
+    });
     setSiswaList(studentsInClass);
     if (studentsInClass.length > 0) {
       setSelectedSiswa(studentsInClass[0]);

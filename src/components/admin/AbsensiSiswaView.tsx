@@ -281,7 +281,10 @@ export const AbsensiSiswaView: React.FC = () => {
     } // semester matches all in current semester term
 
     // 2. Class filter
-    const matchKelas = filterKelas ? item.kelas === filterKelas : true;
+    const matchKelas = filterKelas
+      ? item.kelas === filterKelas ||
+        item.kelas.toLowerCase().replace(/[^a-z0-9]/g, '') === filterKelas.toLowerCase().replace(/[^a-z0-9]/g, '')
+      : true;
 
     // 3. Status filter
     const matchStatus = filterStatus ? item.status === filterStatus : true;
