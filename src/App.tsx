@@ -26,15 +26,18 @@ const getExamInfoFromUrl = (): ExamUrlInfo => {
   const searchParams = new URLSearchParams(search);
   if (searchParams.get('ujian')) examId = searchParams.get('ujian');
   if (searchParams.get('cbt')) examId = searchParams.get('cbt');
+  if (searchParams.get('kuis')) examId = searchParams.get('kuis');
+  if (searchParams.get('quiz')) examId = searchParams.get('quiz');
+  if (searchParams.get('game')) examId = searchParams.get('game');
   if (searchParams.get('school')) schoolId = searchParams.get('school');
   if (searchParams.get('schoolId')) schoolId = searchParams.get('schoolId');
 
-  // 2. Hash routing: #ujian/cbt-12345 or #ujian/cbt-12345?school=sch-1
+  // 2. Hash routing: #ujian/cbt-12345 or #kuis/kuis-12345?school=sch-1
   if (hash) {
     const rawHash = hash.replace(/^#/, '');
     const [pathPart, queryPart] = rawHash.split('?');
 
-    const hashMatch = pathPart.match(/^(?:ujian|cbt|ujian-online)\/([^?&]+)$/i);
+    const hashMatch = pathPart.match(/^(?:ujian|cbt|ujian-online|kuis|quiz|game)\/([^?&]+)$/i);
     if (hashMatch && hashMatch[1]) {
       examId = decodeURIComponent(hashMatch[1]);
     }

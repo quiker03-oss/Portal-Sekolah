@@ -485,9 +485,33 @@ export type JenisSoal =
   | 'pilihan_ganda_kompleks'
   | 'benar_salah'
   | 'menjodohkan'
+  | 'susun_urutan'
   | 'isian'
   | 'esai';
 export type StatusUjian = 'draf' | 'terjadwal' | 'aktif' | 'selesai' | 'diarsipkan';
+
+export type GameModeType =
+  | 'petualangan' // Mode A: Petualangan Belajar
+  | 'kumpulkan_bintang' // Mode B: Kumpulkan Bintang
+  | 'tantangan_waktu' // Mode C: Tantangan Waktu
+  | 'misi_pengetahuan' // Mode D: Misi Pengetahuan
+  | 'tebak_gambar' // Mode E: Tebak Gambar
+  | 'pasangkan_jawaban' // Mode F: Pasangkan Jawaban
+  | 'susun_urutan'; // Mode G: Susun Urutan
+
+export interface GameQuizSettings {
+  gameMode: GameModeType;
+  tingkatKesulitan?: 'mudah' | 'sedang' | 'menantang';
+  maksimalPercobaan: number; // e.g. 1, 2, 3, or 999 (tak terbatas)
+  poinPerSoal: number; // default 10
+  batasWaktuPerSoalDetik: number; // 0 = tanpa batas, or e.g. 30, 45, 60
+  tampilkanPetunjuk: boolean; // default true
+  efekSuaraAktif: boolean; // default true
+  animasiAktif: boolean; // default true
+  izinkanUlangKuis: boolean; // default true
+  tampilkanPapanPeringkat: boolean; // default true
+  simpanSebagaiNilai: 'latihan_saja' | 'nilai_harian';
+}
 
 export interface PasanganMenjodohkan {
   id: string;
@@ -512,8 +536,12 @@ export interface SoalUjian {
   kunciPilihanKompleks?: string[]; // e.g. ["A", "C"]
   pasanganMenjodohkan?: PasanganMenjodohkan[];
   kunciMenjodohkan?: { [keyKiri: string]: string }; // Map key kiri to expected kanan
+  itemUrutan?: string[]; // Mode G (Susun Urutan): items to arrange
+  kunciUrutan?: string[]; // Mode G: expected order of items
   kunciJawaban: string; // e.g. "A", "Benar", "kata kunci", atau rubrik esai
   pembahasan?: string;
+  penjelasanBenar?: string; // Short educational explanation why answer is correct
+  petunjuk?: string; // Educational hint for incorrect attempts without giving away the answer
   bobot: number; // default 1
   perluVerifikasi?: boolean; // flag if OCR/parser is uncertain
   catatanVerifikasi?: string;
@@ -557,15 +585,18 @@ export interface UjianOnline {
   acakSoal: boolean;
   acakPilihan: boolean;
   tampilkanNilaiLangsung: boolean;
-  tampilkanPembahasan: 'tidak' | 'setelah_ujian' | 'setelah_jadwal_selesai';
+  tampilkanPembahasan: 'tidak' | 'setelah_ujian' | 'setelah_jadwal_selesai' | 'langsung';
   kodeUjian?: string; // Optional PIN / Token (e.g. "ABC123")
   kkm: number; // e.g. 75
   soalList: SoalUjian[];
-  modeTampilan: 'terstruktur' | 'dokumen_asli';
+  modeTampilan: 'terstruktur' | 'dokumen_asli' | 'satu_per_satu';
   dokumenAsliNama?: string;
   dokumenAsliUrl?: string; // Base64 or Blob
   riwayatPerubahanKunci?: RiwayatPerubahanKunci[];
-  // Fitur Pengawasan & Anti-Curang (Proctoring)
+  // Mode Interaktif: Ujian Resmi CBT vs Kuis Game Interaktif Edukasi
+  modeInteraktif?: 'ujian_resmi' | 'kuis_game';
+  gameSettings?: GameQuizSettings;
+  // Fitur Pengawasan & Anti-Curang (Proctoring - aktif hanya pada Ujian Resmi)
   pengawasanAktif?: boolean; // default true
   wajibFullscreen?: boolean; // default true
   maksimalPelanggaran?: number; // default 3, jika tercapai maka otomatis terkunci
@@ -673,6 +704,16 @@ export interface JawabanSiswaUjian {
   waktuKunci?: string;
   dibukaOlehGuru?: boolean;
   terakhirAktif?: string;
+  // Progres Kuis Game Edukasi Interaktif
+  isGameMode?: boolean;
+  totalPoinGame?: number;
+  totalBintang?: number;
+  lencanaDiperoleh?: string[]; // e.g. ['bintang_pemula', 'penjelajah_ilmu', 'ahli_matematika', 'jago_ipa', 'juara_ketekunan', 'master_kuis']
+  levelSiswa?: number;
+  xpGame?: number;
+  percobaanPerSoal?: { [soalId: string]: number };
+  statusPerSoal?: { [soalId: string]: 'benar' | 'salah' | 'belum' };
+  urutanPilihanSiswa?: { [soalId: string]: string[] };
   createdAt: string;
   updatedAt: string;
 }

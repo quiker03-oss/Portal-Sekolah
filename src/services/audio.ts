@@ -151,6 +151,208 @@ class SoundService {
       // Ignore
     }
   }
+
+  // ==========================================
+  // GAMIFIED EDUCATIONAL QUIZ SOUND EFFECTS
+  // ==========================================
+  private isMuted: boolean = false;
+
+  getMuted(): boolean {
+    if (typeof window !== 'undefined') {
+      try {
+        return localStorage.getItem('portal_sekolah_audio_muted') === 'true';
+      } catch {
+        return this.isMuted;
+      }
+    }
+    return this.isMuted;
+  }
+
+  setMuted(muted: boolean) {
+    this.isMuted = muted;
+    if (typeof window !== 'undefined') {
+      try {
+        localStorage.setItem('portal_sekolah_audio_muted', muted ? 'true' : 'false');
+      } catch {}
+    }
+  }
+
+  toggleMute(): boolean {
+    const next = !this.getMuted();
+    this.setMuted(next);
+    return next;
+  }
+
+  /**
+   * Sound 1: Triumphant Win/Correct Answer Jingle
+   * Gentle, cheerful C5-E5-G5-C6 major arpeggio
+   */
+  playGameCorrect() {
+    if (this.getMuted()) return;
+    try {
+      this.initCtx();
+      if (!this.ctx) return;
+
+      const now = this.ctx.currentTime;
+      const notes = [523.25, 659.25, 783.99, 1046.5]; // C5, E5, G5, C6
+      const noteDuration = 0.08;
+
+      notes.forEach((freq, idx) => {
+        if (!this.ctx) return;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, now + idx * noteDuration);
+
+        gain.gain.setValueAtTime(0, now + idx * noteDuration);
+        gain.gain.linearRampToValueAtTime(0.2, now + idx * noteDuration + 0.02);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + (idx + 1.4) * noteDuration);
+
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+
+        osc.start(now + idx * noteDuration);
+        osc.stop(now + (idx + 1.5) * noteDuration);
+      });
+    } catch {}
+  }
+
+  /**
+   * Sound 2: Friendly, Non-Punitive "Belum Tepat" Warm Chime
+   * Soft warm tone that gently encourages trying again without startling the child.
+   */
+  playGameWrongFriendly() {
+    if (this.getMuted()) return;
+    try {
+      this.initCtx();
+      if (!this.ctx) return;
+
+      const now = this.ctx.currentTime;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(329.63, now); // E4
+      osc.frequency.linearRampToValueAtTime(261.63, now + 0.18); // C4
+
+      gain.gain.setValueAtTime(0.12, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.28);
+
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+
+      osc.start(now);
+      osc.stop(now + 0.28);
+    } catch {}
+  }
+
+  /**
+   * Sound 3: Star Earned / Sparkle Sound
+   */
+  playGameStar() {
+    if (this.getMuted()) return;
+    try {
+      this.initCtx();
+      if (!this.ctx) return;
+
+      const now = this.ctx.currentTime;
+      const freqs = [1318.51, 1567.98, 2093.0]; // E6, G6, C7
+      freqs.forEach((freq, i) => {
+        if (!this.ctx) return;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, now + i * 0.06);
+        gain.gain.setValueAtTime(0.1, now + i * 0.06);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + i * 0.06 + 0.25);
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now + i * 0.06);
+        osc.stop(now + i * 0.06 + 0.25);
+      });
+    } catch {}
+  }
+
+  /**
+   * Sound 4: Badge Unlocked / Level Up Fanfare
+   */
+  playGameBadge() {
+    if (this.getMuted()) return;
+    try {
+      this.initCtx();
+      if (!this.ctx) return;
+
+      const now = this.ctx.currentTime;
+      const chords = [
+        [523.25, 659.25], // C5, E5
+        [587.33, 739.99], // D5, F#5
+        [659.25, 830.61], // E5, G#5
+        [783.99, 1046.5], // G5, C6
+      ];
+
+      chords.forEach((chord, step) => {
+        chord.forEach((freq) => {
+          if (!this.ctx) return;
+          const osc = this.ctx.createOscillator();
+          const gain = this.ctx.createGain();
+          osc.type = 'sine';
+          const t = now + step * 0.12;
+          osc.frequency.setValueAtTime(freq, t);
+          gain.gain.setValueAtTime(0.12, t);
+          gain.gain.exponentialRampToValueAtTime(0.001, t + 0.4);
+          osc.connect(gain);
+          gain.connect(this.ctx.destination);
+          osc.start(t);
+          osc.stop(t + 0.45);
+        });
+      });
+    } catch {}
+  }
+
+  /**
+   * Sound 5: Gentle Click / Selection Tap
+   */
+  playGameClick() {
+    if (this.getMuted()) return;
+    try {
+      this.initCtx();
+      if (!this.ctx) return;
+      const now = this.ctx.currentTime;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(800, now);
+      gain.gain.setValueAtTime(0.06, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.04);
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.04);
+    } catch {}
+  }
+
+  /**
+   * Sound 6: Soft Clock Tick for Timed Mode
+   */
+  playGameTick() {
+    if (this.getMuted()) return;
+    try {
+      this.initCtx();
+      if (!this.ctx) return;
+      const now = this.ctx.currentTime;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'triangle';
+      osc.frequency.setValueAtTime(1000, now);
+      gain.gain.setValueAtTime(0.04, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.03);
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.03);
+    } catch {}
+  }
 }
 
 export const sound = new SoundService();

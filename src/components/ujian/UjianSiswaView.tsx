@@ -26,7 +26,9 @@ import {
   RefreshCw,
   Eye,
   FileText,
+  Gamepad2,
 } from 'lucide-react';
+import { KuisGameInteraktifView } from './KuisGameInteraktifView';
 
 export function getOrCreateDeviceId(): string {
   if (typeof window === 'undefined') return 'server-dev';
@@ -818,12 +820,22 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({ ujianId, schoolI
         </header>
 
         <main className="max-w-3xl mx-auto w-full my-6">
+          {(() => {
+            const isGameQuiz = ujian.modeInteraktif === 'kuis_game' || ujian.jenisUjian === 'Kuis / Latihan Harian';
+            return (
           <div className="bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-3xl p-5 sm:p-8 shadow-2xl relative overflow-hidden">
             {/* Top decorative badge */}
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/30 text-blue-400 text-xs font-semibold mb-3">
-              <Sparkles className="w-3.5 h-3.5" />
-              <span>{ujian.jenisUjian}</span>
-            </div>
+            {isGameQuiz ? (
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-gradient-to-r from-amber-500/20 to-orange-500/20 border border-amber-500/40 text-amber-300 text-xs font-black mb-3">
+                <Gamepad2 className="w-3.5 h-3.5 text-amber-400" />
+                <span>🎮 Kuis Game Interaktif Edukasi &bull; Umpan Balik Langsung</span>
+              </div>
+            ) : (
+              <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/30 text-blue-400 text-xs font-semibold mb-3">
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>{ujian.jenisUjian}</span>
+              </div>
+            )}
 
             <h2 className="text-xl sm:text-2xl md:text-3xl font-extrabold text-white tracking-tight mb-2">
               {ujian.judul}
@@ -978,8 +990,8 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({ ujianId, schoolI
               </div>
             )}
 
-            {/* Proctoring Warning Badge */}
-            {ujian.pengawasanAktif !== false && (
+            {/* Proctoring Warning Badge (Only for official CBT exams) */}
+            {!isGameQuiz && ujian.pengawasanAktif !== false && (
               <div className="bg-amber-950/30 border border-amber-500/30 rounded-2xl p-4 mb-6 flex items-start gap-3 text-xs text-amber-200">
                 <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
                 <div className="space-y-1">
@@ -994,36 +1006,66 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({ ujianId, schoolI
 
             {/* Rules reminder */}
             <div className="bg-slate-950/60 p-4 rounded-xl border border-slate-800 text-xs text-slate-400 space-y-1.5 mb-6">
-              <div className="font-semibold text-slate-300">Tata Tertib Pengerjaan:</div>
-              <div>&bull; Waktu otomatis berjalan setelah tombol Mulai ditekan.</div>
-              <div>&bull; Jawaban tersimpan otomatis dan berkala ke server sekolah.</div>
-              <div>&bull; Tombol Selesai tersedia setelah memeriksa seluruh butir pertanyaan.</div>
+              <div className="font-semibold text-slate-300">
+                {isGameQuiz ? 'Aturan Permainan Edukatif:' : 'Tata Tertib Pengerjaan:'}
+              </div>
+              {isGameQuiz ? (
+                <>
+                  <div>&bull; Setiap jawaban langsung dinilai dengan umpan balik, poin & bintang.</div>
+                  <div>&bull; Jika jawaban belum tepat, kamu dapat membaca petunjuk dan mencoba lagi.</div>
+                  <div>&bull; Kumpulkan bintang, lencana pencapaian, dan selesaikan tantangannya!</div>
+                </>
+              ) : (
+                <>
+                  <div>&bull; Waktu otomatis berjalan setelah tombol Mulai ditekan.</div>
+                  <div>&bull; Jawaban tersimpan otomatis dan berkala ke server sekolah.</div>
+                  <div>&bull; Tombol Selesai tersedia setelah memeriksa seluruh butir pertanyaan.</div>
+                </>
+              )}
             </div>
 
             {/* Start Button */}
             <button
               onClick={handleStartExam}
               disabled={!selectedSiswa}
-              className={`w-full py-4 rounded-2xl font-bold text-sm sm:text-base transition flex items-center justify-center gap-2 shadow-xl cursor-pointer ${
+              className={`w-full py-4 rounded-2xl font-black text-sm sm:text-base transition flex items-center justify-center gap-2 shadow-xl cursor-pointer ${
                 selectedSiswa
-                  ? 'bg-blue-600 hover:bg-blue-500 text-white shadow-blue-500/25'
+                  ? isGameQuiz
+                    ? 'bg-gradient-to-r from-amber-400 to-orange-500 hover:from-amber-300 hover:to-orange-400 text-slate-950 shadow-amber-500/25'
+                    : 'bg-blue-600 hover:bg-blue-500 text-white shadow-blue-500/25'
                   : 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-800'
               }`}
             >
-              <span>Mulai Kerjakan Ujian Sekarang</span>
+              <span>{isGameQuiz ? 'Mulai Petualangan Belajar 🚀' : 'Mulai Kerjakan Ujian Sekarang'}</span>
               <ChevronRight className="w-5 h-5" />
             </button>
           </div>
+            );
+          })()}
         </main>
 
         <footer className="text-center text-xs text-slate-500 py-3">
-          Sistem Ujian Online Terintegrasi &bull; Portal Satuan Pendidikan Digital
+          {ujian.modeInteraktif === 'kuis_game' || ujian.jenisUjian === 'Kuis / Latihan Harian'
+            ? 'Kuis Game Interaktif Edukasi &bull; Portal Satuan Pendidikan Digital'
+            : 'Sistem Ujian Online Terintegrasi &bull; Portal Satuan Pendidikan Digital'}
         </footer>
       </div>
     );
   }
 
-  // 2. Exam Completed / Score Display Screen
+  // 1.5 Game Quiz Interactive Mode (Gamified learning experience with instant evaluation)
+  const isGameQuizActive = ujian.modeInteraktif === 'kuis_game' || ujian.jenisUjian === 'Kuis / Latihan Harian';
+  if (selectedSiswa && isGameQuizActive) {
+    return (
+      <KuisGameInteraktifView
+        ujian={ujian}
+        siswa={selectedSiswa}
+        onExit={onExit || (() => setHasStarted(false))}
+      />
+    );
+  }
+
+  // 2. Exam Completed / Score Display Screen (For official CBT exams)
   if (isSubmitted) {
     const isLulus = submissionResult?.lulusKkm;
     const canViewScore = ujian.tampilkanNilaiLangsung;

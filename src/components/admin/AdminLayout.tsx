@@ -31,6 +31,7 @@ import { BellRing,
   LayoutTemplate,
   Sparkles,
   FileQuestion,
+  Gamepad2,
 } from 'lucide-react';
 
 // Subviews
@@ -150,6 +151,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
       items: [
         { id: 'asisten-ai-guru', label: 'Asisten AI Guru (Soal & RPP)', icon: Sparkles, visible: true },
         { id: 'ujian-online', label: 'Ujian Online (CBT)', icon: FileQuestion, visible: true },
+        { id: 'kuis-game', label: 'Kuis Game Interaktif 🎮', icon: Gamepad2, visible: true },
       ],
     },
     {
@@ -322,6 +324,8 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
               {activeTab === 'asisten-ai-guru' && <AsistenAiGuruView currentUser={currentUser} />}
 
               {activeTab === 'ujian-online' && <UjianOnlineAdmin currentUser={currentUser} />}
+
+              {activeTab === 'kuis-game' && <UjianOnlineAdmin currentUser={currentUser} initialFilter="kuis_game" />}
 
               {activeTab === 'data-siswa' && (
                 <DataSiswaView

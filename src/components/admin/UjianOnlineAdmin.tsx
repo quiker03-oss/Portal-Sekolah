@@ -19,6 +19,8 @@ import {
   StatusUjian,
   LogPelanggaranUjian,
   AuditLogUjian,
+  GameModeType,
+  GameQuizSettings,
 } from '../../types';
 import {
   FileText,
@@ -64,16 +66,27 @@ import {
   Laptop,
   Smartphone,
   Shield,
+  Gamepad2,
+  Star,
+  Lightbulb,
+  Play,
+  RotateCcw,
 } from 'lucide-react';
 import { PrintRekapModal } from './PrintRekapModal';
+import { KuisGameInteraktifView } from '../ujian/KuisGameInteraktifView';
 
 interface UjianOnlineAdminProps {
   currentUser: User;
+  initialFilter?: string;
 }
 
-export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser }) => {
+export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser, initialFilter }) => {
   // Main view navigation: 'list' | 'form' | 'rekap' | 'pengawasan'
   const [view, setView] = useState<'list' | 'form' | 'rekap' | 'pengawasan'>('list');
+  const [selectedCategoryTab, setSelectedCategoryTab] = useState<'semua' | 'kuis_game' | 'cbt_resmi'>(
+    initialFilter === 'kuis_game' ? 'kuis_game' : 'semua'
+  );
+  const [previewGameQuiz, setPreviewGameQuiz] = useState<UjianOnline | null>(null);
 
   // Exam list data & filter
   const [ujianList, setUjianList] = useState<UjianOnline[]>([]);
@@ -229,6 +242,15 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
   // Exam Filtering
   const filteredExams = useMemo(() => {
     return ujianList.filter((exam) => {
+      // Category filter (Semua / Kuis Game / CBT Resmi)
+      if (selectedCategoryTab === 'kuis_game') {
+        const isGame = exam.modeInteraktif === 'kuis_game' || exam.jenisUjian === 'Kuis / Latihan Harian';
+        if (!isGame) return false;
+      } else if (selectedCategoryTab === 'cbt_resmi') {
+        const isGame = exam.modeInteraktif === 'kuis_game' || exam.jenisUjian === 'Kuis / Latihan Harian';
+        if (isGame) return false;
+      }
+
       // Status filter
       if (selectedFilterStatus !== 'semua' && exam.status !== selectedFilterStatus) {
         return false;
@@ -255,43 +277,61 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
 
       return true;
     });
-  }, [ujianList, selectedFilterStatus, selectedFilterKelas, searchExamQuery]);
+  }, [ujianList, selectedCategoryTab, selectedFilterStatus, selectedFilterKelas, searchExamQuery]);
 
   // Handle open create exam
-  const handleOpenCreateExam = () => {
+  const handleOpenCreateExam = (isGameQuiz: boolean = false) => {
     const now = new Date();
     const startTime = now.toISOString().slice(0, 16);
     const endTime = new Date(now.getTime() + 48 * 60 * 60 * 1000).toISOString().slice(0, 16);
 
     const newExam: UjianOnline = {
-      id: `cbt-${Date.now()}`,
+      id: isGameQuiz ? `game-${Date.now()}` : `cbt-${Date.now()}`,
       schoolId: db.getActiveSchoolId(),
-      judul: '',
-      deskripsi: '',
+      judul: isGameQuiz ? 'Kuis Game Interaktif: ' : '',
+      deskripsi: isGameQuiz
+        ? 'Kuis edukatif berbasis permainan interaktif dengan umpan balik langsung, bintang, dan lencana apresiasi.'
+        : '',
       mataPelajaran: allMapel.length > 0 ? allMapel[0].nama : 'Tematik Umum',
       guruId: currentUser.guruId || currentUser.id,
       guruNama: currentUser.name,
       kelasTarget: allKelas.length > 0 ? [allKelas[0].nama] : ['Kelas 1A'],
       semester: 'Genap',
       tahunAjaran: '2024/2025',
-      jenisUjian: 'Penilaian Tengah Semester (PTS/STS)',
+      jenisUjian: isGameQuiz ? 'Kuis / Latihan Harian' : 'Penilaian Tengah Semester (PTS/STS)',
+      modeInteraktif: isGameQuiz ? 'kuis_game' : 'ujian_resmi',
+      gameSettings: isGameQuiz
+        ? {
+            gameMode: 'petualangan',
+            tingkatKesulitan: 'sedang',
+            maksimalPercobaan: 2,
+            poinPerSoal: 10,
+            batasWaktuPerSoalDetik: 30,
+            tampilkanPetunjuk: true,
+            efekSuaraAktif: true,
+            animasiAktif: true,
+            izinkanUlangKuis: true,
+            tampilkanPapanPeringkat: true,
+            simpanSebagaiNilai: 'latihan_saja',
+          }
+        : undefined,
       status: 'draf',
       tanggalMulai: startTime,
       tanggalSelesai: endTime,
-      durasiMenit: 60,
-      jumlahPercobaan: 1,
+      durasiMenit: isGameQuiz ? 30 : 60,
+      jumlahPercobaan: isGameQuiz ? 3 : 1,
       acakSoal: true,
       acakPilihan: true,
       tampilkanNilaiLangsung: true,
-      tampilkanPembahasan: 'setelah_ujian',
-      kkm: 75,
-      modeTampilan: 'terstruktur',
+      tampilkanPembahasan: isGameQuiz ? 'langsung' : 'setelah_ujian',
+      kkm: 70,
+      modeTampilan: isGameQuiz ? 'satu_per_satu' : 'terstruktur',
       soalList: [],
-      // Proctoring Defaults
-      pengawasanAktif: true,
-      wajibFullscreen: true,
+      // Proctoring Defaults (disabled for playful quiz, strictly on for CBT)
+      pengawasanAktif: !isGameQuiz,
+      wajibFullscreen: !isGameQuiz,
       maksimalPelanggaran: 3,
-      blokirCopyPaste: true,
+      blokirCopyPaste: !isGameQuiz,
       createdAt: now.toISOString(),
       updatedAt: now.toISOString(),
     };
@@ -304,6 +344,20 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
   const handleOpenEditExam = (exam: UjianOnline) => {
     setActiveUjian({
       ...exam,
+      modeInteraktif: exam.modeInteraktif || (exam.jenisUjian === 'Kuis / Latihan Harian' ? 'kuis_game' : 'ujian_resmi'),
+      gameSettings: exam.gameSettings || {
+        gameMode: 'petualangan',
+        tingkatKesulitan: 'sedang',
+        maksimalPercobaan: 2,
+        poinPerSoal: 10,
+        batasWaktuPerSoalDetik: 30,
+        tampilkanPetunjuk: true,
+        efekSuaraAktif: true,
+        animasiAktif: true,
+        izinkanUlangKuis: true,
+        tampilkanPapanPeringkat: true,
+        simpanSebagaiNilai: 'latihan_saja',
+      },
       pengawasanAktif: exam.pengawasanAktif !== undefined ? exam.pengawasanAktif : true,
       wajibFullscreen: exam.wajibFullscreen !== undefined ? exam.wajibFullscreen : true,
       maksimalPelanggaran: exam.maksimalPelanggaran || 3,
@@ -1081,13 +1135,22 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
           </button>
         </div>
 
-        <button
-          onClick={handleOpenCreateExam}
-          className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-2 rounded-xl text-xs sm:text-sm transition shadow-sm flex items-center gap-1.5 cursor-pointer ml-auto"
-        >
-          <Plus className="w-4 h-4" />
-          <span>Buat Ujian Baru</span>
-        </button>
+        <div className="flex items-center gap-2 ml-auto">
+          <button
+            onClick={() => handleOpenCreateExam(true)}
+            className="bg-amber-500 hover:bg-amber-600 text-slate-950 font-bold px-3.5 py-2 rounded-xl text-xs sm:text-sm transition shadow-sm flex items-center gap-1.5 cursor-pointer"
+          >
+            <Gamepad2 className="w-4 h-4 text-slate-950" />
+            <span>+ Kuis Game 🎮</span>
+          </button>
+          <button
+            onClick={() => handleOpenCreateExam(false)}
+            className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 py-2 rounded-xl text-xs sm:text-sm transition shadow-sm flex items-center gap-1.5 cursor-pointer"
+          >
+            <Plus className="w-4 h-4" />
+            <span>Buat Ujian Baru</span>
+          </button>
+        </div>
       </div>
 
       {/* ======================================================== */}
@@ -1100,23 +1163,65 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
             <div>
               <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-500/20 border border-blue-400/30 text-blue-300 text-xs font-semibold mb-3">
                 <FileQuestion className="w-3.5 h-3.5" />
-                <span>Portal CBT Satuan Pendidikan</span>
+                <span>Portal CBT & Kuis Game Interaktif Satuan Pendidikan</span>
               </div>
-              <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight">Pusat Ujian Online (CBT)</h1>
+              <h1 className="text-2xl sm:text-3xl font-extrabold tracking-tight">Pusat Asesmen & Kuis Interaktif</h1>
               <p className="text-slate-300 text-xs sm:text-sm mt-1 max-w-2xl leading-relaxed">
-                Kelola naskah ujian, ulangan harian, PTS, PAS, asesmen sumatif, impor naskah Word/PDF dengan ekstraksi
-                gambar dan kunci otomatis, bagikan link & QR Code, sistem pengawasan anti-curang, serta rekap nilai otomatis.
+                Kelola naskah ujian online, ulangan harian, PTS, PAS, asesmen sumatif, dan kuis game edukatif interaktif dengan umpan balik langsung, bintang, level, serta lencana apresiasi siswa.
               </p>
             </div>
             <div className="flex flex-wrap items-center gap-3">
               <button
-                onClick={handleOpenCreateExam}
-                className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-5 py-3 rounded-2xl transition shadow-lg shadow-blue-600/30 flex items-center gap-2 cursor-pointer text-sm"
+                onClick={() => handleOpenCreateExam(true)}
+                className="bg-gradient-to-r from-amber-400 to-amber-500 hover:from-amber-300 hover:to-amber-400 text-slate-950 font-black px-4 sm:px-5 py-3 rounded-2xl transition shadow-lg shadow-amber-500/30 flex items-center gap-2 cursor-pointer text-sm"
+              >
+                <Gamepad2 className="w-4 h-4" />
+                <span>🎮 Buat Kuis Game</span>
+              </button>
+              <button
+                onClick={() => handleOpenCreateExam(false)}
+                className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-4 sm:px-5 py-3 rounded-2xl transition shadow-lg shadow-blue-600/30 flex items-center gap-2 cursor-pointer text-sm"
               >
                 <Plus className="w-4 h-4" />
-                <span>Buat Ujian Baru</span>
+                <span>+ Ujian CBT Resmi</span>
               </button>
             </div>
+          </div>
+
+          {/* Category Filter Tabs: Semua / Kuis Game / CBT Resmi */}
+          <div className="flex items-center gap-2 p-1.5 bg-slate-100 rounded-2xl w-fit">
+            {[
+              { id: 'semua', label: 'Semua Naskah', count: ujianList.length },
+              {
+                id: 'kuis_game',
+                label: '🎮 Kuis Game Interaktif',
+                count: ujianList.filter((u) => u.modeInteraktif === 'kuis_game' || u.jenisUjian === 'Kuis / Latihan Harian').length,
+              },
+              {
+                id: 'cbt_resmi',
+                label: '📝 Ujian CBT Resmi',
+                count: ujianList.filter((u) => u.modeInteraktif !== 'kuis_game' && u.jenisUjian !== 'Kuis / Latihan Harian').length,
+              },
+            ].map((cat) => (
+              <button
+                key={cat.id}
+                onClick={() => setSelectedCategoryTab(cat.id as any)}
+                className={`px-4 py-2 rounded-xl text-xs sm:text-sm font-bold transition flex items-center gap-2 cursor-pointer ${
+                  selectedCategoryTab === cat.id
+                    ? 'bg-white text-slate-900 shadow-sm'
+                    : 'text-slate-600 hover:text-slate-900 hover:bg-white/50'
+                }`}
+              >
+                <span>{cat.label}</span>
+                <span
+                  className={`px-2 py-0.5 rounded-full text-[10px] font-extrabold ${
+                    selectedCategoryTab === cat.id ? 'bg-blue-100 text-blue-700' : 'bg-slate-200 text-slate-600'
+                  }`}
+                >
+                  {cat.count}
+                </span>
+              </button>
+            ))}
           </div>
 
           {/* Quick Metrics Bar */}
@@ -1210,7 +1315,7 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
                 Buat naskah ujian baru atau impor secara otomatis dari dokumen Word (.docx) atau PDF untuk memulai.
               </p>
               <button
-                onClick={handleOpenCreateExam}
+                onClick={() => handleOpenCreateExam(false)}
                 className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-5 py-2.5 rounded-xl text-xs sm:text-sm transition cursor-pointer shadow-md shadow-blue-600/20"
               >
                 + Buat Ujian Pertama
@@ -1234,21 +1339,30 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
                     <div className="p-5">
                       {/* Status Badges */}
                       <div className="flex items-center justify-between mb-3">
-                        <span
-                          className={`px-2.5 py-1 rounded-full text-[11px] font-bold ${
-                            exam.status === 'aktif'
-                              ? 'bg-emerald-100 text-emerald-800'
-                              : exam.status === 'terjadwal'
-                              ? 'bg-blue-100 text-blue-800'
-                              : exam.status === 'selesai'
-                              ? 'bg-slate-100 text-slate-700'
-                              : exam.status === 'diarsipkan'
-                              ? 'bg-amber-100 text-amber-800'
-                              : 'bg-purple-100 text-purple-800'
-                          }`}
-                        >
-                          {exam.status.toUpperCase()}
-                        </span>
+                        <div className="flex items-center gap-1.5 flex-wrap">
+                          <span
+                            className={`px-2.5 py-1 rounded-full text-[11px] font-bold ${
+                              exam.status === 'aktif'
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : exam.status === 'terjadwal'
+                                ? 'bg-blue-100 text-blue-800'
+                                : exam.status === 'selesai'
+                                ? 'bg-slate-100 text-slate-700'
+                                : exam.status === 'diarsipkan'
+                                ? 'bg-amber-100 text-amber-800'
+                                : 'bg-purple-100 text-purple-800'
+                            }`}
+                          >
+                            {exam.status.toUpperCase()}
+                          </span>
+
+                          {(exam.modeInteraktif === 'kuis_game' || exam.jenisUjian === 'Kuis / Latihan Harian') && (
+                            <span className="px-2 py-0.5 rounded-full text-[10px] font-extrabold bg-gradient-to-r from-amber-400 to-amber-500 text-slate-950 flex items-center gap-1 shadow-xs">
+                              <Gamepad2 className="w-3 h-3 text-slate-950" />
+                              <span>KUIS GAME</span>
+                            </span>
+                          )}
+                        </div>
 
                         <span className="text-[11px] font-semibold text-slate-400">{exam.jenisUjian}</span>
                       </div>
@@ -1320,6 +1434,16 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
                           <FileSpreadsheet className="w-4 h-4" />
                           <span className="hidden sm:inline">Rekap</span>
                         </button>
+                        {(exam.modeInteraktif === 'kuis_game' || exam.jenisUjian === 'Kuis / Latihan Harian') && (
+                          <button
+                            onClick={() => setPreviewGameQuiz(exam)}
+                            title="Mainkan & Pratinjau Kuis Interaktif"
+                            className="p-1.5 sm:p-2 rounded-xl text-amber-800 bg-amber-100/80 hover:bg-amber-200 transition cursor-pointer font-black text-xs flex items-center gap-1"
+                          >
+                            <Play className="w-3.5 h-3.5 text-amber-600 fill-amber-600" />
+                            <span>Mainkan</span>
+                          </button>
+                        )}
                       </div>
 
                       <div className="flex items-center gap-1">
@@ -1398,6 +1522,363 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
           <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
             {/* Left 2 Cols: Exam Details & Question List */}
             <div className="lg:col-span-2 space-y-6">
+              {/* Card 0: Mode Selection Switcher */}
+              <div className="bg-gradient-to-r from-slate-900 via-indigo-950 to-slate-900 p-5 rounded-3xl text-white shadow-lg border border-indigo-500/20 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                <div>
+                  <div className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full bg-amber-400/20 border border-amber-400/30 text-amber-300 text-[10px] font-extrabold uppercase tracking-wider mb-1">
+                    Format Asesmen
+                  </div>
+                  <h3 className="text-base font-black text-white">
+                    {activeUjian.modeInteraktif === 'kuis_game' ? '🎮 Kuis Game Interaktif Edukatif' : '📝 Ujian CBT Resmi Sekolah'}
+                  </h3>
+                  <p className="text-xs text-slate-300 mt-0.5 max-w-md">
+                    {activeUjian.modeInteraktif === 'kuis_game'
+                      ? 'Dilengkapi animasi bintang, konfeti, audio kemenangan, karakter Kiki si Kancil, umpan balik langsung, petunjuk ramah anak, dan lencana apresiasi.'
+                      : 'Dilengkapi pengawasan ketat, anti-curang, layar penuh wajib, dan deteksi otomatis login perangkat ganda.'}
+                  </p>
+                </div>
+
+                <div className="flex items-center gap-1.5 bg-slate-800/90 p-1.5 rounded-2xl border border-slate-700/80 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setActiveUjian({
+                        ...activeUjian,
+                        modeInteraktif: 'ujian_resmi',
+                        jenisUjian: activeUjian.jenisUjian === 'Kuis / Latihan Harian' ? 'Penilaian Tengah Semester (PTS/STS)' : activeUjian.jenisUjian,
+                        pengawasanAktif: true,
+                        wajibFullscreen: true,
+                        tampilkanPembahasan: 'setelah_ujian',
+                      })
+                    }
+                    className={`px-3.5 py-2 rounded-xl text-xs font-bold transition flex items-center gap-1.5 cursor-pointer ${
+                      activeUjian.modeInteraktif !== 'kuis_game'
+                        ? 'bg-blue-600 text-white shadow-md'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    <Shield className="w-4 h-4" />
+                    <span>CBT Resmi</span>
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setActiveUjian({
+                        ...activeUjian,
+                        modeInteraktif: 'kuis_game',
+                        jenisUjian: 'Kuis / Latihan Harian',
+                        pengawasanAktif: false,
+                        wajibFullscreen: false,
+                        blokirCopyPaste: false,
+                        tampilkanPembahasan: 'langsung',
+                        modeTampilan: 'satu_per_satu',
+                        gameSettings: activeUjian.gameSettings || {
+                          gameMode: 'petualangan',
+                          tingkatKesulitan: 'sedang',
+                          maksimalPercobaan: 2,
+                          poinPerSoal: 10,
+                          batasWaktuPerSoalDetik: 30,
+                          tampilkanPetunjuk: true,
+                          efekSuaraAktif: true,
+                          animasiAktif: true,
+                          izinkanUlangKuis: true,
+                          tampilkanPapanPeringkat: true,
+                          simpanSebagaiNilai: 'latihan_saja',
+                        },
+                      })
+                    }
+                    className={`px-3.5 py-2 rounded-xl text-xs font-black transition flex items-center gap-1.5 cursor-pointer ${
+                      activeUjian.modeInteraktif === 'kuis_game'
+                        ? 'bg-gradient-to-r from-amber-400 to-amber-500 text-slate-950 shadow-md shadow-amber-500/20'
+                        : 'text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    <Gamepad2 className="w-4 h-4" />
+                    <span>Kuis Game 🎮</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Dedicated Game Quiz Controls Card if Kuis Game */}
+              {activeUjian.modeInteraktif === 'kuis_game' && (() => {
+                const cur = activeUjian.gameSettings || {
+                  gameMode: 'petualangan' as GameModeType,
+                  tingkatKesulitan: 'sedang' as const,
+                  maksimalPercobaan: 2,
+                  poinPerSoal: 10,
+                  batasWaktuPerSoalDetik: 30,
+                  tampilkanPetunjuk: true,
+                  efekSuaraAktif: true,
+                  animasiAktif: true,
+                  izinkanUlangKuis: true,
+                  tampilkanPapanPeringkat: true,
+                  simpanSebagaiNilai: 'latihan_saja' as const,
+                };
+
+                const updateSettings = (patch: Partial<GameQuizSettings>) => {
+                  setActiveUjian({
+                    ...activeUjian,
+                    gameSettings: { ...cur, ...patch },
+                  });
+                };
+
+                return (
+                  <div className="bg-gradient-to-b from-amber-500/10 via-white to-white p-6 rounded-3xl border-2 border-amber-400/40 shadow-md space-y-5">
+                    <div className="flex items-center justify-between pb-3 border-b border-amber-200/60">
+                      <div className="flex items-center gap-2.5">
+                        <div className="w-9 h-9 rounded-2xl bg-amber-500 text-slate-950 flex items-center justify-center font-bold shadow-sm">
+                          <Gamepad2 className="w-5 h-5" />
+                        </div>
+                        <div>
+                          <h3 className="font-extrabold text-slate-900 text-sm">
+                            Pengaturan Permainan & Edukasi Gamifikasi
+                          </h3>
+                          <p className="text-[11px] text-slate-500">
+                            Pilih salah satu dari 7 mode permainan edukatif dan atur umpan balik langsung untuk siswa.
+                          </p>
+                        </div>
+                      </div>
+                      <span className="px-3 py-1 rounded-full bg-amber-100 text-amber-800 text-[11px] font-black border border-amber-300">
+                        7 Mode Game Aktif
+                      </span>
+                    </div>
+
+                    {/* 7 Educational Game Modes Selection Grid */}
+                    <div>
+                      <label className="block text-xs font-black text-slate-800 mb-2">
+                        Pilih Mode Game Edukasi:
+                      </label>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                        {[
+                          {
+                            id: 'petualangan',
+                            title: 'Mode A — Petualangan Belajar',
+                            desc: 'Siswa melewati level demi level dengan progres peta petualangan.',
+                            icon: '🗺️',
+                          },
+                          {
+                            id: 'kumpulkan_bintang',
+                            title: 'Mode B — Kumpulkan Bintang',
+                            desc: 'Mendapat bintang bertahap tanpa hukuman pengurangan poin.',
+                            icon: '⭐',
+                          },
+                          {
+                            id: 'tantangan_waktu',
+                            title: 'Mode C — Tantangan Waktu',
+                            desc: 'Countdown santai per pertanyaan untuk melatih ketangkasan berpikir.',
+                            icon: '⏱️',
+                          },
+                          {
+                            id: 'misi_pengetahuan',
+                            title: 'Mode D — Misi Pengetahuan',
+                            desc: 'Menyelesaikan deretan misi tematik (IPA, MTK, IPS, Bahasa).',
+                            icon: '🎯',
+                          },
+                          {
+                            id: 'tebak_gambar',
+                            title: 'Mode E — Tebak Gambar',
+                            desc: 'Fokus pada diagram/foto materi pelajaran dengan fitur zoom.',
+                            icon: '🖼️',
+                          },
+                          {
+                            id: 'pasangkan_jawaban',
+                            title: 'Mode F — Pasangkan Jawaban',
+                            desc: 'Mencocokkan istilah dengan definisi atau soal dengan jawaban.',
+                            icon: '🧩',
+                          },
+                          {
+                            id: 'susun_urutan',
+                            title: 'Mode G — Susun Urutan',
+                            desc: 'Menyusun urutan tahapan, proses ilmiah, atau kronologi peristiwa.',
+                            icon: '🔢',
+                          },
+                        ].map((mode) => {
+                          const isSelected = cur.gameMode === mode.id;
+                          return (
+                            <div
+                              key={mode.id}
+                              onClick={() => updateSettings({ gameMode: mode.id as GameModeType })}
+                              className={`p-3 rounded-2xl border-2 transition cursor-pointer flex items-start gap-2.5 ${
+                                isSelected
+                                  ? 'bg-amber-50/80 border-amber-500 shadow-sm ring-2 ring-amber-400/20'
+                                  : 'bg-white border-slate-200 hover:border-slate-300'
+                              }`}
+                            >
+                              <span className="text-xl shrink-0">{mode.icon}</span>
+                              <div className="flex-1 min-w-0">
+                                <div className="font-bold text-xs text-slate-900 leading-tight flex items-center justify-between">
+                                  <span>{mode.title}</span>
+                                  {isSelected && (
+                                    <span className="w-2 h-2 rounded-full bg-amber-500 shrink-0"></span>
+                                  )}
+                                </div>
+                                <p className="text-[11px] text-slate-500 mt-0.5 leading-snug">{mode.desc}</p>
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+
+                    {/* Feedback, Retries & Rules Controls */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 pt-2">
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                          Batas Percobaan Menjawab (Jika Salah)
+                        </label>
+                        <select
+                          value={cur.maksimalPercobaan}
+                          onChange={(e) => updateSettings({ maksimalPercobaan: Number(e.target.value) })}
+                          className="w-full bg-white border border-slate-200 text-slate-800 px-3 py-2 rounded-xl text-xs font-bold focus:ring-2 focus:ring-amber-500 focus:outline-hidden cursor-pointer"
+                        >
+                          <option value={1}>1x Langsung Dinilai (Tanpa Kesempatan Ulang)</option>
+                          <option value={2}>2x Percobaan (Beri 1x Kesempatan Coba Lagi - Rekomendasi)</option>
+                          <option value={3}>3x Percobaan (Beri 2x Kesempatan Coba Lagi)</option>
+                          <option value={999}>Tanpa Batas (Bebas mencoba sampai benar)</option>
+                        </select>
+                        <p className="text-[10px] text-slate-500 mt-1">
+                          Jika masih ada sisa percobaan, kunci jawaban tidak dibocorkan dan petunjuk bantuan akan tampil.
+                        </p>
+                      </div>
+
+                      <div>
+                        <label className="block text-xs font-bold text-slate-700 mb-1">
+                          Poin Reward per Jawaban Benar
+                        </label>
+                        <select
+                          value={cur.poinPerSoal}
+                          onChange={(e) => updateSettings({ poinPerSoal: Number(e.target.value) })}
+                          className="w-full bg-white border border-slate-200 text-slate-800 px-3 py-2 rounded-xl text-xs font-bold focus:ring-2 focus:ring-amber-500 focus:outline-hidden cursor-pointer"
+                        >
+                          <option value={5}>5 Poin / Soal</option>
+                          <option value={10}>10 Poin / Soal (Standar)</option>
+                          <option value={20}>20 Poin / Soal</option>
+                          <option value={50}>50 Poin / Soal</option>
+                          <option value={100}>100 Poin / Soal</option>
+                        </select>
+                        <p className="text-[10px] text-slate-500 mt-1">
+                          Poin menambah XP siswa untuk kenaikan Level dan perolehan Bintang.
+                        </p>
+                      </div>
+                    </div>
+
+                    {/* Mode C Countdown Timer */}
+                    {cur.gameMode === 'tantangan_waktu' && (
+                      <div className="p-3 bg-amber-50 rounded-2xl border border-amber-200 flex items-center justify-between gap-3 text-xs">
+                        <div>
+                          <span className="font-bold text-slate-900 block">Waktu Mundur per Soal (Detik)</span>
+                          <span className="text-[11px] text-slate-500">Hitung mundur santai untuk setiap butir soal</span>
+                        </div>
+                        <select
+                          value={cur.batasWaktuPerSoalDetik || 30}
+                          onChange={(e) => updateSettings({ batasWaktuPerSoalDetik: Number(e.target.value) })}
+                          className="bg-white border border-amber-300 text-slate-800 px-3 py-1.5 rounded-xl font-bold cursor-pointer"
+                        >
+                          <option value={15}>15 Detik (Cepat)</option>
+                          <option value={30}>30 Detik (Standar)</option>
+                          <option value={45}>45 Detik (Tenang)</option>
+                          <option value={60}>60 Detik (Santai)</option>
+                        </select>
+                      </div>
+                    )}
+
+                    {/* Checkbox Toggles */}
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 pt-1 text-xs">
+                      <label className="flex items-center justify-between p-2.5 rounded-xl bg-white border border-slate-200 cursor-pointer">
+                        <div className="flex items-center gap-2">
+                          <Lightbulb className="w-4 h-4 text-amber-500" />
+                          <span className="font-semibold text-slate-800">Tampilkan Petunjuk (Hint)</span>
+                        </div>
+                        <input
+                          type="checkbox"
+                          checked={cur.tampilkanPetunjuk}
+                          onChange={(e) => updateSettings({ tampilkanPetunjuk: e.target.checked })}
+                          className="w-4 h-4 text-amber-500 rounded cursor-pointer"
+                        />
+                      </label>
+
+                      <label className="flex items-center justify-between p-2.5 rounded-xl bg-white border border-slate-200 cursor-pointer">
+                        <div className="flex items-center gap-2">
+                          <Sparkles className="w-4 h-4 text-indigo-500" />
+                          <span className="font-semibold text-slate-800">Animasi Konfeti & Bintang</span>
+                        </div>
+                        <input
+                          type="checkbox"
+                          checked={cur.animasiAktif}
+                          onChange={(e) => updateSettings({ animasiAktif: e.target.checked })}
+                          className="w-4 h-4 text-amber-500 rounded cursor-pointer"
+                        />
+                      </label>
+
+                      <label className="flex items-center justify-between p-2.5 rounded-xl bg-white border border-slate-200 cursor-pointer">
+                        <div className="flex items-center gap-2">
+                          <Award className="w-4 h-4 text-emerald-500" />
+                          <span className="font-semibold text-slate-800">Pemberian Lencana Prestasi</span>
+                        </div>
+                        <input
+                          type="checkbox"
+                          checked={cur.tampilkanPapanPeringkat}
+                          onChange={(e) => updateSettings({ tampilkanPapanPeringkat: e.target.checked })}
+                          className="w-4 h-4 text-amber-500 rounded cursor-pointer"
+                        />
+                      </label>
+
+                      <label className="flex items-center justify-between p-2.5 rounded-xl bg-white border border-slate-200 cursor-pointer">
+                        <div className="flex items-center gap-2">
+                          <RotateCcw className="w-4 h-4 text-blue-500" />
+                          <span className="font-semibold text-slate-800">Siswa Boleh Ulangi Kuis</span>
+                        </div>
+                        <input
+                          type="checkbox"
+                          checked={cur.izinkanUlangKuis}
+                          onChange={(e) => updateSettings({ izinkanUlangKuis: e.target.checked })}
+                          className="w-4 h-4 text-amber-500 rounded cursor-pointer"
+                        />
+                      </label>
+                    </div>
+
+                    {/* Grading Destination */}
+                    <div className="p-3 bg-white rounded-2xl border border-slate-200 text-xs">
+                      <label className="block font-bold text-slate-800 mb-1">
+                        Tujuan Penyimpanan Hasil Game Kuis:
+                      </label>
+                      <div className="flex flex-col sm:flex-row gap-2">
+                        <label className="flex-1 flex items-center gap-2 p-2 rounded-xl bg-slate-50 border border-slate-200 cursor-pointer">
+                          <input
+                            type="radio"
+                            name="simpanNilai"
+                            value="latihan_saja"
+                            checked={cur.simpanSebagaiNilai === 'latihan_saja'}
+                            onChange={() => updateSettings({ simpanSebagaiNilai: 'latihan_saja' })}
+                            className="text-amber-500"
+                          />
+                          <div>
+                            <span className="font-bold text-slate-800 block">Latihan Siswa Saja</span>
+                            <span className="text-[10px] text-slate-500">Skor murni untuk apresiasi game & tidak masuk raport</span>
+                          </div>
+                        </label>
+
+                        <label className="flex-1 flex items-center gap-2 p-2 rounded-xl bg-slate-50 border border-slate-200 cursor-pointer">
+                          <input
+                            type="radio"
+                            name="simpanNilai"
+                            value="nilai_harian"
+                            checked={cur.simpanSebagaiNilai === 'nilai_harian'}
+                            onChange={() => updateSettings({ simpanSebagaiNilai: 'nilai_harian' })}
+                            className="text-amber-500"
+                          />
+                          <div>
+                            <span className="font-bold text-slate-800 block">Tercatat ke Buku Nilai</span>
+                            <span className="text-[10px] text-slate-500">Otomatis masuk rekap nilai formatif harian guru</span>
+                          </div>
+                        </label>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
               {/* Card 1: Exam Identity */}
               <div className="bg-white p-6 rounded-2xl border border-slate-200 shadow-xs space-y-4">
                 <h3 className="font-bold text-slate-900 text-sm flex items-center gap-2">
@@ -2882,18 +3363,46 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
               )}
             </div>
 
-            {/* Explanation / Pembahasan */}
+            {/* Educational Hint (Petunjuk jika salah) */}
             <div>
-              <label className="block text-xs font-bold text-slate-700 mb-1">
-                Penjelasan / Pembahasan Soal (Opsional)
+              <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center gap-1.5">
+                <Lightbulb className="w-3.5 h-3.5 text-amber-500" />
+                <span>Petunjuk Belajar Jika Jawaban Siswa Salah (Hint Edukatif)</span>
               </label>
               <textarea
                 rows={2}
-                value={editingQuestion.pembahasan || ''}
-                onChange={(e) => setEditingQuestion({ ...editingQuestion, pembahasan: e.target.value })}
-                placeholder="Penjelasan kenapa opsi ini benar untuk umpan balik siswa..."
-                className="w-full bg-slate-50 border border-slate-200 text-slate-800 p-2.5 rounded-xl text-xs focus:ring-2 focus:ring-blue-500 focus:outline-hidden resize-none"
+                value={editingQuestion.petunjuk || ''}
+                onChange={(e) => setEditingQuestion({ ...editingQuestion, petunjuk: e.target.value })}
+                placeholder="Contoh: Ingat kembali bahwa fotosintesis membutuhkan sinar matahari dan zat hijau daun (klorofil)..."
+                className="w-full bg-slate-50 border border-slate-200 text-slate-800 p-2.5 rounded-xl text-xs focus:ring-2 focus:ring-amber-500 focus:outline-hidden resize-none"
               />
+              <p className="text-[10px] text-slate-400 mt-0.5">
+                Petunjuk ini membantu siswa memahami konsep materi tanpa langsung membocorkan jawaban saat mencoba ulang.
+              </p>
+            </div>
+
+            {/* Explanation / Pembahasan */}
+            <div>
+              <label className="block text-xs font-bold text-slate-700 mb-1 flex items-center gap-1.5">
+                <Sparkles className="w-3.5 h-3.5 text-emerald-500" />
+                <span>Penjelasan & Pembahasan Jawaban Benar</span>
+              </label>
+              <textarea
+                rows={2}
+                value={editingQuestion.penjelasanBenar || editingQuestion.pembahasan || ''}
+                onChange={(e) =>
+                  setEditingQuestion({
+                    ...editingQuestion,
+                    penjelasanBenar: e.target.value,
+                    pembahasan: e.target.value,
+                  })
+                }
+                placeholder="Penjelasan mendidik mengapa jawaban tersebut benar untuk memperkuat pemahaman siswa..."
+                className="w-full bg-slate-50 border border-slate-200 text-slate-800 p-2.5 rounded-xl text-xs focus:ring-2 focus:ring-emerald-500 focus:outline-hidden resize-none"
+              />
+              <p className="text-[10px] text-slate-400 mt-0.5">
+                Ditampilkan saat siswa berhasil menjawab benar, atau setelah batas percobaan menjawab habis.
+              </p>
             </div>
 
             <div className="pt-3 border-t border-slate-200 flex items-center justify-end gap-2">
@@ -3533,6 +4042,31 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
               </button>
             </div>
           </div>
+        </div>
+      )}
+
+      {/* 8. PREVIEW GAME QUIZ MODAL */}
+      {previewGameQuiz && (
+        <div className="fixed inset-0 z-50 bg-slate-950 flex flex-col">
+          <KuisGameInteraktifView
+            ujian={previewGameQuiz}
+            siswa={{
+              id: currentUser.id || 'guru-preview',
+              qrId: 'STU-PREVIEW',
+              nomorInduk: '000000',
+              nisn: '0000000000',
+              namaLengkap: `${currentUser.name} (Pratinjau Guru)`,
+              tempatLahir: 'Sekolah',
+              tanggalLahir: '2010-01-01',
+              jenisKelamin: 'L',
+              alamat: 'Ruang Guru',
+              kelas: previewGameQuiz.kelasTarget[0] || 'Semua Siswa',
+              namaOrangTua: 'Guru Pengampu',
+              createdAt: new Date().toISOString(),
+              schoolId: previewGameQuiz.schoolId || db.getActiveSchoolId(),
+            }}
+            onExit={() => setPreviewGameQuiz(null)}
+          />
         </div>
       )}
     </div>
