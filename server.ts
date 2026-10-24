@@ -155,7 +155,7 @@ async function startServer() {
     try {
       const clientIp = (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || req.ip;
       const result = await handleStartExamSession(req.body, clientIp);
-      if (result.locked) {
+      if ("locked" in result && result.locked) {
         return res.status(403).json(result);
       }
       res.json(result);
@@ -169,7 +169,7 @@ async function startServer() {
   app.post("/api/ujian/session/save-answer", async (req, res) => {
     try {
       const result = await handleSaveAnswerSession(req.body);
-      if (result.locked) {
+      if ("locked" in result && result.locked) {
         return res.status(403).json(result);
       }
       res.json(result);

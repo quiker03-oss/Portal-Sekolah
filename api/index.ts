@@ -131,7 +131,7 @@ export default async function handler(req: any, res: any) {
       if (req.method !== "POST") return res.status(405).json({ success: false, error: "Metode harus POST." });
       const clientIp = (req.headers && req.headers["x-forwarded-for"]) || req.socket?.remoteAddress;
       const result = await handleStartExamSession(body, clientIp);
-      if (result.locked) return res.status(403).json(result);
+      if ("locked" in result && result.locked) return res.status(403).json(result);
       return res.status(200).json(result);
     }
 
@@ -139,7 +139,7 @@ export default async function handler(req: any, res: any) {
     if (pathname === "/ujian/session/save-answer") {
       if (req.method !== "POST") return res.status(405).json({ success: false, error: "Metode harus POST." });
       const result = await handleSaveAnswerSession(body);
-      if (result.locked) return res.status(403).json(result);
+      if ("locked" in result && result.locked) return res.status(403).json(result);
       return res.status(200).json(result);
     }
 

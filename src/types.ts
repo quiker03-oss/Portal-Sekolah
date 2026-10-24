@@ -601,9 +601,12 @@ export interface DeviceSessionInfo {
   screenResolution: string;
   language?: string;
   browserSummary?: string;
+  browser?: string;
+  os?: string;
   ip?: string;
   loginAt: string;
   lastActiveAt?: string;
+  timestamp?: string;
 }
 
 export interface AuditLogUjian {
@@ -613,6 +616,7 @@ export interface AuditLogUjian {
   namaSiswa: string;
   kelas: string;
   waktu: string;
+  timestamp?: string;
   tipe:
     | 'login_awal'
     | 'pemulihan_sesi'
@@ -621,11 +625,16 @@ export interface AuditLogUjian {
     | 'buka_kunci_guru'
     | 'simpan_jawaban_ditolak'
     | 'selesai_ujian';
+  action?: string;
+  severity?: 'critical' | 'warning' | 'info';
   deskripsi: string;
+  details?: string;
   alasan?: string;
   deviceAwal?: Partial<DeviceSessionInfo>;
   deviceMencurigakan?: Partial<DeviceSessionInfo>;
+  deviceInfo?: Partial<DeviceSessionInfo>;
   aktor?: string; // 'Sistem Server (Otomatis)' or 'Guru Pengawas: ...'
+  actor?: string;
 }
 
 export interface JawabanSiswaUjian {
@@ -659,7 +668,9 @@ export interface JawabanSiswaUjian {
   logPelanggaran?: LogPelanggaranUjian[];
   terkunciOlehSistem?: boolean;
   alasanTerkunci?: string;
+  alasanKunci?: string;
   waktuTerkunci?: string;
+  waktuKunci?: string;
   dibukaOlehGuru?: boolean;
   terakhirAktif?: string;
   createdAt: string;

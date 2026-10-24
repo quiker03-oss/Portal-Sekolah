@@ -18,6 +18,7 @@ import {
   JenisSoal,
   StatusUjian,
   LogPelanggaranUjian,
+  AuditLogUjian,
 } from '../../types';
 import {
   FileText,
@@ -60,6 +61,9 @@ import {
   AlertTriangle,
   Radio,
   UserX,
+  Laptop,
+  Smartphone,
+  Shield,
 } from 'lucide-react';
 import { PrintRekapModal } from './PrintRekapModal';
 
@@ -131,6 +135,17 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
   } | null>(null);
   const [showViolationLogModal, setShowViolationLogModal] = useState<boolean>(false);
 
+  // Security & Multi-Device Audit Modal State
+  const [serverAuditLogs, setServerAuditLogs] = useState<AuditLogUjian[]>([]);
+  const [showAuditLogsModal, setShowAuditLogsModal] = useState<boolean>(false);
+  const [showUnlockModal, setShowUnlockModal] = useState<boolean>(false);
+  const [unlockStudentTarget, setUnlockStudentTarget] = useState<{
+    siswa: Siswa;
+    jawaban: JawabanSiswaUjian;
+  } | null>(null);
+  const [unlockReasonInput, setUnlockReasonInput] = useState<string>('');
+  const [isUnlocking, setIsUnlocking] = useState<boolean>(false);
+
   // Key correction audit modal
   const [showKeyCorrectionModal, setShowKeyCorrectionModal] = useState<boolean>(false);
   const [targetCorrectionSoal, setTargetCorrectionSoal] = useState<SoalUjian | null>(null);
@@ -156,12 +171,18 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
     window.addEventListener('jawaban_ujian_updated', handleDataUpdate);
     window.addEventListener('data_jawaban_ujian_changed', handleDataUpdate);
 
-    // Auto-polling for proctoring monitoring
-    const proctorInterval = setInterval(() => {
+    // Auto-polling for proctoring monitoring & server security logs
+    const proctorInterval = setInterval(async () => {
       if (view === 'pengawasan' && pengawasanUjianTarget) {
         setJawabanList(db.getJawabanUjianList(pengawasanUjianTarget.id));
+        try {
+          const res = await db.getProctoringAuditLogsAsync(pengawasanUjianTarget.id);
+          if (res.logs && res.logs.length > 0) {
+            setServerAuditLogs(res.logs);
+          }
+        } catch {}
       }
-    }, 4000);
+    }, 3500);
 
     return () => {
       window.removeEventListener('ujian_online_updated', handleDataUpdate);
@@ -394,11 +415,40 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
     setView('pengawasan');
   };
 
-  // Proctoring Action: Unlock student session
-  const handleUnlockSession = (ujianId: string, siswaId: string) => {
-    db.bukaKunciSesiSiswa(ujianId, siswaId);
-    setJawabanList(db.getJawabanUjianList(ujianId));
-    alert('Sesi ujian siswa berhasil dibuka kembali. Layar siswa akan langsung aktif otomatis.');
+  // Proctoring Action: Open Unlock modal with teacher inspection verification
+  const handleOpenUnlockModal = (siswa: Siswa, jawaban: JawabanSiswaUjian) => {
+    setUnlockStudentTarget({ siswa, jawaban });
+    setUnlockReasonInput('');
+    setShowUnlockModal(true);
+  };
+
+  const confirmUnlockSession = async () => {
+    if (!unlockStudentTarget || !pengawasanUjianTarget) return;
+    setIsUnlocking(true);
+    try {
+      const { siswa } = unlockStudentTarget;
+      const note = unlockReasonInput.trim() || 'Verifikasi fisik/perangkat telah dilakukan oleh pengawas.';
+      const teacherName = currentUser.name || 'Guru Pengawas';
+
+      db.bukaKunciSesiSiswa(pengawasanUjianTarget.id, siswa.id, teacherName, note);
+      setJawabanList(db.getJawabanUjianList(pengawasanUjianTarget.id));
+
+      const auditRes = await db.getProctoringAuditLogsAsync(pengawasanUjianTarget.id);
+      if (auditRes.logs) {
+        setServerAuditLogs(auditRes.logs);
+      }
+
+      setShowUnlockModal(false);
+      setUnlockStudentTarget(null);
+      setUnlockReasonInput('');
+      alert(
+        `Kunci ujian untuk siswa ${siswa.namaLengkap || (siswa as any).nama} berhasil dibuka. Layar siswa akan langsung aktif otomatis.`
+      );
+    } catch (e: any) {
+      alert('Gagal membuka kunci ujian: ' + (e?.message || 'Silakan coba lagi'));
+    } finally {
+      setIsUnlocking(false);
+    }
   };
 
   // Proctoring Action: Reset student session
@@ -882,6 +932,13 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
         if (proctoringFilterStatus === 'terkunci') {
           return item.jawaban?.status === 'terkunci';
         }
+        if (proctoringFilterStatus === 'mencurigakan') {
+          return (
+            item.jawaban?.status === 'mencurigakan' ||
+            Boolean(item.jawaban?.deviceMencurigakan) ||
+            Boolean(item.jawaban?.waktuAktivitasMencurigakan)
+          );
+        }
         if (proctoringFilterStatus === 'aktif') {
           return item.jawaban?.status === 'sedang_mengerjakan';
         }
@@ -904,9 +961,15 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
     const list = db.getJawabanUjianList(pengawasanUjianTarget?.id);
     const aktif = list.filter((j) => j.status === 'sedang_mengerjakan').length;
     const terkunci = list.filter((j) => j.status === 'terkunci').length;
+    const mencurigakan = list.filter(
+      (j) =>
+        j.status === 'mencurigakan' ||
+        Boolean(j.deviceMencurigakan) ||
+        Boolean(j.waktuAktivitasMencurigakan)
+    ).length;
     const melanggar = list.filter((j) => (j.jumlahPelanggaran || 0) > 0 && j.status !== 'terkunci').length;
     const selesai = list.filter((j) => j.status === 'selesai' || j.status === 'waktu_habis').length;
-    return { aktif, terkunci, melanggar, selesai, totalLogged: list.length };
+    return { aktif, terkunci, mencurigakan, melanggar, selesai, totalLogged: list.length };
   }, [pengawasanUjianTarget, jawabanList]);
 
   // Aggregate recent violation feed for ticker
@@ -936,14 +999,25 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
           durasi: log.durasiKeluarDetik,
         });
       });
+      if (j.deviceMencurigakan) {
+        events.push({
+          id: `suspicious-device-${j.id}`,
+          namaSiswa: j.namaSiswa,
+          kelas: j.kelas,
+          waktu: j.waktuAktivitasMencurigakan || j.updatedAt,
+          jenis: 'perangkat_ganda',
+          deskripsi: `Akses perangkat ke-2 (${j.deviceMencurigakan.browser || 'Browser'} / ${j.deviceMencurigakan.os || j.deviceMencurigakan.platform || 'Device'}) terdeteksi! Ujian dikunci otomatis.`,
+          isLockEvent: true,
+        });
+      }
       if (j.status === 'terkunci') {
         events.push({
           id: `lock-${j.id}`,
           namaSiswa: j.namaSiswa,
           kelas: j.kelas,
-          waktu: j.waktuTerkunci || j.updatedAt,
+          waktu: j.waktuKunci || j.waktuTerkunci || j.updatedAt,
           jenis: 'terkunci',
-          deskripsi: `Sesi ujian otomatis DIKUNCI oleh sistem karena batas pelanggaran tercapai!`,
+          deskripsi: j.alasanKunci || `Sesi ujian otomatis DIKUNCI oleh sistem karena batas pelanggaran tercapai!`,
           isLockEvent: true,
         });
       }
@@ -1755,33 +1829,44 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
               </p>
             </div>
 
-            <div className="flex items-center gap-3">
-              <label className="text-xs text-slate-500 font-semibold hidden sm:inline">Pilih Ujian:</label>
-              <select
-                value={pengawasanUjianTarget.id}
-                onChange={(e) => {
-                  const target = ujianList.find((u) => u.id === e.target.value);
-                  if (target) {
-                    setPengawasanUjianTarget(target);
-                    setJawabanList(db.getJawabanUjianList(target.id));
-                  }
-                }}
-                className="bg-slate-50 border border-slate-200 text-slate-800 text-xs sm:text-sm font-bold py-2.5 px-3.5 rounded-xl focus:ring-2 focus:ring-amber-500 focus:outline-hidden cursor-pointer"
+            <div className="flex flex-wrap items-center gap-2.5">
+              <button
+                onClick={() => setShowAuditLogsModal(true)}
+                className="bg-indigo-50 border border-indigo-200 text-indigo-700 hover:bg-indigo-100 text-xs font-bold py-2.5 px-3.5 rounded-xl transition flex items-center gap-1.5 shadow-xs cursor-pointer"
+                title="Lihat riwayat autentikasi sesi, deteksi multi-perangkat, dan aksi pengawas"
               >
-                {ujianList.map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {u.judul} ({u.status})
-                  </option>
-                ))}
-              </select>
+                <Shield className="w-4 h-4 text-indigo-600" />
+                <span>Audit Log Sesi & Perangkat ({serverAuditLogs.length})</span>
+              </button>
+
+              <div className="flex items-center gap-2">
+                <label className="text-xs text-slate-500 font-semibold hidden sm:inline">Pilih Ujian:</label>
+                <select
+                  value={pengawasanUjianTarget.id}
+                  onChange={(e) => {
+                    const target = ujianList.find((u) => u.id === e.target.value);
+                    if (target) {
+                      setPengawasanUjianTarget(target);
+                      setJawabanList(db.getJawabanUjianList(target.id));
+                    }
+                  }}
+                  className="bg-slate-50 border border-slate-200 text-slate-800 text-xs sm:text-sm font-bold py-2.5 px-3.5 rounded-xl focus:ring-2 focus:ring-amber-500 focus:outline-hidden cursor-pointer"
+                >
+                  {ujianList.map((u) => (
+                    <option key={u.id} value={u.id}>
+                      {u.judul} ({u.status})
+                    </option>
+                  ))}
+                </select>
+              </div>
             </div>
           </div>
 
-          {/* Real-time Status Metric Cards */}
-          <div className="grid grid-cols-2 sm:grid-cols-4 gap-3.5">
-            <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs flex items-center gap-3">
-              <div className="w-12 h-12 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center font-bold shrink-0">
-                <Clock className="w-6 h-6 animate-pulse" />
+          {/* Real-time Status Metric Cards (5 Cards) */}
+          <div className="grid grid-cols-2 sm:grid-cols-5 gap-3">
+            <div className="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-xs flex items-center gap-3">
+              <div className="w-11 h-11 rounded-xl bg-emerald-50 text-emerald-600 flex items-center justify-center font-bold shrink-0">
+                <Clock className="w-5 h-5 animate-pulse" />
               </div>
               <div>
                 <span className="text-[11px] text-slate-400 font-medium block">Aktif Mengerjakan</span>
@@ -1789,32 +1874,42 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
               </div>
             </div>
 
-            <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs flex items-center gap-3">
-              <div className="w-12 h-12 rounded-xl bg-amber-50 text-amber-600 flex items-center justify-center font-bold shrink-0">
-                <AlertTriangle className="w-6 h-6" />
+            <div className="bg-white p-3.5 rounded-2xl border border-amber-200 bg-amber-50/40 shadow-xs flex items-center gap-3">
+              <div className="w-11 h-11 rounded-xl bg-amber-100 text-amber-700 flex items-center justify-center font-bold shrink-0">
+                <AlertTriangle className="w-5 h-5" />
               </div>
               <div>
-                <span className="text-[11px] text-slate-400 font-medium block">Pernah Pindah Tab</span>
-                <span className="text-2xl font-black text-amber-600">{proctoringStats.melanggar}</span>
+                <span className="text-[11px] text-amber-700 font-semibold block">Mencurigakan</span>
+                <span className="text-2xl font-black text-amber-700">{proctoringStats.mencurigakan || 0}</span>
               </div>
             </div>
 
-            <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs flex items-center gap-3">
-              <div className="w-12 h-12 rounded-xl bg-red-50 text-red-600 flex items-center justify-center font-bold shrink-0">
-                <Lock className="w-6 h-6" />
+            <div className="bg-white p-3.5 rounded-2xl border border-red-200 bg-red-50/30 shadow-xs flex items-center gap-3">
+              <div className="w-11 h-11 rounded-xl bg-red-100 text-red-600 flex items-center justify-center font-bold shrink-0">
+                <Lock className="w-5 h-5" />
               </div>
               <div>
-                <span className="text-[11px] text-slate-400 font-medium block">Sesi Terkunci</span>
+                <span className="text-[11px] text-red-600 font-semibold block">Sesi Terkunci</span>
                 <span className="text-2xl font-black text-red-600">{proctoringStats.terkunci}</span>
               </div>
             </div>
 
-            <div className="bg-white p-4 rounded-2xl border border-slate-200 shadow-xs flex items-center gap-3">
-              <div className="w-12 h-12 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center font-bold shrink-0">
-                <CheckCircle2 className="w-6 h-6" />
+            <div className="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-xs flex items-center gap-3">
+              <div className="w-11 h-11 rounded-xl bg-orange-50 text-orange-600 flex items-center justify-center font-bold shrink-0">
+                <ShieldAlert className="w-5 h-5" />
               </div>
               <div>
-                <span className="text-[11px] text-slate-400 font-medium block">Selesai Mengerjakan</span>
+                <span className="text-[11px] text-slate-400 font-medium block">Pindah Tab</span>
+                <span className="text-2xl font-black text-orange-600">{proctoringStats.melanggar}</span>
+              </div>
+            </div>
+
+            <div className="bg-white p-3.5 rounded-2xl border border-slate-200 shadow-xs flex items-center gap-3 col-span-2 sm:col-span-1">
+              <div className="w-11 h-11 rounded-xl bg-blue-50 text-blue-600 flex items-center justify-center font-bold shrink-0">
+                <CheckCircle2 className="w-5 h-5" />
+              </div>
+              <div>
+                <span className="text-[11px] text-slate-400 font-medium block">Selesai Ujian</span>
                 <span className="text-2xl font-black text-blue-600">{proctoringStats.selesai}</span>
               </div>
             </div>
@@ -1826,7 +1921,7 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
               <div className="flex items-center justify-between mb-2">
                 <div className="font-bold text-amber-800 text-xs flex items-center gap-1.5">
                   <ShieldAlert className="w-4 h-4 text-amber-600" />
-                  <span>Aktivitas Pelanggaran Terbaru (Live Feed):</span>
+                  <span>Aktivitas Pelanggaran & Keamanan Terbaru (Live Feed):</span>
                 </div>
                 <span className="text-[10px] text-amber-600 font-medium">Sinkronisasi otomatis</span>
               </div>
@@ -1861,8 +1956,9 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
                 {[
                   { id: 'semua', label: 'Semua Peserta' },
                   { id: 'terkunci', label: 'Terkunci 🔴' },
+                  { id: 'mencurigakan', label: 'Mencurigakan 🟡' },
                   { id: 'aktif', label: 'Aktif 🟢' },
-                  { id: 'melanggar', label: 'Melanggar 🟡' },
+                  { id: 'melanggar', label: 'Pindah Tab 🟠' },
                   { id: 'selesai', label: 'Selesai 🔵' },
                   { id: 'belum', label: 'Belum Masuk' },
                 ].map((tab) => (
@@ -1896,14 +1992,14 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
               <table className="w-full text-left border-collapse text-xs">
                 <thead>
                   <tr className="bg-slate-50 border-b border-slate-200 text-slate-600 font-bold">
-                    <th className="py-3 px-4 w-12 text-center">No</th>
-                    <th className="py-3 px-4">Nama Peserta Didik</th>
-                    <th className="py-3 px-4">NIS / NISN</th>
-                    <th className="py-3 px-4">Kelas</th>
-                    <th className="py-3 px-4 text-center">Status Sesi</th>
-                    <th className="py-3 px-4 text-center">Jumlah Pelanggaran</th>
-                    <th className="py-3 px-4">Terakhir Aktif</th>
-                    <th className="py-3 px-4 text-center">Tindakan Pengawas</th>
+                    <th className="py-3 px-3 w-10 text-center">No</th>
+                    <th className="py-3 px-3">Nama & Identitas Siswa</th>
+                    <th className="py-3 px-3 text-center">Status Sesi</th>
+                    <th className="py-3 px-3">Perangkat Terdaftar</th>
+                    <th className="py-3 px-3">Aktivitas & Alasan Kunci</th>
+                    <th className="py-3 px-3 text-center">Pindah Tab</th>
+                    <th className="py-3 px-3">Terakhir Aktif</th>
+                    <th className="py-3 px-3 text-center">Tindakan Pengawas</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
@@ -1917,26 +2013,45 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
                     proctoringStudents.map((item, idx) => {
                       const ans = item.jawaban;
                       const isLocked = ans?.status === 'terkunci';
+                      const isSuspicious =
+                        ans?.status === 'mencurigakan' ||
+                        Boolean(ans?.deviceMencurigakan) ||
+                        Boolean(ans?.waktuAktivitasMencurigakan);
                       const isActive = ans?.status === 'sedang_mengerjakan';
                       const isFinished = ans?.status === 'selesai' || ans?.status === 'waktu_habis';
                       const violationCount = ans?.jumlahPelanggaran || 0;
+                      const hasDualDevice = Boolean(ans?.deviceMencurigakan);
 
                       return (
                         <tr
                           key={item.siswa.id}
-                          className={`hover:bg-slate-50 transition ${isLocked ? 'bg-red-50/40' : ''}`}
+                          className={`hover:bg-slate-50 transition ${
+                            isLocked
+                              ? 'bg-red-50/50'
+                              : isSuspicious
+                              ? 'bg-amber-50/40'
+                              : ''
+                          }`}
                         >
-                          <td className="py-3 px-4 text-center font-semibold text-slate-500">{idx + 1}</td>
-                          <td className="py-3 px-4 font-bold text-slate-900">
-                            {item.siswa.namaLengkap || (item.siswa as any).nama}
+                          <td className="py-3 px-3 text-center font-semibold text-slate-500">{idx + 1}</td>
+                          <td className="py-3 px-3">
+                            <div className="font-bold text-slate-900">
+                              {item.siswa.namaLengkap || (item.siswa as any).nama}
+                            </div>
+                            <div className="text-[11px] text-slate-500">
+                              NISN: {item.siswa.nisn || item.siswa.nomorInduk || '-'} &bull; Kelas: {item.siswa.kelas}
+                            </div>
                           </td>
-                          <td className="py-3 px-4 text-slate-600">{item.siswa.nisn || item.siswa.nomorInduk || '-'}</td>
-                          <td className="py-3 px-4 text-slate-600">{item.siswa.kelas}</td>
-                          <td className="py-3 px-4 text-center">
+                          <td className="py-3 px-3 text-center">
                             {isLocked ? (
                               <span className="px-2.5 py-1 rounded-full text-[11px] font-black bg-red-600 text-white shadow-xs inline-flex items-center gap-1 animate-pulse">
                                 <Lock className="w-3 h-3" />
                                 <span>TERKUNCI</span>
+                              </span>
+                            ) : isSuspicious ? (
+                              <span className="px-2.5 py-1 rounded-full text-[11px] font-bold bg-amber-100 text-amber-900 border border-amber-300 inline-flex items-center gap-1">
+                                <AlertTriangle className="w-3 h-3 text-amber-600" />
+                                <span>MENCURIGAKAN</span>
                               </span>
                             ) : isActive ? (
                               <span className="px-2.5 py-1 rounded-full text-[11px] font-bold bg-emerald-100 text-emerald-800 inline-flex items-center gap-1">
@@ -1945,7 +2060,7 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
                               </span>
                             ) : isFinished ? (
                               <span className="px-2.5 py-1 rounded-full text-[11px] font-bold bg-blue-100 text-blue-800">
-                                Selesai (Nilai {ans.nilaiAkhir ?? 0})
+                                Selesai (Nilai {ans?.nilaiAkhir ?? 0})
                               </span>
                             ) : (
                               <span className="px-2.5 py-0.5 rounded-full text-[10px] bg-slate-100 text-slate-500">
@@ -1953,10 +2068,59 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
                               </span>
                             )}
                           </td>
-                          <td className="py-3 px-4 text-center">
+                          <td className="py-3 px-3">
+                            {ans?.deviceInfo ? (
+                              <div className="space-y-0.5">
+                                <div className="font-semibold text-slate-800 flex items-center gap-1">
+                                  {ans.deviceInfo.platform?.toLowerCase().includes('win') ||
+                                  ans.deviceInfo.platform?.toLowerCase().includes('mac') ||
+                                  ans.deviceInfo.platform?.toLowerCase().includes('linux') ? (
+                                    <Laptop className="w-3.5 h-3.5 text-slate-600" />
+                                  ) : (
+                                    <Smartphone className="w-3.5 h-3.5 text-slate-600" />
+                                  )}
+                                  <span>{ans.deviceInfo.browser || 'Browser'} on {ans.deviceInfo.os || ans.deviceInfo.platform || 'Device'}</span>
+                                </div>
+                                <div className="text-[10px] text-slate-400">
+                                  {ans.deviceInfo.screenResolution && `${ans.deviceInfo.screenResolution} • `}
+                                  IP: {ans.deviceInfo.ip || 'Lokal'}
+                                </div>
+                              </div>
+                            ) : (
+                              <span className="text-slate-400">-</span>
+                            )}
+                          </td>
+                          <td className="py-3 px-3 max-w-xs">
+                            {hasDualDevice && ans?.deviceMencurigakan ? (
+                              <div className="p-2 rounded-lg bg-red-100/70 border border-red-300 text-red-900 space-y-1">
+                                <div className="font-bold flex items-center gap-1 text-[11px]">
+                                  <AlertTriangle className="w-3.5 h-3.5 text-red-600 shrink-0" />
+                                  <span>Terdeteksi Perangkat ke-2</span>
+                                </div>
+                                <div className="text-[10px] text-red-800 font-mono">
+                                  {ans.deviceMencurigakan.browser} ({ans.deviceMencurigakan.os || ans.deviceMencurigakan.platform}) • IP: {ans.deviceMencurigakan.ip || 'Lokal'}
+                                </div>
+                                <div className="text-[10px] text-red-700">
+                                  {ans.waktuAktivitasMencurigakan
+                                    ? new Date(ans.waktuAktivitasMencurigakan).toLocaleTimeString('id-ID')
+                                    : '-'} &bull; {ans.alasanKunci || 'Percobaan login ganda dari sesi lain'}
+                                </div>
+                              </div>
+                            ) : isLocked ? (
+                              <div className="text-red-700 font-semibold text-[11px]">
+                                <div>{ans?.alasanKunci || 'Batas toleransi pelanggaran tercapai'}</div>
+                                <div className="text-[10px] text-slate-400 font-normal">
+                                  Waktu kunci: {ans?.waktuKunci || ans?.waktuTerkunci ? new Date(ans.waktuKunci || ans.waktuTerkunci!).toLocaleTimeString('id-ID') : '-'}
+                                </div>
+                              </div>
+                            ) : (
+                              <span className="text-slate-400 text-[11px]">Normal / Aman</span>
+                            )}
+                          </td>
+                          <td className="py-3 px-3 text-center">
                             {violationCount > 0 ? (
                               <span
-                                className={`px-2.5 py-0.5 rounded-full text-xs font-bold ${
+                                className={`px-2 py-0.5 rounded-full text-xs font-bold ${
                                   violationCount >= (pengawasanUjianTarget.maksimalPelanggaran || 3)
                                     ? 'bg-red-100 text-red-800'
                                     : 'bg-amber-100 text-amber-800'
@@ -1968,15 +2132,16 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
                               <span className="text-slate-400">0</span>
                             )}
                           </td>
-                          <td className="py-3 px-4 text-slate-500 text-[11px]">
+                          <td className="py-3 px-3 text-slate-500 text-[11px]">
                             {ans?.terakhirAktif ? new Date(ans.terakhirAktif).toLocaleTimeString('id-ID') : '-'}
                           </td>
-                          <td className="py-3 px-4 text-center">
-                            <div className="flex items-center justify-center gap-1.5">
+                          <td className="py-3 px-3 text-center">
+                            <div className="flex items-center justify-center gap-1.5 flex-wrap">
                               {isLocked && (
                                 <button
-                                  onClick={() => handleUnlockSession(pengawasanUjianTarget.id, item.siswa.id)}
+                                  onClick={() => handleOpenUnlockModal(item.siswa, ans!)}
                                   className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-2.5 py-1 rounded-lg text-xs transition flex items-center gap-1 shadow-xs cursor-pointer"
+                                  title="Verifikasi fisik dan buka kunci ujian siswa"
                                 >
                                   <Unlock className="w-3.5 h-3.5" />
                                   <span>Buka Kunci</span>
@@ -1990,9 +2155,10 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
                                     setShowViolationLogModal(true);
                                   }}
                                   className="bg-amber-50 text-amber-800 hover:bg-amber-100 font-semibold px-2 py-1 rounded-lg text-xs transition flex items-center gap-1 cursor-pointer border border-amber-200"
+                                  title="Lihat riwayat keluar tab / layar blur"
                                 >
                                   <ShieldAlert className="w-3.5 h-3.5 text-amber-600" />
-                                  <span>Log ({violationCount})</span>
+                                  <span>Tab ({violationCount})</span>
                                 </button>
                               )}
 
@@ -2823,9 +2989,9 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
               {selectedViolationStudent.jawaban.status === 'terkunci' ? (
                 <button
                   onClick={() => {
-                    handleUnlockSession(
-                      selectedViolationStudent.jawaban.ujianId,
-                      selectedViolationStudent.siswa.id
+                    handleOpenUnlockModal(
+                      selectedViolationStudent.siswa,
+                      selectedViolationStudent.jawaban
                     );
                     setShowViolationLogModal(false);
                   }}
@@ -3057,6 +3223,317 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
           signName2={rekapUjianTarget.guruNama || currentUser.name || 'Guru Mata Pelajaran'}
           footerNote={`* Rekapitulasi nilai ini sah dan dihasilkan secara otomatis melalui Sistem CBT Ujian Online ${db.getSekolah().nama} pada tanggal ${new Intl.DateTimeFormat('id-ID', { dateStyle: 'full' }).format(new Date())}.`}
         />
+      )}
+
+      {/* ======================================================== */}
+      {/* 5. MODAL: VERIFIKASI PENGAWAS & BUKA KUNCI UJIAN */}
+      {/* ======================================================== */}
+      {showUnlockModal && unlockStudentTarget && pengawasanUjianTarget && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-lg w-full p-6 shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95 duration-150">
+            <div className="flex items-start justify-between gap-4 border-b border-slate-100 pb-4 mb-4">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-center justify-center text-amber-600 shrink-0">
+                  <ShieldCheck className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-black text-slate-900 tracking-tight">
+                    Verifikasi Pengawas: Buka Kunci Ujian
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Otorisasi pembukaan kembali sesi ujian peserta didik
+                  </p>
+                </div>
+              </div>
+              <button
+                onClick={() => setShowUnlockModal(false)}
+                className="p-1.5 rounded-xl hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-4 text-xs">
+              {/* Student Identity Box */}
+              <div className="bg-slate-50 p-3.5 rounded-2xl border border-slate-200">
+                <div className="font-bold text-slate-900 text-sm">
+                  {unlockStudentTarget.siswa.namaLengkap || (unlockStudentTarget.siswa as any).nama}
+                </div>
+                <div className="text-slate-600 mt-0.5">
+                  NISN/NIS: {unlockStudentTarget.siswa.nisn || unlockStudentTarget.siswa.nomorInduk || '-'} &bull; Kelas: {unlockStudentTarget.siswa.kelas}
+                </div>
+                <div className="text-slate-500 mt-0.5">
+                  Ujian: <strong className="text-slate-800">{pengawasanUjianTarget.judul}</strong>
+                </div>
+              </div>
+
+              {/* Lockdown Reason & Detection Box */}
+              <div className="bg-red-50/70 border border-red-200 rounded-2xl p-3.5 text-red-900 space-y-2">
+                <div className="font-bold flex items-center gap-1.5 text-red-800">
+                  <AlertTriangle className="w-4 h-4 text-red-600 shrink-0" />
+                  <span>Alasan Penguncian Sesi:</span>
+                </div>
+                <div className="text-xs leading-relaxed bg-white/70 p-2.5 rounded-xl border border-red-100 font-medium">
+                  {unlockStudentTarget.jawaban.alasanKunci ||
+                    'Terdeteksi akses sesi ujian aktif dari perangkat atau browser lain.'}
+                </div>
+                {unlockStudentTarget.jawaban.waktuKunci && (
+                  <div className="text-[11px] text-red-700">
+                    Waktu Penguncian: {new Date(unlockStudentTarget.jawaban.waktuKunci).toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit', second: '2-digit' })} WIB
+                  </div>
+                )}
+              </div>
+
+              {/* Devices comparison if 2nd device detected */}
+              {unlockStudentTarget.jawaban.deviceMencurigakan && (
+                <div className="grid grid-cols-2 gap-2 text-[11px]">
+                  <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200">
+                    <div className="font-bold text-slate-700 mb-1 flex items-center gap-1">
+                      <Laptop className="w-3.5 h-3.5" />
+                      <span>Perangkat Pertama (Sah)</span>
+                    </div>
+                    <div className="text-slate-600 truncate">
+                      {unlockStudentTarget.jawaban.deviceInfo?.browser || 'Browser'}
+                    </div>
+                    <div className="text-[10px] text-slate-400 truncate">
+                      {unlockStudentTarget.jawaban.deviceInfo?.platform || 'OS'} &bull; IP: {unlockStudentTarget.jawaban.deviceInfo?.ip || 'Lokal'}
+                    </div>
+                  </div>
+
+                  <div className="p-2.5 rounded-xl bg-red-100/60 border border-red-300">
+                    <div className="font-bold text-red-800 mb-1 flex items-center gap-1">
+                      <Smartphone className="w-3.5 h-3.5 text-red-600" />
+                      <span>Perangkat ke-2 (Ditolak)</span>
+                    </div>
+                    <div className="text-red-900 truncate">
+                      {unlockStudentTarget.jawaban.deviceMencurigakan.browser || 'Browser'}
+                    </div>
+                    <div className="text-[10px] text-red-700 truncate">
+                      {unlockStudentTarget.jawaban.deviceMencurigakan.os || unlockStudentTarget.jawaban.deviceMencurigakan.platform || 'OS'} &bull; IP: {unlockStudentTarget.jawaban.deviceMencurigakan.ip || 'Lokal'}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* Safety Guarantee */}
+              <div className="bg-emerald-50 border border-emerald-200 rounded-2xl p-3 text-emerald-800 flex items-start gap-2">
+                <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0 mt-0.5" />
+                <div className="text-[11px] leading-relaxed">
+                  <strong>Integritas Data Terjamin:</strong> Seluruh jawaban yang telah dipilih siswa sebelum penguncian tetap tersimpan aman di server. Tidak ada nilai atau jawaban yang terhapus.
+                </div>
+              </div>
+
+              {/* Teacher Inspection Note Input */}
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">
+                  Catatan Verifikasi Guru Pengawas (Wajib dicatat dalam Audit Log):
+                </label>
+                <textarea
+                  value={unlockReasonInput}
+                  onChange={(e) => setUnlockReasonInput(e.target.value)}
+                  placeholder="Contoh: Siswa diperiksa langsung oleh pengawas di ruang ujian dan terkonfirmasi menggunakan 1 gawai yang sah."
+                  rows={2}
+                  className="w-full bg-slate-50 border border-slate-200 rounded-xl p-2.5 text-xs text-slate-800 focus:ring-2 focus:ring-amber-500 focus:outline-hidden resize-none"
+                />
+              </div>
+            </div>
+
+            <div className="pt-4 mt-4 border-t border-slate-100 flex items-center justify-end gap-2.5">
+              <button
+                type="button"
+                onClick={() => setShowUnlockModal(false)}
+                disabled={isUnlocking}
+                className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 transition cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={confirmUnlockSession}
+                disabled={isUnlocking}
+                className="px-4 py-2 rounded-xl text-xs font-bold bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm transition flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+              >
+                {isUnlocking ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Membuka Kunci...</span>
+                  </>
+                ) : (
+                  <>
+                    <Unlock className="w-3.5 h-3.5" />
+                    <span>Konfirmasi & Buka Kunci Ujian</span>
+                  </>
+                )}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ======================================================== */}
+      {/* 6. MODAL: AUDIT LOG KEAMANAN & PENGAWASAN SESI CBT */}
+      {/* ======================================================== */}
+      {showAuditLogsModal && pengawasanUjianTarget && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="bg-white rounded-3xl max-w-4xl w-full p-6 shadow-2xl border border-slate-200 animate-in fade-in zoom-in-95 duration-150 flex flex-col max-h-[90vh]">
+            <div className="flex items-start justify-between gap-4 border-b border-slate-100 pb-4 mb-4 shrink-0">
+              <div className="flex items-center gap-3">
+                <div className="w-12 h-12 rounded-2xl bg-indigo-50 border border-indigo-200 flex items-center justify-center text-indigo-700 shrink-0">
+                  <Shield className="w-6 h-6" />
+                </div>
+                <div>
+                  <h3 className="text-lg font-black text-slate-900 tracking-tight">
+                    Audit Log Keamanan & Pengawasan Sesi CBT
+                  </h3>
+                  <p className="text-xs text-slate-500">
+                    Catatan rekaman otomatis server untuk deteksi multi-perangkat, validasi sesi, dan riwayat buka kunci pengawas
+                  </p>
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={async () => {
+                    const res = await db.getProctoringAuditLogsAsync(pengawasanUjianTarget.id);
+                    if (res.logs) setServerAuditLogs(res.logs);
+                  }}
+                  className="p-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-600 transition cursor-pointer"
+                  title="Segarkan Log"
+                >
+                  <RefreshCw className="w-4 h-4" />
+                </button>
+                <button
+                  onClick={() => setShowAuditLogsModal(false)}
+                  className="p-1.5 rounded-xl hover:bg-slate-100 text-slate-400 hover:text-slate-600 transition cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
+              </div>
+            </div>
+
+            {/* Audit Log Overview Summary */}
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-4 shrink-0 text-xs">
+              <div className="bg-slate-50 p-3 rounded-2xl border border-slate-200">
+                <span className="text-[11px] text-slate-500 block">Total Log Tercatat</span>
+                <span className="text-xl font-black text-slate-900">{serverAuditLogs.length}</span>
+              </div>
+              <div className="bg-red-50/60 p-3 rounded-2xl border border-red-200">
+                <span className="text-[11px] text-red-600 font-semibold block">Kunci Perangkat Ganda</span>
+                <span className="text-xl font-black text-red-600">
+                  {serverAuditLogs.filter((l) => l.action === 'DUAL_DEVICE_ATTEMPT_LOCKED').length}
+                </span>
+              </div>
+              <div className="bg-emerald-50/60 p-3 rounded-2xl border border-emerald-200">
+                <span className="text-[11px] text-emerald-700 font-semibold block">Buka Kunci Pengawas</span>
+                <span className="text-xl font-black text-emerald-600">
+                  {serverAuditLogs.filter((l) => l.action === 'UNLOCKED_BY_TEACHER').length}
+                </span>
+              </div>
+              <div className="bg-blue-50/60 p-3 rounded-2xl border border-blue-200">
+                <span className="text-[11px] text-blue-700 font-semibold block">Sesi Autentikasi Sah</span>
+                <span className="text-xl font-black text-blue-600">
+                  {serverAuditLogs.filter((l) => l.action === 'SESSION_STARTED' || l.action === 'SESSION_RECOVERED').length}
+                </span>
+              </div>
+            </div>
+
+            {/* Logs Table */}
+            <div className="flex-1 overflow-y-auto border border-slate-200 rounded-2xl">
+              <table className="w-full text-left border-collapse text-xs">
+                <thead className="sticky top-0 bg-slate-50 border-b border-slate-200 text-slate-600 font-bold z-10">
+                  <tr>
+                    <th className="py-2.5 px-3 w-28">Waktu</th>
+                    <th className="py-2.5 px-3 w-40">Peserta Didik</th>
+                    <th className="py-2.5 px-3 text-center w-28">Tingkat</th>
+                    <th className="py-2.5 px-3">Tindakan / Kejadian</th>
+                    <th className="py-2.5 px-3">Detail & Informasi Perangkat</th>
+                    <th className="py-2.5 px-3 w-32">Aktor</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {serverAuditLogs.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="py-8 text-center text-slate-400">
+                        Belum ada aktivitas audit log keamanan sesi untuk ujian ini.
+                      </td>
+                    </tr>
+                  ) : (
+                    serverAuditLogs.map((log) => {
+                      const isCritical = log.severity === 'critical';
+                      const isWarning = log.severity === 'warning';
+
+                      return (
+                        <tr
+                          key={log.id}
+                          className={`hover:bg-slate-50 transition ${
+                            isCritical ? 'bg-red-50/30' : isWarning ? 'bg-amber-50/30' : ''
+                          }`}
+                        >
+                          <td className="py-2.5 px-3 font-mono text-[11px] text-slate-500 whitespace-nowrap">
+                            {new Date(log.timestamp).toLocaleTimeString('id-ID', {
+                              hour: '2-digit',
+                              minute: '2-digit',
+                              second: '2-digit',
+                            })}
+                          </td>
+                          <td className="py-2.5 px-3 font-semibold text-slate-900">
+                            {log.namaSiswa || log.siswaId}
+                          </td>
+                          <td className="py-2.5 px-3 text-center">
+                            <span
+                              className={`px-2 py-0.5 rounded-full text-[10px] font-bold ${
+                                isCritical
+                                  ? 'bg-red-600 text-white'
+                                  : isWarning
+                                  ? 'bg-amber-100 text-amber-800'
+                                  : 'bg-blue-100 text-blue-800'
+                              }`}
+                            >
+                              {log.severity.toUpperCase()}
+                            </span>
+                          </td>
+                          <td className="py-2.5 px-3">
+                            <div className="font-bold text-slate-800">
+                              {log.action === 'DUAL_DEVICE_ATTEMPT_LOCKED' && '⚠️ Akses Perangkat Ganda (Terkunci)'}
+                              {log.action === 'UNLOCKED_BY_TEACHER' && '🔓 Buka Kunci oleh Pengawas'}
+                              {log.action === 'SESSION_STARTED' && '🟢 Mulai Sesi Ujian'}
+                              {log.action === 'SESSION_RECOVERED' && '🔄 Pemulihan Sesi Sah'}
+                              {log.action === 'SESSION_RESET_BY_TEACHER' && '🔄 Reset Sesi Ujian'}
+                              {log.action === 'SUSPICIOUS_ACTIVITY' && '🟡 Aktivitas Mencurigakan'}
+                              {log.action === 'EXAM_SUBMITTED' && '✅ Ujian Selesai Dikirim'}
+                              {log.action === 'ANSWER_SYNC_REJECTED' && '⛔ Perubahan Jawaban Ditolak'}
+                            </div>
+                            <div className="text-[11px] text-slate-500 mt-0.5">{log.details}</div>
+                          </td>
+                          <td className="py-2.5 px-3 text-[11px]">
+                            {log.deviceInfo ? (
+                              <div className="text-slate-600 font-mono text-[10px]">
+                                {log.deviceInfo.browser} ({log.deviceInfo.os || log.deviceInfo.platform}) • IP: {log.deviceInfo.ip || 'Lokal'}
+                              </div>
+                            ) : (
+                              <span className="text-slate-400">-</span>
+                            )}
+                          </td>
+                          <td className="py-2.5 px-3 text-[11px] font-semibold text-slate-700 whitespace-nowrap">
+                            {log.actor || 'Sistem Server'}
+                          </td>
+                        </tr>
+                      );
+                    })
+                  )}
+                </tbody>
+              </table>
+            </div>
+
+            <div className="pt-3 mt-3 border-t border-slate-100 flex justify-end shrink-0">
+              <button
+                onClick={() => setShowAuditLogsModal(false)}
+                className="bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs py-2 px-5 rounded-xl transition cursor-pointer"
+              >
+                Tutup Audit Log
+              </button>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );
