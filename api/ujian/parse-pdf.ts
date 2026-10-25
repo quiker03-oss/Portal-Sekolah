@@ -1,6 +1,7 @@
 import { handleParsePdf } from "../_lib/geminiBackend";
 
 export const config = {
+  maxDuration: 60,
   api: {
     bodyParser: {
       sizeLimit: "25mb",
@@ -49,9 +50,10 @@ export default async function handler(req: any, res: any) {
   } catch (err: any) {
     console.error("[Vercel API /api/ujian/parse-pdf Error]:", err);
     const msg = err?.message || String(err) || "Gagal memproses dokumen PDF.";
-    return res.status(500).json({
+    return res.status(200).json({
       success: false,
       error: msg,
+      soalList: [],
     });
   }
 }

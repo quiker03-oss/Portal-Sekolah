@@ -491,9 +491,15 @@ export type JenisSoal =
 export type StatusUjian = 'draf' | 'terjadwal' | 'aktif' | 'selesai' | 'diarsipkan';
 
 export type GameModeType =
-  | 'petualangan' // Mode A: Petualangan Belajar
+  | 'petualangan' // Mode A / Adventure Quiz: Jelajah level & peta cerita
+  | 'battle' // Battle Quiz: Aksi serangan karakter vs Monster/Boss
+  | 'detektif' // Detective Quiz: Pecahkan misteri lewat bukti & petunjuk
+  | 'puzzle' // Puzzle Quiz: Logika, susun urutan & pasangkan jawaban
+  | 'tantangan_waktu' // Mode C / Time Challenge: Bonus kecepatan adil
+  | 'boss_challenge' // Boss Challenge: Tantangan bos akhir berfase
+  | 'latihan_mandiri' // Practice Mode: Latihan santai tanpa batas waktu + pembahasan
+  | 'kompetisi' // Competition Mode: Papan peringkat kelas live
   | 'kumpulkan_bintang' // Mode B: Kumpulkan Bintang
-  | 'tantangan_waktu' // Mode C: Tantangan Waktu
   | 'misi_pengetahuan' // Mode D: Misi Pengetahuan
   | 'tebak_gambar' // Mode E: Tebak Gambar
   | 'pasangkan_jawaban' // Mode F: Pasangkan Jawaban
@@ -711,6 +717,9 @@ export interface JawabanSiswaUjian {
   lencanaDiperoleh?: string[]; // e.g. ['bintang_pemula', 'penjelajah_ilmu', 'ahli_matematika', 'jago_ipa', 'juara_ketekunan', 'master_kuis']
   levelSiswa?: number;
   xpGame?: number;
+  koinTotal?: number;
+  materiDikuasai?: string[];
+  materiPerluPeningkatan?: string[];
   percobaanPerSoal?: { [soalId: string]: number };
   statusPerSoal?: { [soalId: string]: 'benar' | 'salah' | 'belum' };
   urutanPilihanSiswa?: { [soalId: string]: string[] };

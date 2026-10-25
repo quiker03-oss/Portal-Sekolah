@@ -353,6 +353,104 @@ class SoundService {
       osc.stop(now + 0.03);
     } catch {}
   }
+
+  /**
+   * Sound 7: Battle Quiz Hero Attack Swoosh / Impact
+   */
+  playGameAttack() {
+    if (this.getMuted()) return;
+    try {
+      this.initCtx();
+      if (!this.ctx) return;
+      const now = this.ctx.currentTime;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(440, now);
+      osc.frequency.exponentialRampToValueAtTime(110, now + 0.15);
+      gain.gain.setValueAtTime(0.15, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.18);
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.18);
+    } catch {}
+  }
+
+  /**
+   * Sound 8: Battle Quiz Defense / Shield
+   */
+  playGameShield() {
+    if (this.getMuted()) return;
+    try {
+      this.initCtx();
+      if (!this.ctx) return;
+      const now = this.ctx.currentTime;
+      const osc = this.ctx.createOscillator();
+      const gain = this.ctx.createGain();
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(300, now);
+      osc.frequency.linearRampToValueAtTime(600, now + 0.12);
+      gain.gain.setValueAtTime(0.12, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.22);
+      osc.connect(gain);
+      gain.connect(this.ctx.destination);
+      osc.start(now);
+      osc.stop(now + 0.22);
+    } catch {}
+  }
+
+  /**
+   * Sound 9: Detective Clue Discovery Chime
+   */
+  playGameDetectiveClue() {
+    if (this.getMuted()) return;
+    try {
+      this.initCtx();
+      if (!this.ctx) return;
+      const now = this.ctx.currentTime;
+      const freqs = [659.25, 880.0, 1174.66]; // E5, A5, D6
+      freqs.forEach((f, i) => {
+        if (!this.ctx) return;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'triangle';
+        osc.frequency.setValueAtTime(f, now + i * 0.08);
+        gain.gain.setValueAtTime(0.1, now + i * 0.08);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + (i + 1) * 0.12);
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now + i * 0.08);
+        osc.stop(now + (i + 1) * 0.12);
+      });
+    } catch {}
+  }
+
+  /**
+   * Sound 10: Player Level Up / Boss Defeat Fanfare
+   */
+  playGameLevelUp() {
+    if (this.getMuted()) return;
+    try {
+      this.initCtx();
+      if (!this.ctx) return;
+      const now = this.ctx.currentTime;
+      const chord = [523.25, 659.25, 783.99, 1046.5, 1318.51]; // C5, E5, G5, C6, E6
+      chord.forEach((freq, idx) => {
+        if (!this.ctx) return;
+        const osc = this.ctx.createOscillator();
+        const gain = this.ctx.createGain();
+        osc.type = 'sine';
+        osc.frequency.setValueAtTime(freq, now + idx * 0.07);
+        gain.gain.setValueAtTime(0.12, now + idx * 0.07);
+        gain.gain.exponentialRampToValueAtTime(0.001, now + (idx + 1.8) * 0.1);
+        osc.connect(gain);
+        gain.connect(this.ctx.destination);
+        osc.start(now + idx * 0.07);
+        osc.stop(now + (idx + 2) * 0.1);
+      });
+    } catch {}
+  }
 }
 
 export const sound = new SoundService();
