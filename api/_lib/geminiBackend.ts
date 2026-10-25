@@ -1119,7 +1119,6 @@ Format output WAJIB JSON:
     },
   };
 }
-}
 
 export async function handleBuatModul(body: any) {
   const {

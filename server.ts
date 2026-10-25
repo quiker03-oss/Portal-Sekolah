@@ -7,6 +7,7 @@ import {
   handleParsePdf,
   handleParseTextSoal,
   handleBuatSoal,
+  handleRegenerasiSoal,
   handleBuatModul,
   handleBuatMateri,
 } from "./api/_lib/geminiBackend";
@@ -60,6 +61,20 @@ async function startServer() {
       res.status(500).json({
         success: false,
         error: err.message || "Terjadi kesalahan saat memproses permintaan soal dengan AI.",
+      });
+    }
+  });
+
+  // 1b. Endpoint: Regenerasi Butir Soal Tunggal (Anti-Duplikasi)
+  app.post("/api/ai/regenerasi-soal", async (req, res) => {
+    try {
+      const result = await handleRegenerasiSoal(req.body);
+      res.json(result);
+    } catch (err: any) {
+      console.error("API /api/ai/regenerasi-soal error:", err);
+      res.status(200).json({
+        success: false,
+        error: err.message || "Gagal meregenerasi butir soal.",
       });
     }
   });

@@ -12,12 +12,14 @@ import {
   LkpdData,
   LkpdHalaman,
   LkpdAktivitasItem,
+  UjianOnline,
 } from '../../types';
 import Markdown from 'react-markdown';
 import {
   Sparkles,
   BookOpen,
   FileText,
+  Gamepad2,
   Printer,
   Copy,
   Check,
@@ -103,6 +105,13 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
   const [isGeneratingSoal, setIsGeneratingSoal] = useState<boolean>(false);
   const [hasilSoal, setHasilSoal] = useState<NaskahUjianAI | null>(null);
   const [soalViewMode, setSoalViewMode] = useState<'siswa' | 'guru'>('siswa');
+
+  // Single question regeneration & inline editing states
+  const [regeneratingIdx, setRegeneratingIdx] = useState<number | null>(null);
+  const [editingPgTarget, setEditingPgTarget] = useState<{
+    index: number;
+    question: SoalPilihanGanda;
+  } | null>(null);
 
   // Modal Image Picker / Uploader for Soal
   const [imageModalTarget, setImageModalTarget] = useState<{
@@ -447,6 +456,148 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
     setHasilSoal(updated);
     db.saveNaskahSoal(updated);
     showNotification('success', 'Butir soal berhasil dihapus.');
+  };
+
+  // Regenerate single question using AI
+  const handleRegenerateSinglePg = async (idx: number) => {
+    if (!hasilSoal) return;
+    const targetPg = hasilSoal.pilihanGanda[idx];
+    if (!targetPg) return;
+
+    setRegeneratingIdx(idx);
+    try {
+      const res = await safeFetchJson<{ success: boolean; data: any }>('/api/ai/regenerasi-soal', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          mataPelajaran: hasilSoal.mataPelajaran,
+          kelas: hasilSoal.kelas,
+          topikMateri: hasilSoal.topikMateri,
+          nomor: targetPg.nomor || idx + 1,
+          soalLama: targetPg.pertanyaan,
+          soalLainnya: hasilSoal.pilihanGanda.filter((_, i) => i !== idx).map((q) => q.pertanyaan),
+        }),
+      });
+
+      if (res.ok && res.data?.success && res.data.data) {
+        const newPg = res.data.data;
+        const updatedList = [...hasilSoal.pilihanGanda];
+        updatedList[idx] = {
+          ...targetPg,
+          pertanyaan: newPg.pertanyaan,
+          pilihan: newPg.pilihan || targetPg.pilihan,
+          kunciJawaban: newPg.kunciJawaban || targetPg.kunciJawaban,
+          pembahasan: newPg.pembahasan || targetPg.pembahasan,
+        };
+        const updatedNaskah = { ...hasilSoal, pilihanGanda: updatedList };
+        setHasilSoal(updatedNaskah);
+        db.saveNaskahSoal(updatedNaskah);
+        showNotification('success', `Butir soal #${idx + 1} berhasil diregenerasi secara orisinal!`);
+      } else {
+        showNotification('error', 'Gagal meregenerasi butir soal.');
+      }
+    } catch {
+      showNotification('error', 'Terjadi kendala saat meregenerasi butir soal.');
+    } finally {
+      setRegeneratingIdx(null);
+    }
+  };
+
+  // Save manually edited question
+  const handleSaveEditedPg = (editedQuestion: SoalPilihanGanda, idx: number) => {
+    if (!hasilSoal) return;
+    const updatedList = [...hasilSoal.pilihanGanda];
+    updatedList[idx] = editedQuestion;
+    const updatedNaskah = { ...hasilSoal, pilihanGanda: updatedList };
+    setHasilSoal(updatedNaskah);
+    db.saveNaskahSoal(updatedNaskah);
+    setEditingPgTarget(null);
+    showNotification('success', `Perubahan butir soal #${idx + 1} berhasil disimpan.`);
+  };
+
+  // Convert AI questions directly into official CBT Exam or Interactive Game Quiz
+  const handleCreateExamFromSoal = (mode: 'ujian_resmi' | 'kuis_game') => {
+    if (!hasilSoal) return;
+
+    const newUjian: UjianOnline = {
+      id: `ujn-${Date.now()}`,
+      judul: hasilSoal.judul,
+      deskripsi: `Dibuat secara profesional melalui Asisten AI Guru untuk materi ${hasilSoal.topikMateri || hasilSoal.mataPelajaran}`,
+      mataPelajaran: hasilSoal.mataPelajaran,
+      guruId: currentUser.id,
+      guruNama: currentUser.name,
+      kelasTarget: [hasilSoal.kelas ? `Kelas ${hasilSoal.kelas}` : 'Semua Siswa'],
+      semester: hasilSoal.semester || 'Ganjil',
+      tahunAjaran: settings.tahunAjaranAktif || '2025/2026',
+      jenisUjian: (hasilSoal.jenisUjian as any) || 'Ulangan Harian',
+      status: 'aktif',
+      tanggalMulai: new Date().toISOString(),
+      tanggalSelesai: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000).toISOString(),
+      durasiMenit: hasilSoal.durasiMenit || 60,
+      jumlahPercobaan: 1,
+      modeTampilan: 'satu_per_satu',
+      kkm: 75,
+      acakSoal: mode === 'ujian_resmi',
+      acakPilihan: mode === 'ujian_resmi',
+      tampilkanNilaiLangsung: true,
+      tampilkanPembahasan: 'langsung',
+      modeInteraktif: mode,
+      gameSettings:
+        mode === 'kuis_game'
+          ? {
+              gameMode: 'petualangan',
+              tingkatKesulitan: 'sedang',
+              maksimalPercobaan: 2,
+              poinPerSoal: 10,
+              batasWaktuPerSoalDetik: 0,
+              tampilkanPetunjuk: true,
+              efekSuaraAktif: true,
+              animasiAktif: true,
+              izinkanUlangKuis: true,
+              tampilkanPapanPeringkat: true,
+              simpanSebagaiNilai: 'latihan_saja',
+            }
+          : undefined,
+      pengawasanAktif: mode === 'ujian_resmi',
+      wajibFullscreen: mode === 'ujian_resmi',
+      maksimalPelanggaran: 3,
+      blokirCopyPaste: mode === 'ujian_resmi',
+      soalList: [
+        ...hasilSoal.pilihanGanda.map((pg, idx) => ({
+          id: `soal-${Date.now()}-${idx + 1}`,
+          nomor: idx + 1,
+          tipe: 'pilihan_ganda' as const,
+          pertanyaan: pg.pertanyaan,
+          pilihan: pg.pilihan,
+          kunciJawaban: pg.kunciJawaban,
+          pembahasan: pg.pembahasan,
+          penjelasanBenar: pg.pembahasan,
+          petunjuk: `Cermati kembali konsep esensial materi ${hasilSoal.topikMateri || hasilSoal.mataPelajaran}.`,
+          gambar: pg.gambar,
+          gambarCaption: pg.gambarCaption,
+          bobot: 1,
+        })),
+        ...hasilSoal.esai.map((es, idx) => ({
+          id: `soal-${Date.now()}-${hasilSoal.pilihanGanda.length + idx + 1}`,
+          nomor: hasilSoal.pilihanGanda.length + idx + 1,
+          tipe: 'esai' as const,
+          pertanyaan: es.pertanyaan,
+          kunciJawaban: es.kunciJawaban,
+          pembahasan: es.pedomanPenskoran,
+          bobot: 2,
+        })),
+      ],
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    db.saveUjianOnline(newUjian);
+    showNotification(
+      'success',
+      mode === 'kuis_game'
+        ? 'Soal berhasil diintegrasikan menjadi Kuis Game Interaktif Edukasi! Siswa dapat memainkannya.'
+        : 'Soal berhasil dipublikasikan menjadi Ujian Online Resmi CBT!'
+    );
   };
 
   // Export handlers for Soal
@@ -1291,8 +1442,28 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
                     </button>
                   </div>
 
-                  {/* Export Buttons */}
-                  <div className="flex items-center gap-2">
+                  {/* Direct Integration & Export Buttons */}
+                  <div className="flex flex-wrap items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => handleCreateExamFromSoal('kuis_game')}
+                      className="px-3 py-1.5 bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-slate-950 font-black rounded-xl text-xs flex items-center gap-1.5 shadow-xs transition cursor-pointer"
+                      title="Publikasikan langsung sebagai Kuis Game Interaktif Siswa"
+                    >
+                      <Gamepad2 className="w-3.5 h-3.5 text-slate-950" />
+                      <span>Jadikan Kuis Game</span>
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleCreateExamFromSoal('ujian_resmi')}
+                      className="px-3 py-1.5 bg-blue-700 hover:bg-blue-800 text-white font-bold rounded-xl text-xs flex items-center gap-1.5 shadow-xs transition cursor-pointer"
+                      title="Daftarkan langsung ke Bank Soal Ujian Online Resmi (CBT)"
+                    >
+                      <GraduationCap className="w-3.5 h-3.5 text-blue-200" />
+                      <span>Jadikan Ujian CBT</span>
+                    </button>
+
                     <button
                       type="button"
                       disabled={isExporting}
@@ -1301,7 +1472,7 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
                       title="Unduh dokumen Word (.docx) dengan gambar tersemat"
                     >
                       <FileDown className="w-3.5 h-3.5 text-blue-600" />
-                      <span>Word (.docx)</span>
+                      <span>Word</span>
                     </button>
 
                     <button
@@ -1407,12 +1578,31 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
                               <div className="flex items-center gap-1">
                                 <button
                                   type="button"
+                                  disabled={regeneratingIdx === idx}
+                                  onClick={() => handleRegenerateSinglePg(idx)}
+                                  className="px-2 py-1 rounded-lg hover:bg-amber-50 text-slate-600 hover:text-amber-700 text-[11px] font-semibold flex items-center gap-1 transition-colors cursor-pointer border border-slate-200 hover:border-amber-300 disabled:opacity-50"
+                                  title="Regenerasi butir soal ini dengan AI agar tidak membosankan"
+                                >
+                                  <RefreshCw className={`w-3.5 h-3.5 text-amber-600 ${regeneratingIdx === idx ? 'animate-spin' : ''}`} />
+                                  <span className="hidden sm:inline">{regeneratingIdx === idx ? 'Memproses...' : 'Ganti Soal'}</span>
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setEditingPgTarget({ index: idx, question: { ...pg } })}
+                                  className="px-2 py-1 rounded-lg hover:bg-indigo-50 text-slate-600 hover:text-indigo-700 text-[11px] font-semibold flex items-center gap-1 transition-colors cursor-pointer border border-slate-200 hover:border-indigo-300"
+                                  title="Edit pertanyaan, pilihan jawaban, kunci, atau pembahasan"
+                                >
+                                  <Edit3 className="w-3.5 h-3.5 text-indigo-600" />
+                                  <span className="hidden sm:inline">Edit</span>
+                                </button>
+                                <button
+                                  type="button"
                                   onClick={() => setImageModalTarget({ type: 'pg', index: idx, currentImage: pg.gambar, currentCaption: pg.gambarCaption })}
                                   className="p-1 rounded-lg hover:bg-blue-50 text-slate-500 hover:text-blue-700 text-[11px] font-semibold flex items-center gap-1 transition-colors cursor-pointer"
                                   title="Atur / Tambah Gambar Soal"
                                 >
                                   <ImageIcon className="w-3.5 h-3.5" />
-                                  <span>{pg.gambar ? 'Ganti Gambar' : '+ Gambar'}</span>
+                                  <span className="hidden sm:inline">{pg.gambar ? 'Ganti Gbr' : '+ Gbr'}</span>
                                 </button>
                                 <button
                                   type="button"
@@ -2401,6 +2591,125 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
                     </div>
                   </div>
                 ))}
+          </div>
+        </div>
+      )}
+
+      {/* ========================================================================= */}
+      {/* MODAL 0: EDIT MANUAL BUTIR SOAL PILIHAN GANDA */}
+      {/* ========================================================================= */}
+      {editingPgTarget && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in">
+          <div className="bg-white rounded-2xl max-w-2xl w-full p-6 shadow-2xl border border-slate-200 space-y-4 max-h-[90vh] overflow-y-auto">
+            <div className="flex items-center justify-between border-b pb-3">
+              <h4 className="font-bold text-sm text-slate-900 flex items-center gap-2">
+                <Edit3 className="w-4 h-4 text-indigo-700" />
+                <span>Edit Butir Soal #{editingPgTarget.index + 1}</span>
+              </h4>
+              <button
+                type="button"
+                onClick={() => setEditingPgTarget(null)}
+                className="text-slate-400 hover:text-slate-600 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3">
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Teks Pertanyaan</label>
+                <textarea
+                  rows={3}
+                  value={editingPgTarget.question.pertanyaan}
+                  onChange={(e) =>
+                    setEditingPgTarget({
+                      ...editingPgTarget,
+                      question: { ...editingPgTarget.question, pertanyaan: e.target.value },
+                    })
+                  }
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:bg-white leading-relaxed"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                {(['A', 'B', 'C', 'D'] as const).map((opt) => (
+                  <div key={opt}>
+                    <label className="block text-[11px] font-bold text-slate-600 mb-1">Pilihan {opt}</label>
+                    <input
+                      type="text"
+                      value={editingPgTarget.question.pilihan[opt] || ''}
+                      onChange={(e) =>
+                        setEditingPgTarget({
+                          ...editingPgTarget,
+                          question: {
+                            ...editingPgTarget.question,
+                            pilihan: {
+                              ...editingPgTarget.question.pilihan,
+                              [opt]: e.target.value,
+                            },
+                          },
+                        })
+                      }
+                      className="w-full px-3 py-1.5 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:bg-white"
+                    />
+                  </div>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-700 mb-1">Kunci Jawaban</label>
+                  <select
+                    value={editingPgTarget.question.kunciJawaban}
+                    onChange={(e) =>
+                      setEditingPgTarget({
+                        ...editingPgTarget,
+                        question: { ...editingPgTarget.question, kunciJawaban: e.target.value },
+                      })
+                    }
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs font-bold focus:bg-white"
+                  >
+                    <option value="A">A</option>
+                    <option value="B">B</option>
+                    <option value="C">C</option>
+                    <option value="D">D</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold text-slate-700 mb-1">Pembahasan / Penjelasan</label>
+                <textarea
+                  rows={2}
+                  value={editingPgTarget.question.pembahasan || ''}
+                  onChange={(e) =>
+                    setEditingPgTarget({
+                      ...editingPgTarget,
+                      question: { ...editingPgTarget.question, pembahasan: e.target.value },
+                    })
+                  }
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-300 rounded-xl text-xs focus:bg-white leading-relaxed"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-2.5 pt-3 border-t">
+              <button
+                type="button"
+                onClick={() => setEditingPgTarget(null)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold rounded-xl transition cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSaveEditedPg(editingPgTarget.question, editingPgTarget.index)}
+                className="px-5 py-2 bg-indigo-700 hover:bg-indigo-800 text-white text-xs font-bold rounded-xl shadow-xs transition cursor-pointer flex items-center gap-1.5"
+              >
+                <Check className="w-4 h-4" />
+                <span>Simpan Perubahan</span>
+              </button>
+            </div>
           </div>
         </div>
       )}

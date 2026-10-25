@@ -1,6 +1,12 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "cleanUrls": true,
+  "functions": {
+    "api/**/*.ts": {
+      "maxDuration": 60,
+      "memory": 1024
+    }
+  },
   "rewrites": [
     {
       "source": "/api/ujian/parse-docx",
@@ -17,6 +23,10 @@
     {
       "source": "/api/ai/buat-soal",
       "destination": "/api/ai/buat-soal"
+    },
+    {
+      "source": "/api/ai/regenerasi-soal",
+      "destination": "/api/ai/regenerasi-soal"
     },
     {
       "source": "/api/ai/buat-modul",

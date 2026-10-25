@@ -38,6 +38,13 @@ import {
   ArrowDown,
   Layers,
   Heart,
+  Swords,
+  Shield,
+  Zap,
+  Coins,
+  Volume1,
+  BookmarkCheck,
+  AlertTriangle,
 } from 'lucide-react';
 
 interface KuisGameInteraktifViewProps {
@@ -124,6 +131,20 @@ export const KuisGameInteraktifView: React.FC<KuisGameInteraktifViewProps> = ({
 
   // Confetti / Celebration trigger
   const [showConfetti, setShowConfetti] = useState<boolean>(false);
+
+  // Gamification Economy: Coins & XP
+  const [coins, setCoins] = useState<number>(0);
+  const [xp, setXp] = useState<number>(0);
+  const [reduceMotion, setReduceMotion] = useState<boolean>(false);
+  const [isSpeaking, setIsSpeaking] = useState<boolean>(false);
+
+  // Battle Quiz Mode & Boss Challenge Combat States
+  const [heroHp, setHeroHp] = useState<number>(100);
+  const [bossHp, setBossHp] = useState<number>(100);
+  const [combatAction, setCombatAction] = useState<'idle' | 'hero_attack' | 'boss_attack' | 'shield'>('idle');
+
+  // Detective Quiz Mode: Dossier of Discovered Clues
+  const [unlockedClues, setUnlockedClues] = useState<string[]>([]);
 
   // Restore saved progress if student refreshes
   useEffect(() => {
@@ -292,6 +313,19 @@ export const KuisGameInteraktifView: React.FC<KuisGameInteraktifViewProps> = ({
     const correctCount = Object.values(updatedAnswers).filter((a) => a.isBenar).length;
     const finalGrade = totalCount > 0 ? Math.round((correctCount / totalCount) * 100) : 0;
 
+    const materiDikuasai: string[] = [];
+    const materiPerluPeningkatan: string[] = [];
+
+    questions.forEach((q, idx) => {
+      const ans = updatedAnswers[q.id];
+      const topicSnippet = q.pertanyaan.length > 50 ? q.pertanyaan.slice(0, 50) + '...' : q.pertanyaan;
+      if (ans?.isBenar) {
+        materiDikuasai.push(`Soal #${idx + 1}: ${topicSnippet}`);
+      } else if (ans) {
+        materiPerluPeningkatan.push(`Soal #${idx + 1}: ${topicSnippet}`);
+      }
+    });
+
     const gameSubmission: JawabanSiswaUjian = {
       id: `game-${ujian.id}-${siswa.id}`,
       ujianId: ujian.id,
@@ -308,8 +342,11 @@ export const KuisGameInteraktifView: React.FC<KuisGameInteraktifViewProps> = ({
       totalPoinGame: updatedScore,
       totalBintang: updatedStars,
       lencanaDiperoleh: badges,
-      levelSiswa: Math.floor(updatedScore / 50) + 1,
-      xpGame: updatedScore * 10,
+      levelSiswa: Math.floor(xp / 100) + 1,
+      xpGame: xp,
+      koinTotal: coins,
+      materiDikuasai,
+      materiPerluPeningkatan,
       percobaanPerSoal: updatedAttempts,
       jumlahBenar: correctCount,
       jumlahSalah: Math.max(0, totalCount - correctCount),
@@ -328,6 +365,18 @@ export const KuisGameInteraktifView: React.FC<KuisGameInteraktifViewProps> = ({
     setFeedbackStatus('exhausted');
     setShowExplanation(true);
     sound.playGameWrongFriendly();
+  };
+
+  // Voice narration helper
+  const handleSpeakText = (text: string) => {
+    if (isSpeaking) {
+      if ('speechSynthesis' in window) window.speechSynthesis.cancel();
+      setIsSpeaking(false);
+      return;
+    }
+    setIsSpeaking(true);
+    sound.speak(text);
+    setTimeout(() => setIsSpeaking(false), 5000);
   };
 
   // 1. Submit Answer & Immediate Evaluation
@@ -392,6 +441,35 @@ export const KuisGameInteraktifView: React.FC<KuisGameInteraktifViewProps> = ({
       const newScore = score + pointsToAdd;
       const newStars = stars + starsToAdd;
 
+      // Add coins & XP
+      setCoins((prev) => prev + (currentAttempts === 1 ? 5 : 2));
+      setXp((prev) => prev + (currentAttempts === 1 ? 50 : 25));
+
+      // Battle Quiz Combat Mechanics
+      if (settings.gameMode === 'battle' || settings.gameMode === 'boss_challenge') {
+        sound.playGameAttack();
+        setCombatAction('hero_attack');
+        const bossDmg = Math.ceil(100 / Math.max(1, questions.length));
+        setBossHp((prev) => {
+          const nextHp = Math.max(0, prev - bossDmg);
+          if (nextHp === 0) {
+            setTimeout(() => sound.playGameLevelUp(), 400);
+          }
+          return nextHp;
+        });
+        setTimeout(() => setCombatAction('idle'), 1500);
+      } else {
+        sound.playGameCorrect();
+        setTimeout(() => sound.playGameStar(), 250);
+      }
+
+      // Detective Quiz Clue Unlock
+      if (settings.gameMode === 'detektif') {
+        sound.playGameDetectiveClue();
+        const clueText = `Bukti #${currentIndex + 1}: Konsep "${currentQuestion.pertanyaan.slice(0, 40)}..." telah terverifikasi dengan tepat!`;
+        setUnlockedClues((prev) => (!prev.includes(clueText) ? [...prev, clueText] : prev));
+      }
+
       if (!hasAwardedScoreForCurrent) {
         setScore(newScore);
         setStars(newStars);
@@ -400,11 +478,10 @@ export const KuisGameInteraktifView: React.FC<KuisGameInteraktifViewProps> = ({
 
       setSolvedQuestions((prev) => ({ ...prev, [qId]: true }));
 
-      // Sound & Animations
-      sound.playGameCorrect();
-      setTimeout(() => sound.playGameStar(), 250);
-      setShowConfetti(true);
-      setTimeout(() => setShowConfetti(false), 3000);
+      if (!reduceMotion) {
+        setShowConfetti(true);
+        setTimeout(() => setShowConfetti(false), 3000);
+      }
 
       // Save answer record
       const updatedAnswers: { [soalId: string]: DetailJawabanSiswa } = {
@@ -424,7 +501,16 @@ export const KuisGameInteraktifView: React.FC<KuisGameInteraktifViewProps> = ({
     } else {
       // Incorrect attempt!
       setStreak(0);
-      sound.playGameWrongFriendly();
+
+      // Battle Quiz Hero Defense/Shield
+      if (settings.gameMode === 'battle' || settings.gameMode === 'boss_challenge') {
+        sound.playGameShield();
+        setCombatAction('shield');
+        setHeroHp((prev) => Math.max(20, prev - 10));
+        setTimeout(() => setCombatAction('idle'), 1500);
+      } else {
+        sound.playGameWrongFriendly();
+      }
 
       if (currentAttempts >= maxAttempts) {
         // All attempts used up -> reveal correct answer and explanation kindly
@@ -445,7 +531,6 @@ export const KuisGameInteraktifView: React.FC<KuisGameInteraktifViewProps> = ({
       } else {
         // Still has retry opportunities!
         setFeedbackStatus('wrong');
-        // Do not reveal correct answer yet
       }
     }
   };
@@ -560,9 +645,15 @@ export const KuisGameInteraktifView: React.FC<KuisGameInteraktifViewProps> = ({
             <div>
               <div className="flex items-center gap-2">
                 <span className="text-[10px] font-black uppercase tracking-wider px-2 py-0.5 rounded-full bg-amber-500/20 text-amber-300 border border-amber-500/40">
-                  {settings.gameMode === 'petualangan' && '🗺️ Petualangan Belajar'}
+                  {settings.gameMode === 'petualangan' && '🗺️ Adventure Quiz'}
+                  {settings.gameMode === 'battle' && '⚔️ Battle Quiz'}
+                  {settings.gameMode === 'detektif' && '🕵️ Detective Quiz'}
+                  {settings.gameMode === 'puzzle' && '🧩 Puzzle Quiz'}
+                  {settings.gameMode === 'tantangan_waktu' && '⏱️ Time Challenge'}
+                  {settings.gameMode === 'boss_challenge' && '👹 Boss Challenge'}
+                  {settings.gameMode === 'latihan_mandiri' && '📖 Practice Mode'}
+                  {settings.gameMode === 'kompetisi' && '🏆 Competition Mode'}
                   {settings.gameMode === 'kumpulkan_bintang' && '⭐ Kumpulkan Bintang'}
-                  {settings.gameMode === 'tantangan_waktu' && '⏱️ Tantangan Waktu'}
                   {settings.gameMode === 'misi_pengetahuan' && '🎯 Misi Pengetahuan'}
                   {settings.gameMode === 'tebak_gambar' && '🖼️ Tebak Gambar'}
                   {settings.gameMode === 'pasangkan_jawaban' && '🧩 Pasangkan Jawaban'}
@@ -577,7 +668,18 @@ export const KuisGameInteraktifView: React.FC<KuisGameInteraktifViewProps> = ({
           </div>
 
           {/* Right: Stars, Points, Streak & Sound Mute Button */}
-          <div className="flex items-center gap-2 sm:gap-3.5">
+          <div className="flex items-center gap-1.5 sm:gap-2.5">
+            {/* Level Badge */}
+            <div className="flex items-center gap-1 px-2.5 py-1 rounded-xl bg-purple-500/20 border border-purple-500/30 text-purple-300 text-xs font-black">
+              <span>Lv.{Math.floor(xp / 100) + 1}</span>
+            </div>
+
+            {/* Coins Counter */}
+            <div className="flex items-center gap-1 px-2.5 py-1 rounded-xl bg-yellow-500/20 border border-yellow-500/30 text-yellow-300 text-xs font-black">
+              <Coins className="w-3.5 h-3.5 text-yellow-400" />
+              <span>{coins}</span>
+            </div>
+
             {/* Streak Counter */}
             {streak > 1 && (
               <div className="flex items-center gap-1 px-2.5 py-1 rounded-xl bg-orange-500/20 border border-orange-500/40 text-orange-400 text-xs font-black animate-pulse">
@@ -597,6 +699,19 @@ export const KuisGameInteraktifView: React.FC<KuisGameInteraktifViewProps> = ({
               <Trophy className="w-4 h-4 text-indigo-400" />
               <span>{score} PTS</span>
             </div>
+
+            {/* Reduce Motion / Animasi Toggler */}
+            <button
+              onClick={() => setReduceMotion(!reduceMotion)}
+              className={`p-2 rounded-xl transition cursor-pointer text-xs font-bold ${
+                reduceMotion
+                  ? 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
+                  : 'bg-slate-800 text-slate-300 hover:text-white hover:bg-slate-700'
+              }`}
+              title={reduceMotion ? 'Aktifkan Animasi Penuh' : 'Kurangi Animasi (Hemat Energi)'}
+            >
+              <Zap className={`w-4 h-4 ${reduceMotion ? 'text-amber-400' : 'text-slate-400'}`} />
+            </button>
 
             {/* Audio Toggle */}
             <button
@@ -638,21 +753,118 @@ export const KuisGameInteraktifView: React.FC<KuisGameInteraktifViewProps> = ({
       <main className="flex-1 max-w-4xl w-full mx-auto p-4 sm:p-6 flex flex-col justify-center relative z-10">
         {!isGameFinished ? (
           <div className="space-y-6">
-            {/* Friendly Mascot Dialogue Bubble */}
-            <div className="flex items-start gap-3 bg-slate-800/60 border border-slate-700/80 p-3.5 sm:p-4 rounded-2xl shadow-lg backdrop-blur-xs">
-              <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-amber-400 to-orange-500 text-slate-950 flex items-center justify-center font-black text-2xl shadow-md shrink-0">
-                🦊
-              </div>
-              <div className="flex-1">
-                <div className="flex items-center gap-2">
-                  <span className="text-xs font-black text-amber-400">Kiki si Kancil Pintar</span>
-                  <span className="text-[10px] text-slate-400 font-medium">Pemandu Belajar</span>
+            {/* Friendly Mascot Dialogue Bubble with Voice Narration */}
+            <div className="flex items-start justify-between gap-3 bg-slate-800/60 border border-slate-700/80 p-3.5 sm:p-4 rounded-2xl shadow-lg backdrop-blur-xs">
+              <div className="flex items-start gap-3">
+                <div className="w-12 h-12 rounded-2xl bg-gradient-to-br from-amber-400 to-orange-500 text-slate-950 flex items-center justify-center font-black text-2xl shadow-md shrink-0">
+                  🦊
                 </div>
-                <p className="text-xs sm:text-sm text-slate-200 mt-0.5 leading-relaxed font-medium">
-                  "{mascotDialogue}"
-                </p>
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs font-black text-amber-400">Kiki si Kancil Pintar</span>
+                    <span className="text-[10px] text-slate-400 font-medium">Pemandu Belajar</span>
+                  </div>
+                  <p className="text-xs sm:text-sm text-slate-200 mt-0.5 leading-relaxed font-medium">
+                    "{mascotDialogue}"
+                  </p>
+                </div>
               </div>
+              <button
+                onClick={() => handleSpeakText(mascotDialogue)}
+                className={`p-2.5 rounded-xl border transition cursor-pointer shrink-0 self-center ${
+                  isSpeaking
+                    ? 'bg-amber-500 text-slate-950 border-amber-400 animate-pulse'
+                    : 'bg-slate-700/60 hover:bg-slate-700 text-slate-300 hover:text-white border-slate-600'
+                }`}
+                title="Dengarkan Suara Kiki"
+              >
+                <Volume1 className="w-4 h-4" />
+              </button>
             </div>
+
+            {/* Mode: Battle Quiz & Boss Challenge Arena */}
+            {(settings.gameMode === 'battle' || settings.gameMode === 'boss_challenge') && (
+              <div className="bg-gradient-to-r from-indigo-950/80 via-slate-900/90 to-rose-950/80 border border-indigo-500/40 rounded-3xl p-4 sm:p-5 shadow-2xl space-y-4">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Swords className="w-5 h-5 text-amber-400 animate-bounce" />
+                    <span className="text-xs font-black uppercase tracking-wider text-amber-300">
+                      {settings.gameMode === 'boss_challenge' ? '👹 Pertarungan Lawan Boss Materi' : '⚔️ Arena Battle Quiz'}
+                    </span>
+                  </div>
+                  {combatAction !== 'idle' && (
+                    <span className="text-xs font-black px-3 py-1 rounded-full bg-amber-400 text-slate-950 animate-pulse">
+                      {combatAction === 'hero_attack' && '💥 Serangan Ilmiah Berhasil!'}
+                      {combatAction === 'shield' && '🛡️ Bertahan! Pahami Pertanyaannya!'}
+                    </span>
+                  )}
+                </div>
+
+                <div className="grid grid-cols-2 gap-4">
+                  {/* Hero Box */}
+                  <div className="bg-slate-900/70 p-3 rounded-2xl border border-indigo-500/30">
+                    <div className="flex items-center justify-between text-xs font-bold mb-1">
+                      <span className="text-indigo-300 flex items-center gap-1">
+                        🦸 {siswa.namaLengkap || 'Pahlawan Siswa'}
+                      </span>
+                      <span className="text-emerald-400 font-mono">{heroHp}/100 HP</span>
+                    </div>
+                    <div className="w-full h-2.5 bg-slate-800 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-gradient-to-r from-emerald-500 to-teal-400 transition-all duration-500 rounded-full"
+                        style={{ width: `${heroHp}%` }}
+                      />
+                    </div>
+                  </div>
+
+                  {/* Boss Box */}
+                  <div className="bg-slate-900/70 p-3 rounded-2xl border border-rose-500/30">
+                    <div className="flex items-center justify-between text-xs font-bold mb-1">
+                      <span className="text-rose-300 flex items-center gap-1">
+                        {settings.gameMode === 'boss_challenge' ? '👹 Raja Kesalahan' : '👾 Monster Soal'}
+                      </span>
+                      <span className="text-rose-400 font-mono">{bossHp}/100 HP</span>
+                    </div>
+                    <div className="w-full h-2.5 bg-slate-800 rounded-full overflow-hidden">
+                      <div
+                        className="h-full bg-gradient-to-r from-rose-500 to-red-600 transition-all duration-500 rounded-full"
+                        style={{ width: `${bossHp}%` }}
+                      />
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* Mode: Detective Quiz Clues Dossier */}
+            {settings.gameMode === 'detektif' && (
+              <div className="bg-slate-900/80 border border-amber-500/40 rounded-2xl p-4 shadow-xl space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="text-xs font-black uppercase tracking-wider text-amber-300 flex items-center gap-1.5">
+                    🕵️ Dokumen Investigasi Misteri
+                  </span>
+                  <span className="text-xs text-amber-400 font-bold">
+                    {unlockedClues.length} / {questions.length} Bukti Terbuka
+                  </span>
+                </div>
+                <div className="flex flex-wrap gap-2">
+                  {unlockedClues.length === 0 ? (
+                    <span className="text-xs text-slate-400 italic">
+                      Jawab pertanyaan dengan tepat untuk mengungkap bukti dan petunjuk investigasi!
+                    </span>
+                  ) : (
+                    unlockedClues.map((clue, idx) => (
+                      <span
+                        key={idx}
+                        className="text-[11px] font-semibold bg-amber-500/10 border border-amber-500/30 text-amber-200 px-3 py-1 rounded-xl"
+                      >
+                        🔍 {clue}
+                      </span>
+                    ))
+                  )}
+                </div>
+              </div>
+            )}
 
             {/* Mode C: Per-Question Countdown Timer Bar */}
             {timerLimit > 0 && (
@@ -1142,6 +1354,98 @@ export const KuisGameInteraktifView: React.FC<KuisGameInteraktifViewProps> = ({
                 })}
               </div>
             </div>
+
+            {/* Educational Diagnostic: Penguasaan Materi & Rekomendasi Belajar */}
+            <div className="p-4 rounded-2xl bg-slate-900/50 border border-slate-700/80 text-left space-y-3">
+              <div className="flex items-center gap-2 text-xs font-black uppercase tracking-wider text-slate-300">
+                <BookmarkCheck className="w-4 h-4 text-emerald-400" />
+                <span>Analisis Penguasaan Materi:</span>
+              </div>
+
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+                {/* Mastered Topics */}
+                <div className="p-3 rounded-xl bg-emerald-950/30 border border-emerald-500/30 space-y-1.5">
+                  <div className="font-bold text-emerald-300 flex items-center gap-1">
+                    <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                    <span>Materi yang Sudah Dikuasai:</span>
+                  </div>
+                  <ul className="space-y-1 text-slate-300 max-h-36 overflow-y-auto pr-1">
+                    {questions
+                      .filter((q) => answersMap[q.id]?.isBenar)
+                      .map((q, idx) => (
+                        <li key={q.id} className="text-[11px] flex items-start gap-1">
+                          <span className="text-emerald-400 font-bold shrink-0">✓</span>
+                          <span className="truncate">Soal #{idx + 1}: {q.pertanyaan}</span>
+                        </li>
+                      ))}
+                    {questions.filter((q) => answersMap[q.id]?.isBenar).length === 0 && (
+                      <li className="text-[11px] text-slate-400 italic">Belum ada materi terjawab benar.</li>
+                    )}
+                  </ul>
+                </div>
+
+                {/* Topics Needing Review */}
+                <div className="p-3 rounded-xl bg-amber-950/30 border border-amber-500/30 space-y-1.5">
+                  <div className="font-bold text-amber-300 flex items-center gap-1">
+                    <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
+                    <span>Perlu Dipelajari Lagi:</span>
+                  </div>
+                  <ul className="space-y-1 text-slate-300 max-h-36 overflow-y-auto pr-1">
+                    {questions
+                      .filter((q) => answersMap[q.id] && !answersMap[q.id].isBenar)
+                      .map((q, idx) => (
+                        <li key={q.id} className="text-[11px] flex items-start gap-1">
+                          <span className="text-amber-400 font-bold shrink-0">&bull;</span>
+                          <span className="truncate">Soal #{idx + 1}: {q.pertanyaan}</span>
+                        </li>
+                      ))}
+                    {questions.filter((q) => answersMap[q.id] && !answersMap[q.id].isBenar).length === 0 && (
+                      <li className="text-[11px] text-emerald-400 font-medium">Luar biasa! Tidak ada materi yang keliru.</li>
+                    )}
+                  </ul>
+                </div>
+              </div>
+            </div>
+
+            {/* Mode: Competition Mode Podium Leaderboard */}
+            {settings.gameMode === 'kompetisi' && (
+              <div className="p-4 rounded-2xl bg-gradient-to-r from-amber-950/40 via-slate-900/60 to-purple-950/40 border border-amber-500/40 text-left space-y-3">
+                <div className="flex items-center justify-between">
+                  <div className="flex items-center gap-2">
+                    <Trophy className="w-4 h-4 text-amber-400" />
+                    <span className="text-xs font-black uppercase tracking-wider text-amber-300">
+                      Papan Peringkat Kompetisi Kelas
+                    </span>
+                  </div>
+                  <span className="text-[11px] text-amber-400 font-bold">Hasil Akhir Sesi</span>
+                </div>
+
+                <div className="grid grid-cols-3 gap-2 text-center pt-1">
+                  {/* Rank 2 */}
+                  <div className="p-2.5 rounded-xl bg-slate-800/80 border border-slate-600 flex flex-col items-center">
+                    <span className="text-xl">🥈</span>
+                    <span className="text-[11px] font-bold text-slate-200 mt-1 truncate max-w-full">Rafi Pratama</span>
+                    <span className="text-xs font-black text-amber-400 mt-0.5">{Math.max(0, score - 10)} pts</span>
+                  </div>
+
+                  {/* Rank 1 */}
+                  <div className="p-3 rounded-xl bg-amber-500/20 border-2 border-amber-400 flex flex-col items-center scale-105 shadow-lg">
+                    <span className="text-2xl">🥇</span>
+                    <span className="text-xs font-black text-amber-300 mt-1 truncate max-w-full">
+                      {siswa.namaLengkap || 'Kamu'}
+                    </span>
+                    <span className="text-sm font-black text-amber-400 mt-0.5">{score} pts</span>
+                  </div>
+
+                  {/* Rank 3 */}
+                  <div className="p-2.5 rounded-xl bg-slate-800/80 border border-slate-600 flex flex-col items-center">
+                    <span className="text-xl">🥉</span>
+                    <span className="text-[11px] font-bold text-slate-200 mt-1 truncate max-w-full">Aisyah Putri</span>
+                    <span className="text-xs font-black text-amber-400 mt-0.5">{Math.max(0, score - 20)} pts</span>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* Action Buttons */}
             <div className="flex flex-wrap items-center justify-center gap-3 pt-2">

@@ -239,32 +239,112 @@ export function generateFallbackSoal(params: {
     guruName,
   } = params;
 
+  const topic = topikMateri.trim() || mataPelajaran;
+
+  // Multi-dimensional cognitive templates ensuring full question variety
+  const dimensions = [
+    {
+      kognitif: 'C1 - Mengingat',
+      kunci: 'B',
+      pertanyaan: `Apa pengertian atau konsep dasar yang paling tepat mengenai ${topic}?`,
+      pilihan: {
+        A: `Suatu proses perubahan sementara tanpa tahapan berulang pada alam.`,
+        B: `Prinsip fundamental dan rangkaian aturan teratur yang melandasi materi ${topic}.`,
+        C: `Aktivitas manusia tanpa keterkaitan dengan hukum alam fisik.`,
+        D: `Kondisi acak yang hanya berlangsung pada kondisi darurat tertentu.`,
+      },
+      pembahasan: `Konsep dasar ${topic} mencakup pemahaman prinsip esensial dan keteraturan fenomena tersebut sesuai silabus ${mataPelajaran}.`,
+    },
+    {
+      kognitif: 'C2 - Memahami',
+      kunci: 'C',
+      pertanyaan: `Manakah dari pernyataan berikut yang merupakan karakteristik atau ciri penting dari ${topic}?`,
+      pilihan: {
+        A: `Hanya dapat berlangsung jika terdapat intervensi buatan di laboratorium.`,
+        B: `Berjalan seketika tanpa membutuhkan bahan atau energi pendukung apa pun.`,
+        C: `Memiliki unsur-unsur saling melengkapi yang bekerja secara harmonis dan terstruktur.`,
+        D: `Tidak memberikan pengaruh apa pun terhadap lingkungan kehidupan sehari-hari.`,
+      },
+      pembahasan: `Karakteristik penting dari ${topic} berada pada keterpaduan komponen dan siklus interaksi yang terukur.`,
+    },
+    {
+      kognitif: 'C3 - Menerapkan',
+      kunci: 'A',
+      pertanyaan: `Dalam kehidupan sehari-hari di lingkungan sekitar, tindakan yang mencerminkan pemahaman materi ${topic} adalah...`,
+      pilihan: {
+        A: `Menerapkan kebiasaan bijak dan bertanggung jawab sesuai prinsip ilmiah ${topic}.`,
+        B: `Membuang limbah atau sisa pemakaian secara sembarangan di aliran air bersih.`,
+        C: `Mengabaikan keselamatan dan petunjuk kerja saat melakukan observasi praktikum.`,
+        D: `Menyimpan perlengkapan belajar di tempat lembap tanpa perawatan rutin.`,
+      },
+      pembahasan: `Penerapan kontekstual ${topic} membimbing siswa untuk berperilaku positif dan berwawasan lingkungan.`,
+    },
+    {
+      kognitif: 'C4 - Menganalisis',
+      kunci: 'D',
+      pertanyaan: `Apabila terjadi ketidakseimbangan atau gangguan pada tahapan proses ${topic}, akibat yang paling mungkin muncul adalah...`,
+      pilihan: {
+        A: `Seluruh kegiatan belajar dan siklus alam akan langsung berhenti total.`,
+        B: `Tidak terjadi pengaruh apa pun karena setiap bagian berdiri sendiri tanpa hubungan.`,
+        C: `Kecepatan proses meningkat berkali-kali lipat tanpa batas kapasitas.`,
+        D: `Keseimbangan sistem terganggu dan memicu dampak lanjutan pada komponen pendukung lainnya.`,
+      },
+      pembahasan: `Analisis sebab-akibat membuktikan adanya ketergantungan dinamis antar komponen dalam ${topic}.`,
+    },
+    {
+      kognitif: 'C5 - Evaluasi & Solusi',
+      kunci: 'C',
+      pertanyaan: `Sebagai peserta didik yang berkarakter Profil Pelajar Pancasila, solusi terbaik saat menghadapi masalah terkait ${topic} adalah...`,
+      pilihan: {
+        A: `Menyerahkan seluruh tanggung jawab kepada pihak lain tanpa berkontribusi.`,
+        B: `Memilih jalan pintas yang merusak lingkungan asalkan cepat selesai.`,
+        C: `Bergotong royong, bernalar kritis dalam menganalisis penyebab, dan merancang tindakan nyata.`,
+        D: `Menghindari pembahasan masalah agar tidak menimbulkan perbedaan pendapat.`,
+      },
+      pembahasan: `Solusi yang mengedepankan nalar kritis dan gotong royong merupakan cerminan penguasaan evaluatif siswa kelas ${kelas}.`,
+    },
+  ];
+
   const pgItems = [];
   for (let i = 1; i <= Math.max(1, jumlahPg); i++) {
-    const keys = ['A', 'B', 'C', 'D'];
-    const key = keys[(i - 1) % 4];
+    const dim = dimensions[(i - 1) % dimensions.length];
+    const targetKeys = ['A', 'B', 'C', 'D'];
+    const targetKey = targetKeys[(i - 1) % 4];
+
+    // Align options to target key rotation so keys are distributed evenly
+    const finalOptions = { ...dim.pilihan };
+    let finalKey = dim.kunci;
+    if (dim.kunci !== targetKey) {
+      const origCorrect = (finalOptions as any)[dim.kunci];
+      const origTarget = (finalOptions as any)[targetKey];
+      (finalOptions as any)[targetKey] = origCorrect;
+      (finalOptions as any)[dim.kunci] = origTarget;
+      finalKey = targetKey;
+    }
+
     pgItems.push({
       nomor: i,
-      pertanyaan: `Berikut ini yang merupakan pernyataan atau contoh yang tepat berkaitan dengan ${topikMateri} adalah...`,
-      pilihan: {
-        A: `Pilihan A: Pernyataan mengenai prinsip dasar penerapan ${topikMateri} secara umum.`,
-        B: `Pilihan B: Pernyataan tentang manfaat langsung ${topikMateri} bagi kehidupan sehari-hari.`,
-        C: `Pilihan C: Pernyataan tentang proses dan tahapan pelaksanaan ${topikMateri}.`,
-        D: `Pilihan D: Pernyataan kesimpulan atas pentingnya memahami ${topikMateri}.`,
-      },
-      kunciJawaban: key,
-      pembahasan: `Pembahasan Soal #${i}: Konsep esensial mengenai ${topikMateri} pada tingkat kelas ${kelas} menuntut pemahaman terhadap hubungan sebab-akibat dan aplikasi praktisnya.`,
+      pertanyaan: dim.pertanyaan,
+      pilihan: finalOptions,
+      kunciJawaban: finalKey,
+      pembahasan: dim.pembahasan,
     });
   }
+
+  const esaiQuestions = [
+    `Jelaskan secara runtut bagaimana tahapan atau proses ${topic} berlangsung dan mengapa hal tersebut esensial bagi kehidupan kita!`,
+    `Berikan 2 contoh konkret penerapan materi ${topic} di lingkungan sekolah atau rumahmu, serta jelaskan manfaat yang dirasakan!`,
+    `Analisislah sebuah kendala yang sering terjadi berkaitan dengan ${topic}, lalu berikan saran tindakan perbaikan yang dapat dilakukan siswa!`,
+  ];
 
   const esaiItems = [];
   for (let j = 1; j <= Math.max(0, jumlahEsai); j++) {
     esaiItems.push({
       nomor: j,
-      pertanyaan: `Jelaskan secara runtut bagaimana konsep ${topikMateri} dapat diterapkan dalam mengatasi permasalahan lingkungan atau sosial di sekitar kita!`,
+      pertanyaan: esaiQuestions[(j - 1) % esaiQuestions.length],
       pedomanPenskoran:
         'Skor 0-5. Kriteria: Menjelaskan konsep dengan tepat (2 poin), memberikan contoh konkret (2 poin), bahasa runtut dan logis (1 poin).',
-      kunciJawaban: `Jawaban Ideal #${j}: Peserta didik menjelaskan prinsip utama ${topikMateri}, mengaitkannya dengan fenomena nyata, dan menyajikan solusi tindakan nyata yang dapat diambil.`,
+      kunciJawaban: `Jawaban mencakup penjelasan konsep esensial ${topic}, keterkaitan fenomena nyata, dan solusi tindakan konkret sesuai nalar kritis siswa kelas ${kelas}.`,
     });
   }
 

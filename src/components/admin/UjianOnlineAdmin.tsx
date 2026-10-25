@@ -1640,11 +1640,11 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser,
                         </div>
                       </div>
                       <span className="px-3 py-1 rounded-full bg-amber-100 text-amber-800 text-[11px] font-black border border-amber-300">
-                        7 Mode Game Aktif
+                        8 Mode Game Interaktif
                       </span>
                     </div>
 
-                    {/* 7 Educational Game Modes Selection Grid */}
+                    {/* Educational Game Modes Selection Grid */}
                     <div>
                       <label className="block text-xs font-black text-slate-800 mb-2">
                         Pilih Mode Game Edukasi:
@@ -1653,45 +1653,51 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser,
                         {[
                           {
                             id: 'petualangan',
-                            title: 'Mode A — Petualangan Belajar',
-                            desc: 'Siswa melewati level demi level dengan progres peta petualangan.',
+                            title: '1. Adventure Quiz',
+                            desc: 'Membuka level, wilayah, dan peta petualangan berdasarkan jawaban benar.',
                             icon: '🗺️',
                           },
                           {
-                            id: 'kumpulkan_bintang',
-                            title: 'Mode B — Kumpulkan Bintang',
-                            desc: 'Mendapat bintang bertahap tanpa hukuman pengurangan poin.',
-                            icon: '⭐',
+                            id: 'battle',
+                            title: '2. Battle Quiz',
+                            desc: 'Jawaban benar menghasilkan jurus serangan karakter siswa melawan monster.',
+                            icon: '⚔️',
                           },
                           {
-                            id: 'tantangan_waktu',
-                            title: 'Mode C — Tantangan Waktu',
-                            desc: 'Countdown santai per pertanyaan untuk melatih ketangkasan berpikir.',
-                            icon: '⏱️',
+                            id: 'detektif',
+                            title: '3. Detective Quiz',
+                            desc: 'Memecahkan misteri investigasi melalui petunjuk dan bukti ilmiah.',
+                            icon: '🕵️',
                           },
                           {
-                            id: 'misi_pengetahuan',
-                            title: 'Mode D — Misi Pengetahuan',
-                            desc: 'Menyelesaikan deretan misi tematik (IPA, MTK, IPS, Bahasa).',
-                            icon: '🎯',
-                          },
-                          {
-                            id: 'tebak_gambar',
-                            title: 'Mode E — Tebak Gambar',
-                            desc: 'Fokus pada diagram/foto materi pelajaran dengan fitur zoom.',
-                            icon: '🖼️',
-                          },
-                          {
-                            id: 'pasangkan_jawaban',
-                            title: 'Mode F — Pasangkan Jawaban',
-                            desc: 'Mencocokkan istilah dengan definisi atau soal dengan jawaban.',
+                            id: 'puzzle',
+                            title: '4. Puzzle Quiz',
+                            desc: 'Tantangan logika, mencocokkan pasangan istilah, dan menyusun urutan.',
                             icon: '🧩',
                           },
                           {
-                            id: 'susun_urutan',
-                            title: 'Mode G — Susun Urutan',
-                            desc: 'Menyusun urutan tahapan, proses ilmiah, atau kronologi peristiwa.',
-                            icon: '🔢',
+                            id: 'tantangan_waktu',
+                            title: '5. Time Challenge',
+                            desc: 'Batas waktu santai per butir soal dengan bonus kecepatan menjawab.',
+                            icon: '⏱️',
+                          },
+                          {
+                            id: 'boss_challenge',
+                            title: '6. Boss Challenge',
+                            desc: 'Tantangan akhir melawan Raja Kesalahan dengan tingkat kesulitan bertahap.',
+                            icon: '👹',
+                          },
+                          {
+                            id: 'latihan_mandiri',
+                            title: '7. Practice Mode',
+                            desc: 'Latihan mandiri tanpa tekanan waktu dilengkapi pembahasan edukatif.',
+                            icon: '📖',
+                          },
+                          {
+                            id: 'kompetisi',
+                            title: '8. Competition Mode',
+                            desc: 'Kompetisi kelas live dengan podium dan leaderboard antarsiswa yang adil.',
+                            icon: '🏆',
                           },
                         ].map((mode) => {
                           const isSelected = cur.gameMode === mode.id;
