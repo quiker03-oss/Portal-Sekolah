@@ -22,9 +22,11 @@ import {
   FileImage,
   Sparkles,
   Scan,
+  Trash2,
 } from 'lucide-react';
 import { usePhysicalScanner } from '../../hooks/usePhysicalScanner';
 import { PhysicalScannerPanel } from '../common/PhysicalScannerPanel';
+import { ConfirmModal } from '../common/ConfirmModal';
 
 export const AbsensiGuruView: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'scan' | 'rekap'>('scan');
@@ -55,9 +57,17 @@ export const AbsensiGuruView: React.FC = () => {
   const [filterTanggal, setFilterTanggal] = useState(new Date().toISOString().split('T')[0]);
   const [searchRekap, setSearchRekap] = useState('');
   const [showPrintModal, setShowPrintModal] = useState(false);
+  const [deleteTargetAbsensi, setDeleteTargetAbsensi] = useState<AbsensiGuru | null>(null);
 
   const refreshData = () => {
     setAbsensiList(db.getAbsensiGuruList());
+  };
+
+  const confirmDeleteAbsensi = () => {
+    if (!deleteTargetAbsensi) return;
+    db.deleteAbsensiGuru(deleteTargetAbsensi.id);
+    setDeleteTargetAbsensi(null);
+    refreshData();
   };
 
   useEffect(() => {
@@ -679,6 +689,7 @@ export const AbsensiGuruView: React.FC = () => {
                     <th className="px-4 py-3">Jam Masuk (Scan 1)</th>
                     <th className="px-4 py-3">Jam Pulang (Scan 2)</th>
                     <th className="px-4 py-3">Status</th>
+                    <th className="px-4 py-3 text-center w-20">Aksi</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100 text-slate-700">
@@ -702,12 +713,22 @@ export const AbsensiGuruView: React.FC = () => {
                           {item.status}
                         </span>
                       </td>
+                      <td className="px-4 py-3 text-center">
+                        <button
+                          type="button"
+                          onClick={() => setDeleteTargetAbsensi(item)}
+                          title="Hapus Rekaman Presensi"
+                          className="p-1.5 rounded-lg text-rose-500 hover:bg-rose-50 transition-colors cursor-pointer"
+                        >
+                          <Trash2 className="w-4 h-4" />
+                        </button>
+                      </td>
                     </tr>
                   ))}
 
                   {filteredRekap.length === 0 && (
                     <tr>
-                      <td colSpan={6} className="text-center py-12 text-slate-400">
+                      <td colSpan={7} className="text-center py-12 text-slate-400">
                         Tidak ada rekaman data presensi guru untuk tanggal yang dipilih.
                       </td>
                     </tr>
@@ -718,6 +739,22 @@ export const AbsensiGuruView: React.FC = () => {
           </div>
         </div>
       )}
+
+      {/* Modal Konfirmasi Hapus Presensi Guru */}
+      <ConfirmModal
+        isOpen={Boolean(deleteTargetAbsensi)}
+        title="Konfirmasi Hapus Presensi Guru"
+        message={
+          deleteTargetAbsensi
+            ? `Apakah Anda yakin ingin menghapus data presensi ${deleteTargetAbsensi.namaGuru} pada tanggal ${deleteTargetAbsensi.tanggal} (Jam Masuk: ${deleteTargetAbsensi.jamMasuk})? Data akan dihapus secara permanen dari server.`
+            : 'Apakah Anda yakin ingin menghapus data presensi ini?'
+        }
+        confirmText="Hapus Presensi"
+        cancelText="Batal"
+        isDestructive={true}
+        onConfirm={confirmDeleteAbsensi}
+        onCancel={() => setDeleteTargetAbsensi(null)}
+      />
 
       {/* Official Teacher Attendance Print Modal */}
       <PrintRekapModal

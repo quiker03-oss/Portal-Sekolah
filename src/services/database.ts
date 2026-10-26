@@ -956,12 +956,15 @@ class DatabaseService {
     }
   }
 
-  private async deleteFromFirestore(schoolId: string, collectionName: string, itemId: string): Promise<void> {
-    if (!schoolId || !itemId) return;
+  deleteFromFirestore(schoolId: string, collectionName: string, itemId: string): Promise<void> {
+    if (!schoolId || !itemId) return Promise.resolve();
     try {
-      await deleteDoc(doc(firestoreDb, `schools/${schoolId}/${collectionName}`, String(itemId)));
+      return deleteDoc(doc(firestoreDb, `schools/${schoolId}/${collectionName}`, String(itemId))).catch((e) => {
+        console.error(`[Firestore Delete Error] school=${schoolId} col=${collectionName} id=${itemId}:`, e);
+      });
     } catch (e) {
       console.error(`[Firestore Delete Error] school=${schoolId} col=${collectionName} id=${itemId}:`, e);
+      return Promise.resolve();
     }
   }
 
@@ -1509,6 +1512,11 @@ class DatabaseService {
   deleteUser(id: string): void {
     const users = this.getUsers().filter(u => u.id !== id);
     this.setItem(STORAGE_KEYS.USERS, users);
+    const schoolId = this.getActiveSchoolId() || 'sch-1';
+    this.deleteFromFirestore(schoolId, 'users', id).catch((e) =>
+      console.warn('[deleteUser Firestore Error]:', e)
+    );
+    window.dispatchEvent(new Event('data_users_changed'));
   }
 
   getCurrentUser(): User | null {
@@ -1814,11 +1822,19 @@ class DatabaseService {
 
   deleteGuru(id: string): void {
     const list = this.getGuruList().filter((g) => g.id !== id);
+    const schoolId = this.getActiveSchoolId() || 'sch-1';
     this.setItem(STORAGE_KEYS.GURU, list);
+    this.deleteFromFirestore(schoolId, 'guru', id).catch((e) =>
+      console.warn('[deleteGuru Firestore Error]:', e)
+    );
     
     // Delete associated user account
+    const associatedUsers = this.getUsers().filter((u) => u.guruId === id);
     const users = this.getUsers().filter((u) => u.guruId !== id);
     this.setItem(STORAGE_KEYS.USERS, users);
+    associatedUsers.forEach((u) => {
+      this.deleteFromFirestore(schoolId, 'users', u.id).catch(() => {});
+    });
     
     window.dispatchEvent(new Event('data_guru_changed'));
   }
@@ -1848,7 +1864,11 @@ class DatabaseService {
 
   deleteKelas(id: string): void {
     const list = this.getAllKelasListUnfiltered().filter((k) => k.id !== id);
+    const schoolId = this.getActiveSchoolId() || 'sch-1';
     this.setItem(STORAGE_KEYS.KELAS, list);
+    this.deleteFromFirestore(schoolId, 'kelas', id).catch((e) =>
+      console.warn('[deleteKelas Firestore Error]:', e)
+    );
     window.dispatchEvent(new Event('data_kelas_changed'));
   }
 
@@ -1867,7 +1887,11 @@ class DatabaseService {
 
   deleteMapel(id: string): void {
     const list = this.getMapelList().filter((m) => m.id !== id);
+    const schoolId = this.getActiveSchoolId() || 'sch-1';
     this.setItem(STORAGE_KEYS.MAPEL, list);
+    this.deleteFromFirestore(schoolId, 'mapel', id).catch((e) =>
+      console.warn('[deleteMapel Firestore Error]:', e)
+    );
     window.dispatchEvent(new Event('data_mapel_changed'));
   }
 
@@ -1919,7 +1943,11 @@ class DatabaseService {
 
   deleteAbsensiSiswa(id: string): void {
     const list = this.getAllAbsensiSiswaListUnfiltered().filter((a) => a.id !== id);
+    const schoolId = this.getActiveSchoolId() || 'sch-1';
     this.setItem(STORAGE_KEYS.ABSENSI_SISWA, list);
+    this.deleteFromFirestore(schoolId, 'absensi_siswa', id).catch((e) =>
+      console.warn('[deleteAbsensiSiswa Firestore Error]:', e)
+    );
     window.dispatchEvent(new Event('absensi_siswa_updated'));
   }
 
@@ -1988,6 +2016,16 @@ class DatabaseService {
     if (idx >= 0) list[idx] = rec;
     else list.unshift(rec);
     this.setItem(STORAGE_KEYS.ABSENSI_GURU, list);
+    window.dispatchEvent(new Event('absensi_guru_updated'));
+  }
+
+  deleteAbsensiGuru(id: string): void {
+    const list = this.getAbsensiGuruList().filter((a) => a.id !== id);
+    const schoolId = this.getActiveSchoolId() || 'sch-1';
+    this.setItem(STORAGE_KEYS.ABSENSI_GURU, list);
+    this.deleteFromFirestore(schoolId, 'absensi_guru', id).catch((e) =>
+      console.warn('[deleteAbsensiGuru Firestore Error]:', e)
+    );
     window.dispatchEvent(new Event('absensi_guru_updated'));
   }
 
@@ -2069,7 +2107,11 @@ class DatabaseService {
 
   deletePengumuman(id: string): void {
     const list = this.getPengumumanList().filter((p) => p.id !== id);
+    const schoolId = this.getActiveSchoolId() || 'sch-1';
     this.setItem(STORAGE_KEYS.PENGUMUMAN, list);
+    this.deleteFromFirestore(schoolId, 'pengumuman', id).catch((e) =>
+      console.warn('[deletePengumuman Firestore Error]:', e)
+    );
     window.dispatchEvent(new Event('pengumuman_updated'));
   }
 
@@ -2089,7 +2131,11 @@ class DatabaseService {
 
   deleteBerita(id: string): void {
     const list = this.getBeritaList().filter((b) => b.id !== id);
+    const schoolId = this.getActiveSchoolId() || 'sch-1';
     this.setItem(STORAGE_KEYS.BERITA, list);
+    this.deleteFromFirestore(schoolId, 'berita', id).catch((e) =>
+      console.warn('[deleteBerita Firestore Error]:', e)
+    );
     window.dispatchEvent(new Event('berita_updated'));
   }
 
@@ -2109,7 +2155,11 @@ class DatabaseService {
 
   deleteGaleri(id: string): void {
     const list = this.getGaleriList().filter((g) => g.id !== id);
+    const schoolId = this.getActiveSchoolId() || 'sch-1';
     this.setItem(STORAGE_KEYS.GALERI, list);
+    this.deleteFromFirestore(schoolId, 'galeri', id).catch((e) =>
+      console.warn('[deleteGaleri Firestore Error]:', e)
+    );
     window.dispatchEvent(new Event('galeri_updated'));
   }
 
@@ -2138,7 +2188,11 @@ class DatabaseService {
 
   deleteKas(id: string): void {
     const list = this.getAllKasListUnfiltered().filter((k) => k.id !== id);
+    const schoolId = this.getActiveSchoolId() || 'sch-1';
     this.setItem(STORAGE_KEYS.KAS, list);
+    this.deleteFromFirestore(schoolId, 'kas', id).catch((e) =>
+      console.warn('[deleteKas Firestore Error]:', e)
+    );
     window.dispatchEvent(new Event('kas_updated'));
   }
 
@@ -2178,7 +2232,11 @@ class DatabaseService {
 
   deleteNilaiHarian(id: string): void {
     const list = this.getAllNilaiHarianListUnfiltered().filter((n) => n.id !== id);
+    const schoolId = this.getActiveSchoolId() || 'sch-1';
     this.setItem(STORAGE_KEYS.NILAI_HARIAN, list);
+    this.deleteFromFirestore(schoolId, 'nilai_harian', id).catch((e) =>
+      console.warn('[deleteNilaiHarian Firestore Error]:', e)
+    );
     window.dispatchEvent(new Event('nilai_harian_updated'));
   }
 
@@ -2191,9 +2249,15 @@ class DatabaseService {
     semester?: string;
     tahunAjaran?: string;
   }): void {
-    const list = this.getAllNilaiHarianListUnfiltered().filter((n) => {
+    const all = this.getAllNilaiHarianListUnfiltered();
+    const toDelete: NilaiHarianItem[] = [];
+    const list = all.filter((n) => {
       if (filter.assessmentId && n.assessmentId) {
-        return n.assessmentId !== filter.assessmentId;
+        if (n.assessmentId === filter.assessmentId) {
+          toDelete.push(n);
+          return false;
+        }
+        return true;
       }
       const match =
         n.kelasId === filter.kelasId &&
@@ -2202,9 +2266,17 @@ class DatabaseService {
         (!filter.materi || n.materi === filter.materi) &&
         (!filter.semester || n.semester === filter.semester) &&
         (!filter.tahunAjaran || n.tahunAjaran === filter.tahunAjaran);
-      return !match;
+      if (match) {
+        toDelete.push(n);
+        return false;
+      }
+      return true;
     });
+    const schoolId = this.getActiveSchoolId() || 'sch-1';
     this.setItem(STORAGE_KEYS.NILAI_HARIAN, list);
+    toDelete.forEach((item) => {
+      this.deleteFromFirestore(schoolId, 'nilai_harian', item.id).catch(() => {});
+    });
     window.dispatchEvent(new Event('nilai_harian_updated'));
   }
 
@@ -2274,7 +2346,11 @@ class DatabaseService {
 
   deleteBelJadwal(id: string): void {
     const list = this.getBelJadwalList().filter((j) => j.id !== id);
+    const schoolId = this.getActiveSchoolId() || 'sch-1';
     this.setItem(STORAGE_KEYS.BEL_JADWAL, list);
+    this.deleteFromFirestore(schoolId, 'bel_jadwal', id).catch((e) =>
+      console.warn('[deleteBelJadwal Firestore Error]:', e)
+    );
     window.dispatchEvent(new CustomEvent('bel_jadwal_updated', { detail: list }));
     window.dispatchEvent(new Event('bel_jadwal_updated'));
   }
@@ -2953,6 +3029,9 @@ class DatabaseService {
 
     const filtered = accounts.filter((a) => a.id !== schoolId);
     this.setItem(STORAGE_KEYS.SCHOOL_ACCOUNTS, filtered);
+    this.deleteFromFirestore('superadmin', 'school_accounts', schoolId).catch((e) =>
+      console.warn('[deleteSchoolAccount Firestore Error]:', e)
+    );
 
     this.addSuperAdminLog({
       action: 'delete_school',
@@ -3389,6 +3468,18 @@ class DatabaseService {
     const activeSchoolId = this.getActiveSchoolId();
     const schoolId = targetItem?.schoolId || activeSchoolId;
     await this.deleteFromFirestore(schoolId, 'ujian_online', id);
+
+    // Also remove any submitted student answers for this exam
+    const allAnswers = this.getItem<JawabanSiswaUjian[]>(STORAGE_KEYS.JAWABAN_UJIAN, []);
+    const examAnswers = allAnswers.filter((j) => j.ujianId === id);
+    if (examAnswers.length > 0) {
+      const remainingAnswers = allAnswers.filter((j) => j.ujianId !== id);
+      this.setItem(STORAGE_KEYS.JAWABAN_UJIAN, remainingAnswers);
+      examAnswers.forEach((ans) => {
+        this.deleteFromFirestore(schoolId, 'jawaban_ujian', ans.id).catch(() => {});
+      });
+      window.dispatchEvent(new CustomEvent('jawaban_ujian_updated', { detail: remainingAnswers }));
+    }
 
     window.dispatchEvent(new CustomEvent('ujian_online_updated', { detail: updated }));
   }

@@ -36,6 +36,7 @@ export const BelOtomatisView: React.FC = () => {
   
   // UI states
   const [isDeleting, setIsDeleting] = useState<string | null>(null);
+  const [showPresetConfirm, setShowPresetConfirm] = useState<boolean>(false);
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [successMessage, setSuccessMessage] = useState<string>('');
   const [errorMessage, setErrorMessage] = useState<string>('');
@@ -200,9 +201,10 @@ export const BelOtomatisView: React.FC = () => {
   };
 
   const handleApplyPresetStandar = () => {
-    if (!window.confirm('Terapkan jadwal standar sekolah dasar nasional (Jam Masuk, 2 Sesi Istirahat, dan Jam Pulang)?')) {
-      return;
-    }
+    setShowPresetConfirm(true);
+  };
+
+  const confirmApplyPresetStandar = () => {
     const presets: BelJadwal[] = [
       {
         id: 'bel-std-1',
@@ -271,6 +273,7 @@ export const BelOtomatisView: React.FC = () => {
 
     db.saveBulkBelJadwal(presets);
     setJadwalList(db.getBelJadwalList());
+    setShowPresetConfirm(false);
     setSuccessMessage('Jadwal preset standar sekolah berhasil diterapkan dan disimpan ke database!');
     setTimeout(() => setSuccessMessage(''), 4000);
   };
@@ -628,12 +631,29 @@ export const BelOtomatisView: React.FC = () => {
       </div>
 
       <ConfirmModal
-        isOpen={!!isDeleting}
-        title="Hapus Jadwal Bel"
-        message="Apakah Anda yakin ingin menghapus jadwal bel ini secara permanen dari database sekolah?"
-        confirmLabel="Hapus"
+        isOpen={Boolean(isDeleting)}
+        title="Konfirmasi Hapus Jadwal Bel"
+        message={
+          isDeleting
+            ? `Apakah Anda yakin ingin menghapus jadwal "${jadwalList.find((j) => j.id === isDeleting)?.keterangan || 'ini'}" (${jadwalList.find((j) => j.id === isDeleting)?.waktu || ''} WIB) secara permanen dari server database?`
+            : 'Apakah Anda yakin ingin menghapus jadwal bel ini?'
+        }
+        confirmText="Hapus Jadwal"
+        cancelText="Batal"
+        isDestructive={true}
         onConfirm={handleDelete}
         onCancel={() => setIsDeleting(null)}
+      />
+
+      <ConfirmModal
+        isOpen={showPresetConfirm}
+        title="Terapkan Jadwal Preset Standar"
+        message="Apakah Anda yakin ingin menerapkan 7 jadwal bel standar sekolah dasar nasional (Jam Masuk, 2 Sesi Istirahat, dan Jam Pulang)? Jadwal baru akan otomatis disinkronkan ke database."
+        confirmText="Terapkan Preset"
+        cancelText="Batal"
+        isDestructive={false}
+        onConfirm={confirmApplyPresetStandar}
+        onCancel={() => setShowPresetConfirm(false)}
       />
     </div>
   );

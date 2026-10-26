@@ -14,6 +14,7 @@ import {
   LkpdAktivitasItem,
   UjianOnline,
 } from '../../types';
+import { ConfirmModal } from '../common/ConfirmModal';
 import Markdown from 'react-markdown';
 import {
   Sparkles,
@@ -172,6 +173,11 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
     type: 'soal' | 'modul' | 'materi';
     id: string;
     title: string;
+  } | null>(null);
+  const [deleteQuestionConfirm, setDeleteQuestionConfirm] = useState<{
+    type: 'pg' | 'esai';
+    index: number;
+    questionText: string;
   } | null>(null);
 
   useEffect(() => {
@@ -445,8 +451,21 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
     showNotification('success', 'Butir soal baru berhasil ditambahkan.');
   };
 
-  const handleDeleteQuestion = (type: 'pg' | 'esai', index: number) => {
+  const requestDeleteQuestion = (type: 'pg' | 'esai', index: number) => {
     if (!hasilSoal) return;
+    const text = type === 'pg'
+      ? hasilSoal.pilihanGanda[index]?.pertanyaan || `Butir Pilihan Ganda #${index + 1}`
+      : hasilSoal.esai[index]?.pertanyaan || `Butir Uraian/Esai #${index + 1}`;
+    setDeleteQuestionConfirm({
+      type,
+      index,
+      questionText: text.length > 90 ? text.slice(0, 90) + '...' : text,
+    });
+  };
+
+  const executeDeleteQuestion = () => {
+    if (!hasilSoal || !deleteQuestionConfirm) return;
+    const { type, index } = deleteQuestionConfirm;
     const updated = { ...hasilSoal };
     if (type === 'pg') {
       updated.pilihanGanda = updated.pilihanGanda.filter((_, i) => i !== index).map((q, i) => ({ ...q, nomor: i + 1 }));
@@ -455,7 +474,8 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
     }
     setHasilSoal(updated);
     db.saveNaskahSoal(updated);
-    showNotification('success', 'Butir soal berhasil dihapus.');
+    showNotification('success', `Butir soal #${index + 1} (${type === 'pg' ? 'Pilihan Ganda' : 'Esai'}) berhasil dihapus.`);
+    setDeleteQuestionConfirm(null);
   };
 
   // Regenerate single question using AI
@@ -1606,9 +1626,9 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={() => handleDeleteQuestion('pg', idx)}
+                                  onClick={() => requestDeleteQuestion('pg', idx)}
                                   className="p-1 rounded-lg hover:bg-rose-50 text-slate-400 hover:text-rose-600 cursor-pointer"
-                                  title="Hapus Butir Soal"
+                                  title="Hapus Butir Soal Pilihan Ganda"
                                 >
                                   <Trash2 className="w-3.5 h-3.5" />
                                 </button>
@@ -1707,8 +1727,9 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
                                 </button>
                                 <button
                                   type="button"
-                                  onClick={() => handleDeleteQuestion('esai', idx)}
+                                  onClick={() => requestDeleteQuestion('esai', idx)}
                                   className="p-1 rounded-lg hover:bg-rose-50 text-slate-400 hover:text-rose-600 cursor-pointer"
+                                  title="Hapus Butir Soal Uraian / Esai"
                                 >
                                   <Trash2 className="w-3.5 h-3.5" />
                                 </button>
@@ -2899,6 +2920,17 @@ export const AsistenAiGuruView: React.FC<AsistenAiGuruViewProps> = ({ currentUse
           </div>
         </div>
       )}
+      {/* Modal Dialog Konfirmasi Hapus Butir Soal */}
+      <ConfirmModal
+        isOpen={!!deleteQuestionConfirm}
+        title={`Hapus Butir Soal ${deleteQuestionConfirm?.type === 'pg' ? 'Pilihan Ganda' : 'Uraian/Esai'} #${(deleteQuestionConfirm?.index ?? 0) + 1}`}
+        message={`Apakah Anda yakin ingin menghapus butir soal: "${deleteQuestionConfirm?.questionText}"? Nomor soal lainnya akan disesuaikan secara otomatis.`}
+        confirmText="Ya, Hapus Soal"
+        cancelText="Batal"
+        isDanger={true}
+        onConfirm={executeDeleteQuestion}
+        onCancel={() => setDeleteQuestionConfirm(null)}
+      />
     </div>
   );
 };

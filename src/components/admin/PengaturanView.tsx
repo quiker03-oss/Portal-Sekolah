@@ -2,10 +2,12 @@ import React, { useState } from 'react';
 import { db } from '../../services/database';
 import { Settings } from '../../types';
 import { compressImage } from '../../utils/imageCompressor';
+import { ConfirmModal } from '../common/ConfirmModal';
 import {
   Settings as SettingsIcon,
   Save,
   CheckCircle,
+  AlertCircle,
   Upload,
   Download,
   RotateCcw,
@@ -19,7 +21,10 @@ import {
 export const PengaturanView: React.FC = () => {
   const [settings, setSettings] = useState<Settings>(db.getSettings());
   const [successMsg, setSuccessMsg] = useState('');
+  const [errorMsg, setErrorMsg] = useState('');
   const [isUploadingLogo, setIsUploadingLogo] = useState(false);
+  const [showResetModal, setShowResetModal] = useState(false);
+  const [pendingRestoreJson, setPendingRestoreJson] = useState<string | null>(null);
 
   // Form states
   const [logoUrl, setLogoUrl] = useState(settings.logoUrl);
@@ -45,7 +50,8 @@ export const PengaturanView: React.FC = () => {
       }
     } catch (err) {
       console.error('Logo upload error:', err);
-      alert('Gagal memproses logo. Silakan pilih berkas lain.');
+      setErrorMsg('Gagal memproses logo. Silakan pilih berkas gambar lain.');
+      setTimeout(() => setErrorMsg(''), 4000);
     } finally {
       setIsUploadingLogo(false);
       e.target.value = '';
@@ -83,44 +89,48 @@ export const PengaturanView: React.FC = () => {
     link.click();
     document.body.removeChild(link);
     URL.revokeObjectURL(url);
+    setSuccessMsg('Berkas backup database berhasil diunduh.');
+    setTimeout(() => setSuccessMsg(''), 3000);
   };
 
-  const handleRestoreDatabase = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleFileRestoreSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
-
-    if (
-      !window.confirm(
-        'Peringatan: Me-restore database akan menimpa seluruh data saat ini dengan data cadangan. Lanjutkan?'
-      )
-    ) {
-      return;
-    }
 
     const reader = new FileReader();
     reader.onload = (evt) => {
       const jsonContent = evt.target?.result as string;
-      const success = db.restoreDatabase(jsonContent);
-      if (success) {
-        alert('Database berhasil dipulihkan!');
-        window.location.reload();
-      } else {
-        alert('Gagal memulihkan database. Format berkas JSON tidak valid.');
+      try {
+        JSON.parse(jsonContent);
+        setPendingRestoreJson(jsonContent);
+      } catch {
+        setErrorMsg('Format berkas backup tidak valid (harus file JSON valid).');
+        setTimeout(() => setErrorMsg(''), 4000);
       }
     };
     reader.readAsText(file);
+    e.target.value = '';
   };
 
-  const handleResetDatabase = () => {
-    if (
-      window.confirm(
-        'PERINGATAN: Anda yakin ingin mereset seluruh data ke data awal pabrik (Default)? Semua data presensi dan siswa baru akan dikembalikan ke data percontohan.'
-      )
-    ) {
-      db.resetToFactory();
-      alert('Sistem berhasil direset ke pengaturan default.');
-      window.location.reload();
+  const executeRestore = () => {
+    if (!pendingRestoreJson) return;
+    const success = db.restoreDatabase(pendingRestoreJson);
+    if (success) {
+      setSuccessMsg('Database berhasil dipulihkan! Sistem memuat ulang data...');
+      setPendingRestoreJson(null);
+      setTimeout(() => window.location.reload(), 1200);
+    } else {
+      setErrorMsg('Gagal memulihkan database. Format berkas tidak kompatibel.');
+      setPendingRestoreJson(null);
+      setTimeout(() => setErrorMsg(''), 4000);
     }
+  };
+
+  const executeReset = () => {
+    db.resetToFactory();
+    setShowResetModal(false);
+    setSuccessMsg('Sistem berhasil direset ke setelan awal pabrik.');
+    setTimeout(() => window.location.reload(), 1200);
   };
 
   return (
@@ -141,6 +151,13 @@ export const PengaturanView: React.FC = () => {
         <div className="p-4 bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-2xl text-xs font-semibold flex items-center gap-3 animate-in fade-in">
           <CheckCircle className="w-5 h-5 text-emerald-600 flex-shrink-0" />
           <span>{successMsg}</span>
+        </div>
+      )}
+
+      {errorMsg && (
+        <div className="p-4 bg-rose-50 border border-rose-200 text-rose-800 rounded-2xl text-xs font-semibold flex items-center gap-3 animate-in fade-in">
+          <AlertCircle className="w-5 h-5 text-rose-600 flex-shrink-0" />
+          <span>{errorMsg}</span>
         </div>
       )}
 
@@ -317,7 +334,7 @@ export const PengaturanView: React.FC = () => {
                 type="file"
                 id="input-restore-database"
                 accept=".json"
-                onChange={handleRestoreDatabase}
+                onChange={handleFileRestoreSelect}
                 className="hidden"
               />
               <label
@@ -342,7 +359,8 @@ export const PengaturanView: React.FC = () => {
               </p>
             </div>
             <button
-              onClick={handleResetDatabase}
+              type="button"
+              onClick={() => setShowResetModal(true)}
               className="w-full py-2 bg-rose-700 hover:bg-rose-800 text-white rounded-xl text-xs font-semibold shadow-xs flex items-center justify-center gap-1.5 cursor-pointer"
             >
               <RotateCcw className="w-4 h-4" />
@@ -351,6 +369,30 @@ export const PengaturanView: React.FC = () => {
           </div>
         </div>
       </div>
+
+      {/* Modal Dialog Konfirmasi Restore Database */}
+      <ConfirmModal
+        isOpen={!!pendingRestoreJson}
+        title="Konfirmasi Pemulihan Database (Restore)"
+        message="PERINGATAN: Memulihkan database dari berkas backup akan menimpa seluruh data yang ada saat ini dengan data dari cadangan tersebut. Apakah Anda yakin ingin melanjutkan?"
+        confirmText="Ya, Pulihkan Sekarang"
+        cancelText="Batal"
+        isDanger={true}
+        onConfirm={executeRestore}
+        onCancel={() => setPendingRestoreJson(null)}
+      />
+
+      {/* Modal Dialog Konfirmasi Reset Database */}
+      <ConfirmModal
+        isOpen={showResetModal}
+        title="Konfirmasi Reset Sistem ke Setelan Awal"
+        message="PERINGATAN: Tindakan ini akan mengembalikan seluruh data presensi, akun, dan ujian ke data bawaan awal pabrik. Pastikan Anda telah mengunduh berkas backup jika data ini masih diperlukan. Lanjutkan proses reset?"
+        confirmText="Ya, Reset ke Awal"
+        cancelText="Batal"
+        isDanger={true}
+        onConfirm={executeReset}
+        onCancel={() => setShowResetModal(false)}
+      />
     </div>
   );
 };

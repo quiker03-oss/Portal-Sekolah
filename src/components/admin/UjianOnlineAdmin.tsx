@@ -74,6 +74,7 @@ import {
 } from 'lucide-react';
 import { PrintRekapModal } from './PrintRekapModal';
 import { KuisGameInteraktifView } from '../ujian/KuisGameInteraktifView';
+import { ConfirmModal } from '../common/ConfirmModal';
 
 interface UjianOnlineAdminProps {
   currentUser: User;
@@ -164,6 +165,26 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser,
   const [targetCorrectionSoal, setTargetCorrectionSoal] = useState<SoalUjian | null>(null);
   const [newKeyInput, setNewKeyInput] = useState<string>('');
   const [correctionReason, setCorrectionReason] = useState<string>('');
+
+  // Delete and Action Confirmation Modals State
+  const [deleteExamTarget, setDeleteExamTarget] = useState<UjianOnline | null>(null);
+  const [isDeletingExam, setIsDeletingExam] = useState<boolean>(false);
+  const [duplicateExamTarget, setDuplicateExamTarget] = useState<UjianOnline | null>(null);
+  const [deleteQuestionTarget, setDeleteQuestionTarget] = useState<SoalUjian | null>(null);
+  const [resetSessionTarget, setResetSessionTarget] = useState<{
+    ujianId: string;
+    siswaId: string;
+    namaSiswa: string;
+  } | null>(null);
+  const [forceSubmitTarget, setForceSubmitTarget] = useState<{
+    ujianId: string;
+    siswaId: string;
+    namaSiswa: string;
+  } | null>(null);
+  const [toastFeedback, setToastFeedback] = useState<{
+    type: 'success' | 'error';
+    text: string;
+  } | null>(null);
 
   // Initial load
   useEffect(() => {
@@ -396,10 +417,28 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser,
   };
 
   // Handle duplicate exam
-  const handleDuplicateExam = async (id: string) => {
-    if (confirm('Duplikasi naskah ujian ini sebagai draf baru?')) {
-      await db.duplicateUjianOnline(id);
+  const handleDuplicateExam = (exam: UjianOnline) => {
+    setDuplicateExamTarget(exam);
+  };
+
+  const confirmDuplicateExam = async () => {
+    if (!duplicateExamTarget) return;
+    try {
+      await db.duplicateUjianOnline(duplicateExamTarget.id);
       loadAllData();
+      setToastFeedback({
+        type: 'success',
+        text: `Salinan naskah "${duplicateExamTarget.judul}" berhasil dibuat.`,
+      });
+      setTimeout(() => setToastFeedback(null), 3000);
+    } catch (err: any) {
+      setToastFeedback({
+        type: 'error',
+        text: `Gagal menduplikasi ujian: ${err?.message || 'Error'}`,
+      });
+      setTimeout(() => setToastFeedback(null), 4000);
+    } finally {
+      setDuplicateExamTarget(null);
     }
   };
 
@@ -410,14 +449,30 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser,
   };
 
   // Handle delete exam
-  const handleDeleteExam = async (id: string, judul: string) => {
-    if (
-      confirm(
-        `Apakah Anda yakin ingin menghapus ujian "${judul}"? Seluruh data hasil ujian siswa terkait juga akan terhapus.`
-      )
-    ) {
-      await db.deleteUjianOnline(id);
+  const handleDeleteExam = (exam: UjianOnline) => {
+    setDeleteExamTarget(exam);
+  };
+
+  const confirmDeleteExam = async () => {
+    if (!deleteExamTarget) return;
+    setIsDeletingExam(true);
+    try {
+      await db.deleteUjianOnline(deleteExamTarget.id);
       loadAllData();
+      setToastFeedback({
+        type: 'success',
+        text: `Naskah ujian "${deleteExamTarget.judul}" dan seluruh data terkait berhasil dihapus.`,
+      });
+      setTimeout(() => setToastFeedback(null), 4000);
+      setDeleteExamTarget(null);
+    } catch (err: any) {
+      setToastFeedback({
+        type: 'error',
+        text: `Gagal menghapus ujian: ${err?.message || 'Terjadi kesalahan sistem'}`,
+      });
+      setTimeout(() => setToastFeedback(null), 5000);
+    } finally {
+      setIsDeletingExam(false);
     }
   };
 
@@ -507,21 +562,36 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser,
 
   // Proctoring Action: Reset student session
   const handleResetSession = (ujianId: string, siswaId: string, namaSiswa: string) => {
-    if (
-      confirm(
-        `PERINGATAN: Apakah Anda yakin ingin mereset sesi ujian untuk ${namaSiswa}? Riwayat jawaban dan status saat ini akan dihapus agar siswa dapat memulai ulang dari awal.`
-      )
-    ) {
-      db.resetSesiSiswa(ujianId, siswaId);
-      setJawabanList(db.getJawabanUjianList(ujianId));
-    }
+    setResetSessionTarget({ ujianId, siswaId, namaSiswa });
+  };
+
+  const confirmResetSession = () => {
+    if (!resetSessionTarget) return;
+    db.resetSesiSiswa(resetSessionTarget.ujianId, resetSessionTarget.siswaId);
+    setJawabanList(db.getJawabanUjianList(resetSessionTarget.ujianId));
+    setToastFeedback({
+      type: 'success',
+      text: `Sesi ujian siswa ${resetSessionTarget.namaSiswa} berhasil direset.`,
+    });
+    setTimeout(() => setToastFeedback(null), 3500);
+    setResetSessionTarget(null);
   };
 
   // Proctoring Action: Force Submit
   const handleForceSubmit = (ujianId: string, siswaId: string) => {
     const session = db.getJawabanSiswaByUjian(ujianId, siswaId);
     if (!session || !pengawasanUjianTarget) return;
-    if (confirm(`Paksa kumpulkan lembar ujian siswa ${session.namaSiswa}?`)) {
+    setForceSubmitTarget({
+      ujianId,
+      siswaId,
+      namaSiswa: session.namaSiswa || 'Siswa',
+    });
+  };
+
+  const confirmForceSubmit = () => {
+    if (!forceSubmitTarget || !pengawasanUjianTarget) return;
+    const session = db.getJawabanSiswaByUjian(forceSubmitTarget.ujianId, forceSubmitTarget.siswaId);
+    if (session) {
       const grading = db.gradeJawabanSiswa(pengawasanUjianTarget, session.jawaban);
       const updated: JawabanSiswaUjian = {
         ...session,
@@ -535,8 +605,14 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser,
         updatedAt: new Date().toISOString(),
       };
       db.saveJawabanSiswaUjian(updated);
-      setJawabanList(db.getJawabanUjianList(ujianId));
+      setJawabanList(db.getJawabanUjianList(forceSubmitTarget.ujianId));
+      setToastFeedback({
+        type: 'success',
+        text: `Lembar ujian siswa ${forceSubmitTarget.namaSiswa} berhasil dikumpulkan.`,
+      });
+      setTimeout(() => setToastFeedback(null), 3500);
     }
+    setForceSubmitTarget(null);
   };
 
   // File Upload and AI Parser for Word / PDF
@@ -767,14 +843,36 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser,
   };
 
   // Delete question
-  const handleDeleteQuestion = (id: string) => {
-    if (!activeUjian) return;
-    const filtered = activeUjian.soalList.filter((q) => q.id !== id);
+  const handleDeleteQuestion = (soal: SoalUjian) => {
+    setDeleteQuestionTarget(soal);
+  };
+
+  const confirmDeleteQuestion = async () => {
+    if (!deleteQuestionTarget || !activeUjian) return;
+    const filtered = activeUjian.soalList.filter((q) => q.id !== deleteQuestionTarget.id);
     const reindexed = filtered.map((q, idx) => ({ ...q, nomor: idx + 1 }));
-    setActiveUjian({
+    const updatedExam: UjianOnline = {
       ...activeUjian,
       soalList: reindexed,
+    };
+    setActiveUjian(updatedExam);
+
+    // If the exam is already saved in the database, synchronize deletion immediately
+    if (ujianList.some((u) => u.id === activeUjian.id)) {
+      try {
+        await db.saveUjianOnline(updatedExam);
+        loadAllData();
+      } catch (e) {
+        console.warn('Sync exam question deletion warn:', e);
+      }
+    }
+
+    setToastFeedback({
+      type: 'success',
+      text: `Butir Soal #${deleteQuestionTarget.nomor} berhasil dihapus.`,
     });
+    setTimeout(() => setToastFeedback(null), 3000);
+    setDeleteQuestionTarget(null);
   };
 
   // Image upload inside question modal
@@ -1455,14 +1553,14 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser,
                           <Edit className="w-4 h-4" />
                         </button>
                         <button
-                          onClick={() => handleDuplicateExam(exam.id)}
+                          onClick={() => handleDuplicateExam(exam)}
                           title="Duplikasi Ujian"
                           className="p-1.5 sm:p-2 rounded-xl text-slate-600 hover:bg-slate-200 transition cursor-pointer"
                         >
                           <Copy className="w-4 h-4" />
                         </button>
                         <button
-                          onClick={() => handleDeleteExam(exam.id, exam.judul)}
+                          onClick={() => handleDeleteExam(exam)}
                           title="Hapus Ujian"
                           className="p-1.5 sm:p-2 rounded-xl text-red-500 hover:bg-red-50 transition cursor-pointer"
                         >
@@ -2081,7 +2179,7 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser,
                           </button>
                           <button
                             type="button"
-                            onClick={() => handleDeleteQuestion(soal.id)}
+                            onClick={() => handleDeleteQuestion(soal)}
                             title="Hapus Soal"
                             className="p-1.5 rounded-lg text-red-500 hover:bg-red-50 cursor-pointer"
                           >
@@ -4073,6 +4171,93 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser,
             }}
             onExit={() => setPreviewGameQuiz(null)}
           />
+        </div>
+      )}
+      {/* Modal Konfirmasi Hapus Ujian */}
+      <ConfirmModal
+        isOpen={Boolean(deleteExamTarget)}
+        title="Konfirmasi Hapus Naskah Ujian"
+        message={`Apakah Anda yakin ingin menghapus naskah ujian "${deleteExamTarget?.judul}"? Seluruh butir soal dan data nilai/lembar jawaban siswa terkait ujian ini akan dihapus secara permanen dari server database.`}
+        confirmText={isDeletingExam ? 'Menghapus...' : 'Hapus Ujian'}
+        cancelText="Batal"
+        isDestructive={true}
+        onConfirm={confirmDeleteExam}
+        onCancel={() => {
+          if (!isDeletingExam) setDeleteExamTarget(null);
+        }}
+      />
+
+      {/* Modal Konfirmasi Hapus Butir Soal */}
+      <ConfirmModal
+        isOpen={Boolean(deleteQuestionTarget)}
+        title="Konfirmasi Hapus Butir Soal"
+        message={`Apakah Anda yakin ingin menghapus Butir Soal #${deleteQuestionTarget?.nomor} (${deleteQuestionTarget?.pertanyaan ? deleteQuestionTarget.pertanyaan.slice(0, 80) : ''}...)?`}
+        confirmText="Hapus Soal"
+        cancelText="Batal"
+        isDestructive={true}
+        onConfirm={confirmDeleteQuestion}
+        onCancel={() => setDeleteQuestionTarget(null)}
+      />
+
+      {/* Modal Konfirmasi Duplikasi Ujian */}
+      <ConfirmModal
+        isOpen={Boolean(duplicateExamTarget)}
+        title="Duplikasi Naskah Ujian"
+        message={`Apakah Anda ingin membuat salinan naskah ujian "${duplicateExamTarget?.judul}" sebagai draf baru?`}
+        confirmText="Duplikasi"
+        cancelText="Batal"
+        isDestructive={false}
+        onConfirm={confirmDuplicateExam}
+        onCancel={() => setDuplicateExamTarget(null)}
+      />
+
+      {/* Modal Konfirmasi Reset Sesi Siswa */}
+      <ConfirmModal
+        isOpen={Boolean(resetSessionTarget)}
+        title="Konfirmasi Reset Sesi Pengerjaan"
+        message={`PERINGATAN: Apakah Anda yakin ingin mereset sesi ujian untuk ${resetSessionTarget?.namaSiswa}? Riwayat lembar jawaban saat ini akan dihapus agar siswa dapat memulai pengerjaan ulang dari awal.`}
+        confirmText="Reset Sesi"
+        cancelText="Batal"
+        isDestructive={true}
+        onConfirm={confirmResetSession}
+        onCancel={() => setResetSessionTarget(null)}
+      />
+
+      {/* Modal Konfirmasi Paksa Kumpulkan */}
+      <ConfirmModal
+        isOpen={Boolean(forceSubmitTarget)}
+        title="Konfirmasi Paksa Kumpulkan Ujian"
+        message={`Apakah Anda yakin ingin menghentikan dan mengumpulkan lembar ujian siswa ${forceSubmitTarget?.namaSiswa} secara paksa? Sistem akan langsung menilai seluruh jawaban yang sudah terisi.`}
+        confirmText="Paksa Kumpulkan"
+        cancelText="Batal"
+        isDestructive={true}
+        onConfirm={confirmForceSubmit}
+        onCancel={() => setForceSubmitTarget(null)}
+      />
+
+      {/* Toast Feedback */}
+      {toastFeedback && (
+        <div className="fixed bottom-6 right-6 z-50 animate-in fade-in slide-in-from-bottom-3 duration-200">
+          <div
+            className={`px-4 py-3 rounded-2xl shadow-xl flex items-center gap-3 border text-xs font-semibold ${
+              toastFeedback.type === 'success'
+                ? 'bg-emerald-50 text-emerald-900 border-emerald-200'
+                : 'bg-red-50 text-red-900 border-red-200'
+            }`}
+          >
+            {toastFeedback.type === 'success' ? (
+              <CheckCircle2 className="w-4 h-4 text-emerald-600 shrink-0" />
+            ) : (
+              <AlertCircle className="w-4 h-4 text-red-600 shrink-0" />
+            )}
+            <span>{toastFeedback.text}</span>
+            <button
+              onClick={() => setToastFeedback(null)}
+              className="ml-2 text-slate-400 hover:text-slate-600 cursor-pointer"
+            >
+              <X className="w-3.5 h-3.5" />
+            </button>
+          </div>
         </div>
       )}
     </div>
