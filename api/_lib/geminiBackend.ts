@@ -1554,3 +1554,337 @@ Format WAJIB JSON:
     lkpdData: parsed.lkpdData || null,
   };
 }
+
+// =========================================================================
+// 4. PARSER GAMBAR NASKAH UJIAN (JPG / JPEG / PNG / SCAN MOBILE OCR)
+// =========================================================================
+export async function handleParseImage(
+  fileBase64: string,
+  fileName: string = "naskah-ujian.jpg",
+  mimeType: string = "image/jpeg"
+) {
+  if (!fileBase64) {
+    return {
+      success: false,
+      error: "Data gambar berkas (fileBase64) tidak ditemukan dalam permintaan.",
+      soalList: [],
+    };
+  }
+
+  if (!process.env.GEMINI_API_KEY) {
+    return {
+      success: false,
+      code: "GEMINI_KEY_NOT_CONFIGURED",
+      error: "Variabel lingkungan GEMINI_API_KEY belum dikonfigurasi di server.",
+      soalList: [],
+    };
+  }
+
+  const cleanBase64 = fileBase64.replace(/^data:image\/[a-zA-Z+]+;base64,/, "");
+  let validMime = mimeType;
+  if (!validMime || validMime === "application/octet-stream") {
+    const ext = fileName.split(".").pop()?.toLowerCase();
+    if (ext === "png") validMime = "image/png";
+    else if (ext === "webp") validMime = "image/webp";
+    else validMime = "image/jpeg";
+  }
+
+  const ai = getGeminiClient();
+
+  const prompt = `Anda adalah sistem OCR dan analisis naskah ujian sekolah tingkat profesional di Indonesia.
+Analisis gambar naskah ujian terlampir secara teliti (hasil scan atau foto kamera HP/laptop).
+
+ATURAN WAJIB INTEGRITAS NASKAH SOAL:
+1. JANGAN PERNAH MENGARANG ATAU MERUBAH teks soal, angka, rumus, atau pilihan jawaban dari naskah asli!
+2. Ekstrak butir soal secara berurutan sesuai nomor asli yang tertera pada lembar dokumen (1, 2, 3, ...).
+3. Kenali jenis soal:
+   - 'pilihan_ganda': Pilihan tunggal A, B, C, D, E.
+   - 'pilihan_ganda_kompleks': Jawaban lebih dari 1 pilihan benar.
+   - 'benar_salah': Pernyataan Benar/Salah.
+   - 'menjodohkan': Pasangan kolom kiri dan kanan.
+   - 'isian': Isian singkat.
+   - 'esai': Soal uraian/penjelasan/hitungan.
+4. DETEKSI KUNCI JAWABAN DARI DOKUMEN ASLI:
+   - Jika lembar memuat kunci jawaban (misal tanda centang tebal, lingkaran, atau tabel kunci di bagian bawah):
+     set 'kunciResmiDitemukan': true dan masukkan nilai kuncinya.
+   - Jika TIDAK ADA kunci jawaban di lembar naskah:
+     set 'kunciResmiDitemukan': false, 'kunciJawaban': "", dan berikan saran jawaban Anda di field 'saranKunciAI'. Set 'perluVerifikasi': true, 'catatanVerifikasi': "Kunci resmi tidak ditemukan di dokumen (tersedia rekomendasi AI)".
+5. UNTUK SOAL ESAI:
+   - Ekstrak teks pertanyaan lengkap.
+   - Ekstrak contoh jawaban atau rubrik penilaian jika tertulis di dokumen.
+   - Tentukan nilai bobot maksimum yang wajar (default 2 atau 5).
+   - Ekstrak indikator atau kata kunci penting yang diharapkan muncul.
+6. FORMAT OUTPUT HARUS JSON VALID:
+{
+  "judul": "string judul naskah",
+  "mataPelajaran": "string mata pelajaran",
+  "kelas": "string kelas",
+  "soalList": [
+    {
+      "nomor": 1,
+      "tipe": "pilihan_ganda | pilihan_ganda_kompleks | benar_salah | menjodohkan | isian | esai",
+      "pertanyaan": "teks pertanyaan lengkap",
+      "pilihan": {
+        "A": "teks A",
+        "B": "teks B",
+        "C": "teks C",
+        "D": "teks D"
+      },
+      "kunciJawaban": "A",
+      "kunciResmiDitemukan": true,
+      "saranKunciAI": "A",
+      "contohJawaban": "uraian jawaban ideal jika esai",
+      "rubrikPenilaian": "pedoman penskoran jika esai",
+      "indikatorWajib": ["kata kunci 1", "kata kunci 2"],
+      "pembahasan": "penjelasan singkat",
+      "bobot": 1,
+      "perluVerifikasi": false,
+      "catatanVerifikasi": ""
+    }
+  ]
+}`;
+
+  const responseText = await generateContentWithFallback(ai, {
+    contents: [
+      {
+        inlineData: {
+          mimeType: validMime,
+          data: cleanBase64,
+        },
+      },
+      { text: prompt },
+    ],
+    config: {
+      responseMimeType: "application/json",
+    },
+  });
+
+  const parsed = cleanAndParseJson(responseText);
+
+  const questions = (parsed.soalList || []).map((q: any, idx: number) => ({
+    id: `soal-${Date.now()}-${idx + 1}`,
+    nomor: q.nomor || idx + 1,
+    tipe: q.tipe || "pilihan_ganda",
+    pertanyaan: q.pertanyaan || "",
+    pilihan: q.pilihan || undefined,
+    pilihanKompleks: q.pilihanKompleks || (q.tipe === 'pilihan_ganda_kompleks' ? q.pilihan : undefined),
+    kunciPilihanKompleks: q.kunciPilihanKompleks || undefined,
+    pasanganMenjodohkan: q.pasanganMenjodohkan || undefined,
+    kunciMenjodohkan: q.kunciMenjodohkan || undefined,
+    kunciJawaban: q.kunciResmiDitemukan ? (q.kunciJawaban || "") : (q.saranKunciAI || q.kunciJawaban || ""),
+    kunciResmiDitemukan: Boolean(q.kunciResmiDitemukan),
+    saranKunciAI: q.saranKunciAI || undefined,
+    contohJawaban: q.contohJawaban || (q.tipe === 'esai' ? q.kunciJawaban : undefined),
+    rubrikPenilaian: q.rubrikPenilaian || undefined,
+    indikatorWajib: Array.isArray(q.indikatorWajib) ? q.indikatorWajib : undefined,
+    pembahasan: q.pembahasan || "",
+    bobot: Number(q.bobot) > 0 ? Number(q.bobot) : (q.tipe === 'esai' ? 2 : 1),
+    nilaiMaksimum: Number(q.bobot) > 0 ? Number(q.bobot) : (q.tipe === 'esai' ? 2 : 1),
+    perluVerifikasi: Boolean(q.perluVerifikasi || !q.kunciResmiDitemukan),
+    catatanVerifikasi:
+      q.catatanVerifikasi ||
+      (!q.kunciResmiDitemukan
+        ? "Kunci resmi tidak ditemukan di dokumen; verifikasi kunci rekomendasi AI"
+        : undefined),
+  }));
+
+  return {
+    success: true,
+    judul: parsed.judul || fileName.replace(/\.[^/.]+$/, ""),
+    mataPelajaran: parsed.mataPelajaran || "",
+    kelas: parsed.kelas || "",
+    soalList: questions,
+    totalSoal: questions.length,
+  };
+}
+
+// =========================================================================
+// 5. MATCH KUNCI JAWABAN TERPISAH KE SOAL YANG SUDAH ADA
+// =========================================================================
+export async function handleMatchAnswerKeys(
+  soalList: any[],
+  keySource: {
+    keyFileBase64?: string;
+    keyMimeType?: string;
+    keyText?: string;
+    fileName?: string;
+  }
+) {
+  if (!soalList || !soalList.length) {
+    throw new Error("Daftar soal kosong, tidak dapat mencocokkan kunci.");
+  }
+
+  const ai = getGeminiClient();
+
+  const soalSummary = soalList.map((s, idx) => ({
+    nomor: s.nomor || idx + 1,
+    tipe: s.tipe,
+    pertanyaan: s.pertanyaan?.slice(0, 100),
+    kunciSaatIni: s.kunciJawaban || "",
+  }));
+
+  const prompt = `Anda adalah asisten pemeriksa kunci jawaban ujian sekolah.
+Tugas Anda adalah membaca dokumen atau teks kunci jawaban berikut, lalu mencocokkannya secara tepat berdasarkan nomor soal pada daftar butir soal yang sudah ada.
+
+DAFTAR NOMOR SOAL:
+${JSON.stringify(soalSummary, null, 2)}
+
+ATURAN PENCOCOKAN:
+1. Hubungkan kunci berdasarkan NOMOR SOAL (misal: "1. A", "No 2 -> C", "3. B", dsb.).
+2. Untuk soal pilihan ganda, ambil huruf opsi (A, B, C, D, E).
+3. Untuk soal esai/uraian, ambil poin pedoman penskoran, kriteria nilai, atau kalimat jawaban acuan.
+4. Tandai 'kunciResmiDitemukan': true karena berasal langsung dari dokumen kunci guru.
+5. Format output JSON valid:
+{
+  "matchedKeys": [
+    {
+      "nomor": 1,
+      "kunciJawaban": "A",
+      "contohJawaban": "teks jawaban lengkap jika ada",
+      "rubrikPenilaian": "pedoman penskoran jika ada",
+      "pembahasan": "penjelasan jika ada"
+    }
+  ]
+}`;
+
+  const contents: any[] = [];
+
+  if (keySource.keyFileBase64) {
+    const cleanB64 = keySource.keyFileBase64.replace(/^data:[^;]+;base64,/, "");
+    contents.push({
+      inlineData: {
+        mimeType: keySource.keyMimeType || "application/pdf",
+        data: cleanB64,
+      },
+    });
+  }
+
+  if (keySource.keyText) {
+    contents.push({ text: `TEKS KUNCI JAWABAN:\n${keySource.keyText}` });
+  }
+
+  contents.push({ text: prompt });
+
+  const responseText = await generateContentWithFallback(ai, {
+    contents,
+    config: { responseMimeType: "application/json" },
+  });
+
+  const parsed = cleanAndParseJson(responseText);
+  const matchedKeys: any[] = parsed.matchedKeys || [];
+
+  const keyMap = new Map<number, any>();
+  matchedKeys.forEach((k) => {
+    keyMap.set(Number(k.nomor), k);
+  });
+
+  const updatedSoalList = soalList.map((soal, idx) => {
+    const no = soal.nomor || idx + 1;
+    const match = keyMap.get(no);
+    if (match && match.kunciJawaban) {
+      return {
+        ...soal,
+        kunciJawaban: match.kunciJawaban,
+        contohJawaban: match.contohJawaban || soal.contohJawaban || match.kunciJawaban,
+        rubrikPenilaian: match.rubrikPenilaian || soal.rubrikPenilaian,
+        pembahasan: match.pembahasan || soal.pembahasan,
+        kunciResmiDitemukan: true,
+        perluVerifikasi: false,
+        catatanVerifikasi: undefined,
+      };
+    }
+    return soal;
+  });
+
+  return {
+    success: true,
+    totalMatched: matchedKeys.length,
+    soalList: updatedSoalList,
+  };
+}
+
+// =========================================================================
+// 6. PENILAIAN JAWABAN ESAI SISWA BERBANTU AI (SEMANTIC RUBRIC GRADING)
+// =========================================================================
+export async function handleGradeEssay(params: {
+  pertanyaan: string;
+  kunciJawaban?: string;
+  contohJawaban?: string;
+  rubrikPenilaian?: string;
+  indikatorWajib?: string[];
+  variasiJawaban?: string[];
+  jawabanSiswa: string;
+  bobotMaksimal: number;
+}) {
+  const {
+    pertanyaan,
+    kunciJawaban = "",
+    contohJawaban = "",
+    rubrikPenilaian = "",
+    indikatorWajib = [],
+    variasiJawaban = [],
+    jawabanSiswa = "",
+    bobotMaksimal = 10,
+  } = params;
+
+  if (!jawabanSiswa.trim()) {
+    return {
+      success: true,
+      skorRekomendasi: 0,
+      alasanPenilaian: "Siswa tidak mengisi jawaban (jawaban kosong).",
+      indikatorDitemukan: [],
+      saranFeedbackSiswa: "Silakan jawab pertanyaan uraian dengan lengkap sesuai materi yang dipelajari.",
+    };
+  }
+
+  const ai = getGeminiClient();
+
+  const prompt = `Anda adalah penilai esai akademik sekolah berstandar nasional Indonesia yang objektif, mendidik, dan adil.
+Tugas Anda adalah menilai jawaban esai peserta didik berdasarkan rubrik penilaian dan konsep materi acuan yang telah ditetapkan guru.
+
+DATA SOAL & PEDOMAN GURU:
+- Pertanyaan: ${pertanyaan}
+- Kunci / Contoh Jawaban Acuan: ${contohJawaban || kunciJawaban || "Tidak ada acuan spesifik"}
+- Pedoman / Rubrik Penskoran: ${rubrikPenilaian || "Beri skor proporsional sesuai kebenaran konsep"}
+- Indikator Konsep Wajib: ${indikatorWajib.length ? indikatorWajib.join(", ") : "Tidak ditentukan"}
+- Variasi Jawaban Diterima: ${variasiJawaban.length ? variasiJawaban.join(", ") : "Gunakan penalaran makna"}
+- Bobot Skor Maksimum: ${bobotMaksimal}
+
+JAWABAN PESERTA DIDIK:
+"${jawabanSiswa}"
+
+PRINSIP PENILAIAN WAJIB:
+1. PENALARAN MAKNA (SEMANTIK): Terima dan hargai susunan kalimat yang berbeda asalkan inti konsep dan esensinya benar! Jangan menuntut kesamaan kata perkata (harfiah).
+2. KELENGKAPAN INDIKATOR: Jangan berikan nilai penuh jika konsep esensial yang diminta soal terlewat.
+3. ADIL DAN TIDAK NOL INSTAN: Jangan langsung memberikan nilai 0 jika siswa menunjukkan pemahaman sebagian yang relevan. Berikan skor proporsional (misal separuh atau sebagian).
+4. REKOMENDASI TERUKUR: Berikan skor bulat atau kelipatan 0.5 antara 0 sampai ${bobotMaksimal}.
+5. Berikan alasan penilaian yang jelas, sopan, dan transparan untuk dibaca oleh guru.
+
+FORMAT OUTPUT HARUS JSON VALID:
+{
+  "skorRekomendasi": ${bobotMaksimal},
+  "alasanPenilaian": "penjelasan rinci mengapa skor tersebut direkomendasikan kepada guru",
+  "indikatorDitemukan": ["indikator 1 yang berhasil dijawab siswa"],
+  "saranFeedbackSiswa": "catatan edukatif untuk siswa meningkatkan pemahamannya"
+}`;
+
+  const responseText = await generateContentWithFallback(ai, {
+    contents: prompt,
+    config: { responseMimeType: "application/json" },
+  });
+
+  const parsed = cleanAndParseJson(responseText);
+
+  let skor = Number(parsed.skorRekomendasi);
+  if (isNaN(skor) || skor < 0) skor = 0;
+  if (skor > bobotMaksimal) skor = bobotMaksimal;
+
+  return {
+    success: true,
+    skorRekomendasi: Math.round(skor * 10) / 10,
+    alasanPenilaian: parsed.alasanPenilaian || "Dinilai berdasarkan kecocokan konsep dengan rubrik.",
+    indikatorDitemukan: Array.isArray(parsed.indikatorDitemukan) ? parsed.indikatorDitemukan : [],
+    saranFeedbackSiswa: parsed.saranFeedbackSiswa || "Terima kasih telah menjawab.",
+  };
+}
+

@@ -6,6 +6,9 @@ import {
   handleParseDocx,
   handleParsePdf,
   handleParseTextSoal,
+  handleParseImage,
+  handleMatchAnswerKeys,
+  handleGradeEssay,
   handleBuatSoal,
   handleRegenerasiSoal,
   handleBuatModul,
@@ -157,6 +160,85 @@ async function startServer() {
       res.status(500).json({
         success: false,
         error: err.message || "Gagal memproses teks soal.",
+      });
+    }
+  });
+
+  // 7. Endpoint: Parse Soal dari Gambar (JPG / JPEG / PNG / Scan Kamera HP)
+  app.post("/api/ujian/parse-image", async (req, res) => {
+    try {
+      const { fileBase64, fileName = "naskah-ujian.jpg", mimeType = "image/jpeg" } = req.body || {};
+      if (!fileBase64) {
+        return res.status(400).json({ success: false, error: "Data gambar (fileBase64) tidak ditemukan." });
+      }
+      const result = await handleParseImage(fileBase64, fileName, mimeType);
+      res.json(result);
+    } catch (err: any) {
+      console.error("API /api/ujian/parse-image error:", err);
+      res.status(500).json({
+        success: false,
+        error: err.message || "Gagal memproses gambar naskah soal.",
+      });
+    }
+  });
+
+  // 8. Endpoint: Pencocokan Kunci Jawaban Terpisah ke Butir Soal Ujian
+  app.post("/api/ujian/match-answer-keys", async (req, res) => {
+    try {
+      const { soalList, keyFileBase64, keyMimeType, keyText, fileName } = req.body || {};
+      if (!soalList || !Array.isArray(soalList) || soalList.length === 0) {
+        return res.status(400).json({ success: false, error: "Daftar butir soal tidak boleh kosong." });
+      }
+      const result = await handleMatchAnswerKeys(soalList, {
+        keyFileBase64,
+        keyMimeType,
+        keyText,
+        fileName,
+      });
+      res.json(result);
+    } catch (err: any) {
+      console.error("API /api/ujian/match-answer-keys error:", err);
+      res.status(500).json({
+        success: false,
+        error: err.message || "Gagal mencocokkan dokumen kunci jawaban ke butir soal.",
+      });
+    }
+  });
+
+  // 9. Endpoint: Penilaian Jawaban Esai Siswa Menggunakan Rubrik Berbantu AI
+  app.post("/api/ujian/ai-grade-essay", async (req, res) => {
+    try {
+      const {
+        pertanyaan,
+        kunciJawaban,
+        contohJawaban,
+        rubrikPenilaian,
+        indikatorWajib,
+        variasiJawaban,
+        jawabanSiswa,
+        bobotMaksimal,
+      } = req.body || {};
+
+      if (!pertanyaan) {
+        return res.status(400).json({ success: false, error: "Teks pertanyaan wajib disertakan." });
+      }
+
+      const result = await handleGradeEssay({
+        pertanyaan,
+        kunciJawaban,
+        contohJawaban,
+        rubrikPenilaian,
+        indikatorWajib,
+        variasiJawaban,
+        jawabanSiswa: jawabanSiswa || "",
+        bobotMaksimal: Number(bobotMaksimal) || 10,
+      });
+      res.json(result);
+    } catch (err: any) {
+      console.error("API /api/ujian/ai-grade-essay error:", err);
+      res.status(500).json({
+        success: false,
+        error: err.message || "Gagal melakukan penilaian esai dengan AI.",
       });
     }
   });

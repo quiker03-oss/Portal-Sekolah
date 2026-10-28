@@ -552,6 +552,16 @@ export interface SoalUjian {
   perluVerifikasi?: boolean; // flag if OCR/parser is uncertain
   catatanVerifikasi?: string;
   nomorHalaman?: number;
+  // Enhanced Essay, Rubric & Key fields
+  contohJawaban?: string; // Model or expected answer
+  rubrikPenilaian?: string; // Scoring rubric / guidelines
+  kriteriaSkor?: { skor: number; deskripsi: string }[]; // Structured rubric criteria
+  indikatorWajib?: string[]; // Required keywords/concepts
+  variasiJawaban?: string[]; // Acceptable alternative phrasing
+  catatanPenilaian?: string; // Teacher scoring notes
+  nilaiMaksimum?: number; // Max score for this question (defaults to bobot)
+  saranKunciAI?: string; // AI suggested answer when not in document
+  kunciResmiDitemukan?: boolean; // True if key detected directly from source document
 }
 
 export interface RiwayatPerubahanKunci {
@@ -598,6 +608,10 @@ export interface UjianOnline {
   modeTampilan: 'terstruktur' | 'dokumen_asli' | 'satu_per_satu';
   dokumenAsliNama?: string;
   dokumenAsliUrl?: string; // Base64 or Blob
+  dokumenAsliSize?: number;
+  dokumenAsliType?: string;
+  dokumenKunciNama?: string;
+  dokumenKunciUrl?: string;
   riwayatPerubahanKunci?: RiwayatPerubahanKunci[];
   // Mode Interaktif: Ujian Resmi CBT vs Kuis Game Interaktif Edukasi
   modeInteraktif?: 'ujian_resmi' | 'kuis_game';
@@ -629,6 +643,12 @@ export interface DetailJawabanSiswa {
   nilaiEsai?: number;
   catatanGuruEsai?: string;
   dinilaiOlehGuru?: boolean;
+  // AI Rubric Evaluation fields
+  skorRekomendasiAI?: number;
+  alasanPenilaianAI?: string;
+  indikatorDitemukan?: string[];
+  dinilaiOleh?: string;
+  waktuPenilaian?: string;
 }
 
 export interface DeviceSessionInfo {
