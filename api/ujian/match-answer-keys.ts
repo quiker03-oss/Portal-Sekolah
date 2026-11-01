@@ -1,0 +1,62 @@
+import { handleMatchAnswerKeys } from "../_lib/geminiBackend";
+
+export const config = {
+  maxDuration: 60,
+  api: {
+    bodyParser: {
+      sizeLimit: "25mb",
+    },
+  },
+};
+
+export default async function handler(req: any, res: any) {
+  res.setHeader("Access-Control-Allow-Origin", "*");
+  res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
+
+  if (req.method === "OPTIONS") {
+    return res.status(200).end();
+  }
+
+  if (req.method !== "POST") {
+    return res.status(405).json({
+      success: false,
+      error: `Metode ${req.method} tidak diizinkan. Gunakan POST.`,
+    });
+  }
+
+  try {
+    let body = req.body;
+    if (typeof body === "string") {
+      try {
+        body = JSON.parse(body);
+      } catch {
+        // keep as is
+      }
+    }
+
+    const { soalList, keyFileBase64, keyMimeType, keyText, fileName } = body || {};
+
+    if (!soalList || !Array.isArray(soalList) || soalList.length === 0) {
+      return res.status(400).json({
+        success: false,
+        error: "Daftar butir soal tidak boleh kosong.",
+      });
+    }
+
+    const result = await handleMatchAnswerKeys(soalList, {
+      keyFileBase64,
+      keyMimeType,
+      keyText,
+      fileName,
+    });
+    return res.status(200).json(result);
+  } catch (err: any) {
+    console.error("[Vercel API /api/ujian/match-answer-keys Error]:", err);
+    return res.status(200).json({
+      success: false,
+      error: err?.message || "Gagal mencocokkan dokumen kunci jawaban ke butir soal.",
+      soalList: req.body?.soalList || [],
+    });
+  }
+}

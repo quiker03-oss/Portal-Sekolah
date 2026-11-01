@@ -9,10 +9,6 @@ import {
   handleParseImage,
   handleMatchAnswerKeys,
   handleGradeEssay,
-  handleBuatSoal,
-  handleRegenerasiSoal,
-  handleBuatModul,
-  handleBuatMateri,
 } from "./api/_lib/geminiBackend";
 import {
   handleStartExamSession,
@@ -54,63 +50,7 @@ async function startServer() {
     });
   });
 
-  // 1. Endpoint: Pembuat Soal Ujian & Ulangan (Pilihan Ganda + Esai)
-  app.post("/api/ai/buat-soal", async (req, res) => {
-    try {
-      const result = await handleBuatSoal(req.body);
-      res.json(result);
-    } catch (err: any) {
-      console.error("API /api/ai/buat-soal error:", err);
-      res.status(500).json({
-        success: false,
-        error: err.message || "Terjadi kesalahan saat memproses permintaan soal dengan AI.",
-      });
-    }
-  });
-
-  // 1b. Endpoint: Regenerasi Butir Soal Tunggal (Anti-Duplikasi)
-  app.post("/api/ai/regenerasi-soal", async (req, res) => {
-    try {
-      const result = await handleRegenerasiSoal(req.body);
-      res.json(result);
-    } catch (err: any) {
-      console.error("API /api/ai/regenerasi-soal error:", err);
-      res.status(200).json({
-        success: false,
-        error: err.message || "Gagal meregenerasi butir soal.",
-      });
-    }
-  });
-
-  // 2. Endpoint: Pembuat Modul Ajar / RPP Digital
-  app.post("/api/ai/buat-modul", async (req, res) => {
-    try {
-      const result = await handleBuatModul(req.body);
-      res.json(result);
-    } catch (err: any) {
-      console.error("API /api/ai/buat-modul error:", err);
-      res.status(500).json({
-        success: false,
-        error: err.message || "Terjadi kesalahan saat menyusun modul ajar dengan AI.",
-      });
-    }
-  });
-
-  // 3. Endpoint: Pembuat Bahan Ajar, Ringkasan Materi, & LKPD
-  app.post("/api/ai/buat-materi", async (req, res) => {
-    try {
-      const result = await handleBuatMateri(req.body);
-      res.json(result);
-    } catch (err: any) {
-      console.error("API /api/ai/buat-materi error:", err);
-      res.status(500).json({
-        success: false,
-        error: err.message || "Terjadi kesalahan saat membuat materi pembelajaran dengan AI.",
-      });
-    }
-  });
-
-  // 4. Endpoint: Parse Soal dari Word (.docx)
+  // 1. Endpoint: Parse Soal dari Word (.docx)
   app.post("/api/ujian/parse-docx", async (req, res) => {
     try {
       const { fileBase64, fileName = "dokumen-soal.docx" } = req.body || {};
@@ -121,7 +61,7 @@ async function startServer() {
       res.json(result);
     } catch (err: any) {
       console.error("API /api/ujian/parse-docx error:", err);
-      res.status(500).json({
+      res.status(200).json({
         success: false,
         error: err.message || "Gagal memproses file Word (.docx).",
       });
@@ -139,7 +79,7 @@ async function startServer() {
       res.json(result);
     } catch (err: any) {
       console.error("API /api/ujian/parse-pdf error:", err);
-      res.status(500).json({
+      res.status(200).json({
         success: false,
         error: err.message || "Gagal memproses file PDF.",
       });
@@ -157,7 +97,7 @@ async function startServer() {
       res.json(result);
     } catch (err: any) {
       console.error("API /api/ujian/parse-text-soal error:", err);
-      res.status(500).json({
+      res.status(200).json({
         success: false,
         error: err.message || "Gagal memproses teks soal.",
       });
@@ -175,7 +115,7 @@ async function startServer() {
       res.json(result);
     } catch (err: any) {
       console.error("API /api/ujian/parse-image error:", err);
-      res.status(500).json({
+      res.status(200).json({
         success: false,
         error: err.message || "Gagal memproses gambar naskah soal.",
       });
@@ -198,7 +138,7 @@ async function startServer() {
       res.json(result);
     } catch (err: any) {
       console.error("API /api/ujian/match-answer-keys error:", err);
-      res.status(500).json({
+      res.status(200).json({
         success: false,
         error: err.message || "Gagal mencocokkan dokumen kunci jawaban ke butir soal.",
       });
@@ -236,7 +176,7 @@ async function startServer() {
       res.json(result);
     } catch (err: any) {
       console.error("API /api/ujian/ai-grade-essay error:", err);
-      res.status(500).json({
+      res.status(200).json({
         success: false,
         error: err.message || "Gagal melakukan penilaian esai dengan AI.",
       });

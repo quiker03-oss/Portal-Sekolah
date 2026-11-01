@@ -38,9 +38,10 @@ export default async function handler(req: any, res: any) {
     return res.status(200).json(result);
   } catch (err: any) {
     console.error("[Vercel API /api/ujian/parse-text-soal Error]:", err);
-    return res.status(500).json({
+    return res.status(200).json({
       success: false,
       error: err?.message || "Gagal memproses teks soal.",
+      soalList: [],
     });
   }
 }

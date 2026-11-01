@@ -1,4 +1,13 @@
-import { handleBuatSoal } from "../_lib/geminiBackend";
+import { handleParseImage } from "../_lib/geminiBackend";
+
+export const config = {
+  maxDuration: 60,
+  api: {
+    bodyParser: {
+      sizeLimit: "25mb",
+    },
+  },
+};
 
 export default async function handler(req: any, res: any) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -26,13 +35,23 @@ export default async function handler(req: any, res: any) {
       }
     }
 
-    const result = await handleBuatSoal(body);
+    const { fileBase64, fileName = "naskah-ujian.jpg", mimeType = "image/jpeg" } = body || {};
+
+    if (!fileBase64) {
+      return res.status(400).json({
+        success: false,
+        error: "Data berkas gambar (fileBase64) tidak ditemukan dalam permintaan.",
+      });
+    }
+
+    const result = await handleParseImage(fileBase64, fileName, mimeType);
     return res.status(200).json(result);
   } catch (err: any) {
-    console.error("[Vercel API /api/ai/buat-soal Error]:", err);
-    return res.status(500).json({
+    console.error("[Vercel API /api/ujian/parse-image Error]:", err);
+    return res.status(200).json({
       success: false,
-      error: err?.message || "Terjadi kesalahan saat memproses permintaan soal dengan AI.",
+      error: err?.message || "Gagal memproses gambar naskah soal.",
+      soalList: [],
     });
   }
 }

@@ -14,6 +14,7 @@ import {
   UserCheck,
   TrendingUp,
   Sparkles,
+  FileQuestion,
 } from 'lucide-react';
 
 interface DashboardViewProps {
@@ -118,11 +119,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ currentUser, onNav
 
           <div className="flex flex-wrap gap-2.5">
             <button
-              onClick={() => onNavigate('asisten-ai-guru')}
-              className="px-4 py-2 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-600 hover:to-amber-700 text-white rounded-xl text-xs font-bold shadow-xs flex items-center gap-2 transition-colors cursor-pointer"
+              onClick={() => onNavigate('ujian-online')}
+              className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold shadow-xs flex items-center gap-2 transition-colors cursor-pointer"
             >
-              <Sparkles className="w-4 h-4 text-white" />
-              Asisten AI Guru (Soal & RPP)
+              <FileQuestion className="w-4 h-4 text-white" />
+              Ujian Online (CBT)
             </button>
             <button
               onClick={() => onNavigate('nilai-harian')}

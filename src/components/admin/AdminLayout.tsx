@@ -29,14 +29,11 @@ import { BellRing,
   Cloud,
   Wallet,
   LayoutTemplate,
-  Sparkles,
   FileQuestion,
-  Gamepad2,
 } from 'lucide-react';
 
 // Subviews
 import { DashboardView } from './DashboardView';
-import { AsistenAiGuruView } from './AsistenAiGuruView';
 import { UjianOnlineAdmin } from './UjianOnlineAdmin';
 import { DataSiswaView } from './DataSiswaView';
 import { ImportSiswaView } from './ImportSiswaView';
@@ -147,11 +144,9 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
       ],
     },
     {
-      label: 'Guru & Pembelajaran AI',
+      label: 'Ujian & Asesmen',
       items: [
-        { id: 'asisten-ai-guru', label: 'Asisten AI Guru (Soal & RPP)', icon: Sparkles, visible: true },
         { id: 'ujian-online', label: 'Ujian Online (CBT)', icon: FileQuestion, visible: true },
-        { id: 'kuis-game', label: 'Kuis Game Interaktif 🎮', icon: Gamepad2, visible: true },
       ],
     },
     {
@@ -321,11 +316,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
                 <DashboardView currentUser={currentUser} onNavigate={(tab) => setActiveTab(tab)} />
               )}
 
-              {activeTab === 'asisten-ai-guru' && <AsistenAiGuruView currentUser={currentUser} />}
-
               {activeTab === 'ujian-online' && <UjianOnlineAdmin currentUser={currentUser} />}
-
-              {activeTab === 'kuis-game' && <UjianOnlineAdmin currentUser={currentUser} initialFilter="kuis_game" />}
 
               {activeTab === 'data-siswa' && (
                 <DataSiswaView
