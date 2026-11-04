@@ -102,26 +102,42 @@ async function withAtomicLock<T>(key: string, fn: () => Promise<T>): Promise<T> 
   }
 }
 
-// File persistence paths
-const DATA_DIR = path.join(process.cwd(), "data");
+// Serverless runtime detection (Vercel Lambda / AWS Lambda / Netlify)
+const isServerless = Boolean(
+  process.env.VERCEL ||
+  process.env.AWS_LAMBDA_FUNCTION_NAME ||
+  process.env.LAMBDA_TASK_ROOT ||
+  process.env.NETLIFY
+);
+
+// File persistence paths - use /tmp on serverless environments to avoid read-only filesystem crash
+const DATA_DIR = isServerless
+  ? path.join("/tmp", "portal_school_data")
+  : path.join(process.cwd(), "data");
 const SESSIONS_FILE = path.join(DATA_DIR, "ujian_sessions.json");
 const AUDIT_FILE = path.join(DATA_DIR, "ujian_audit_logs.json");
 
-// Ensure data directory exists
-function ensureDataDir() {
+let fsPersistenceAvailable = true;
+
+// Ensure data directory exists without ever throwing uncaught errors
+function ensureDataDir(): boolean {
+  if (!fsPersistenceAvailable) return false;
   try {
     if (!fs.existsSync(DATA_DIR)) {
       fs.mkdirSync(DATA_DIR, { recursive: true });
     }
-  } catch (err) {
-    console.error("[ExamBackend] Failed to ensure data directory:", err);
+    return true;
+  } catch (err: any) {
+    console.warn("[ExamBackend] Disk persistence unavailable on this environment, operating safely in-memory:", err?.message);
+    fsPersistenceAvailable = false;
+    return false;
   }
 }
 
 // Load persisted data on server boot
 function initPersistence() {
-  ensureDataDir();
   try {
+    if (!ensureDataDir()) return;
     if (fs.existsSync(SESSIONS_FILE)) {
       const raw = fs.readFileSync(SESSIONS_FILE, "utf-8");
       const list: ServerExamSession[] = JSON.parse(raw);
@@ -131,44 +147,46 @@ function initPersistence() {
       });
       console.log(`[ExamBackend] Loaded ${sessionsStore.size} exam sessions from disk.`);
     }
-  } catch (err) {
-    console.error("[ExamBackend] Error loading sessions file:", err);
+  } catch (err: any) {
+    console.warn("[ExamBackend] Info: unable to load sessions from disk, starting fresh in-memory:", err?.message);
   }
 
   try {
-    if (fs.existsSync(AUDIT_FILE)) {
+    if (fsPersistenceAvailable && fs.existsSync(AUDIT_FILE)) {
       const raw = fs.readFileSync(AUDIT_FILE, "utf-8");
       const list: AuditLogUjian[] = JSON.parse(raw);
       auditLogsStore.push(...list);
       console.log(`[ExamBackend] Loaded ${auditLogsStore.length} audit logs from disk.`);
     }
-  } catch (err) {
-    console.error("[ExamBackend] Error loading audit logs file:", err);
+  } catch (err: any) {
+    console.warn("[ExamBackend] Info: unable to load audit logs from disk, starting fresh in-memory:", err?.message);
   }
 }
 
-// Save sessions to disk
+// Save sessions to disk safely without throwing
 function persistSessionsToDisk() {
+  if (!fsPersistenceAvailable) return;
   try {
-    ensureDataDir();
+    if (!ensureDataDir()) return;
     const list = Array.from(sessionsStore.values());
     fs.writeFileSync(SESSIONS_FILE, JSON.stringify(list, null, 2), "utf-8");
-  } catch (err) {
-    console.error("[ExamBackend] Error saving sessions to disk:", err);
+  } catch (err: any) {
+    console.warn("[ExamBackend] Error saving sessions to disk, continuing in-memory:", err?.message);
   }
 }
 
-// Save audit logs to disk
+// Save audit logs to disk safely without throwing
 function persistAuditLogsToDisk() {
+  if (!fsPersistenceAvailable) return;
   try {
-    ensureDataDir();
+    if (!ensureDataDir()) return;
     fs.writeFileSync(AUDIT_FILE, JSON.stringify(auditLogsStore, null, 2), "utf-8");
-  } catch (err) {
-    console.error("[ExamBackend] Error saving audit logs to disk:", err);
+  } catch (err: any) {
+    console.warn("[ExamBackend] Error saving audit logs to disk, continuing in-memory:", err?.message);
   }
 }
 
-// Initialize immediately upon loading module
+// Initialize safely upon loading module
 initPersistence();
 
 // Helper to record an audit log

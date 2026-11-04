@@ -26,8 +26,6 @@ import {
   StatusUjian,
   LogPelanggaranUjian,
   AuditLogUjian,
-  GameModeType,
-  GameQuizSettings,
 } from '../../types';
 import {
   FileText,
@@ -318,7 +316,7 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
       kelasTarget: allKelas.length > 0 ? [allKelas[0].nama] : ['Kelas 1A'],
       semester: 'Genap',
       tahunAjaran: '2024/2025',
-      jenisUjian: 'Penilaian Harian (PH)',
+      jenisUjian: 'Ulangan Harian',
       modeInteraktif: 'ujian_resmi',
       status: 'draf',
       tanggalMulai: startTime,
@@ -1379,7 +1377,7 @@ export const UjianOnlineAdmin: React.FC<UjianOnlineAdminProps> = ({ currentUser 
                 Buat naskah ujian baru atau impor secara otomatis dari dokumen Word (.docx) atau PDF untuk memulai.
               </p>
               <button
-                onClick={() => handleOpenCreateExam(false)}
+                onClick={() => handleOpenCreateExam()}
                 className="bg-blue-600 hover:bg-blue-500 text-white font-bold px-5 py-2.5 rounded-xl text-xs sm:text-sm transition cursor-pointer shadow-md shadow-blue-600/20"
               >
                 + Buat Ujian Pertama

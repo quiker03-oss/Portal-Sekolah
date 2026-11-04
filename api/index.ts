@@ -2,9 +2,10 @@ import {
   handleParseDocx,
   handleParsePdf,
   handleParseTextSoal,
-  handleBuatSoal,
-  handleBuatModul,
-  handleBuatMateri,
+  handleParseImage,
+  handleMatchAnswerKeys,
+  handleGradeEssay,
+  getGeminiApiKey,
 } from "./_lib/geminiBackend";
 import {
   handleStartExamSession,
@@ -17,6 +18,7 @@ import {
 } from "./_lib/examSessionBackend";
 
 export const config = {
+  maxDuration: 60,
   api: {
     bodyParser: {
       sizeLimit: "25mb",
@@ -44,7 +46,7 @@ export default async function handler(req: any, res: any) {
     try {
       body = JSON.parse(body);
     } catch {
-      // ignore
+      // keep raw
     }
   }
 
@@ -53,9 +55,10 @@ export default async function handler(req: any, res: any) {
     if (pathname === "/health" || pathname === "" || pathname === "/") {
       return res.status(200).json({
         status: "ok",
-        aiAvailable: Boolean(process.env.GEMINI_API_KEY),
+        app: "ISTAFA Portal Sekolah",
+        aiAvailable: Boolean(getGeminiApiKey()),
         timestamp: new Date().toISOString(),
-        platform: "vercel-serverless",
+        platform: process.env.VERCEL ? "vercel-serverless" : "local-node",
         endpoint: pathname,
       });
     }
@@ -99,30 +102,65 @@ export default async function handler(req: any, res: any) {
       return res.status(200).json(result);
     }
 
-    // 5. Buat Soal AI
-    if (pathname === "/ai/buat-soal") {
+    // 5. Parse Image Soal
+    if (pathname === "/ujian/parse-image") {
       if (req.method !== "POST") {
         return res.status(405).json({ success: false, error: "Metode harus POST." });
       }
-      const result = await handleBuatSoal(body);
+      const { fileBase64, fileName = "naskah-ujian.jpg", mimeType = "image/jpeg" } = body || {};
+      if (!fileBase64) {
+        return res.status(400).json({ success: false, error: "Data fileBase64 gambar tidak ditemukan." });
+      }
+      const result = await handleParseImage(fileBase64, fileName, mimeType);
       return res.status(200).json(result);
     }
 
-    // 6. Buat Modul Ajar AI
-    if (pathname === "/ai/buat-modul") {
+    // 6. Match Answer Keys
+    if (pathname === "/ujian/match-answer-keys") {
       if (req.method !== "POST") {
         return res.status(405).json({ success: false, error: "Metode harus POST." });
       }
-      const result = await handleBuatModul(body);
+      const { soalList, keyFileBase64, keyMimeType, keyText, fileName } = body || {};
+      if (!soalList || !Array.isArray(soalList) || soalList.length === 0) {
+        return res.status(400).json({ success: false, error: "Daftar butir soal tidak boleh kosong." });
+      }
+      const result = await handleMatchAnswerKeys(soalList, {
+        keyFileBase64,
+        keyMimeType,
+        keyText,
+        fileName,
+      });
       return res.status(200).json(result);
     }
 
-    // 7. Buat Materi / LKPD AI
-    if (pathname === "/ai/buat-materi") {
+    // 7. AI Grade Essay
+    if (pathname === "/ujian/ai-grade-essay") {
       if (req.method !== "POST") {
         return res.status(405).json({ success: false, error: "Metode harus POST." });
       }
-      const result = await handleBuatMateri(body);
+      const {
+        pertanyaan,
+        kunciJawaban,
+        contohJawaban,
+        rubrikPenilaian,
+        indikatorWajib,
+        variasiJawaban,
+        jawabanSiswa,
+        bobotMaksimal,
+      } = body || {};
+      if (!pertanyaan) {
+        return res.status(400).json({ success: false, error: "Teks pertanyaan wajib disertakan." });
+      }
+      const result = await handleGradeEssay({
+        pertanyaan,
+        kunciJawaban,
+        contohJawaban,
+        rubrikPenilaian,
+        indikatorWajib,
+        variasiJawaban,
+        jawabanSiswa: jawabanSiswa || "",
+        bobotMaksimal: Number(bobotMaksimal) || 10,
+      });
       return res.status(200).json(result);
     }
 
@@ -186,10 +224,11 @@ export default async function handler(req: any, res: any) {
       error: `Endpoint ${pathname} tidak ditemukan di server Vercel API.`,
     });
   } catch (err: any) {
-    console.error(`[Vercel API Error on ${pathname}]:`, err);
-    return res.status(500).json({
+    console.error(`[Vercel API Catch-All Error on ${pathname}]:`, err);
+    return res.status(200).json({
       success: false,
-      error: err?.message || "Terjadi kesalahan internal pada server API.",
+      code: "INTERNAL_API_ERROR",
+      error: err?.message || "Terjadi kesalahan internal pada pemrosesan API.",
     });
   }
 }

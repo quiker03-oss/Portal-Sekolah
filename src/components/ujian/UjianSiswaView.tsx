@@ -978,8 +978,8 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({ ujianId, schoolI
               </div>
             )}
 
-            {/* Proctoring Warning Badge (Only for official CBT exams) */}
-            {!isGameQuiz && ujian.pengawasanAktif !== false && (
+            {/* Proctoring Warning Badge (For CBT exams) */}
+            {ujian.pengawasanAktif !== false && (
               <div className="bg-amber-950/30 border border-amber-500/30 rounded-2xl p-4 mb-6 flex items-start gap-3 text-xs text-amber-200">
                 <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
                 <div className="space-y-1">
@@ -994,22 +994,10 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({ ujianId, schoolI
 
             {/* Rules reminder */}
             <div className="bg-slate-950/60 p-4 rounded-xl border border-slate-800 text-xs text-slate-400 space-y-1.5 mb-6">
-              <div className="font-semibold text-slate-300">
-                {isGameQuiz ? 'Aturan Permainan Edukatif:' : 'Tata Tertib Pengerjaan:'}
-              </div>
-              {isGameQuiz ? (
-                <>
-                  <div>&bull; Setiap jawaban langsung dinilai dengan umpan balik, poin & bintang.</div>
-                  <div>&bull; Jika jawaban belum tepat, kamu dapat membaca petunjuk dan mencoba lagi.</div>
-                  <div>&bull; Kumpulkan bintang, lencana pencapaian, dan selesaikan tantangannya!</div>
-                </>
-              ) : (
-                <>
-                  <div>&bull; Waktu otomatis berjalan setelah tombol Mulai ditekan.</div>
-                  <div>&bull; Jawaban tersimpan otomatis dan berkala ke server sekolah.</div>
-                  <div>&bull; Tombol Selesai tersedia setelah memeriksa seluruh butir pertanyaan.</div>
-                </>
-              )}
+              <div className="font-semibold text-slate-300">Tata Tertib Pengerjaan:</div>
+              <div>&bull; Waktu otomatis berjalan setelah tombol Mulai ditekan.</div>
+              <div>&bull; Jawaban tersimpan otomatis dan berkala ke server sekolah.</div>
+              <div>&bull; Tombol Selesai tersedia setelah memeriksa seluruh butir pertanyaan.</div>
             </div>
 
             {/* Start Button */}

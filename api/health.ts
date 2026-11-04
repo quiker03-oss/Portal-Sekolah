@@ -7,10 +7,28 @@ export default function handler(req: any, res: any) {
     return res.status(200).end();
   }
 
-  res.status(200).json({
+  const hasApiKey = Boolean(
+    process.env.GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    process.env.VITE_GEMINI_API_KEY ||
+    process.env.API_KEY
+  );
+
+  return res.status(200).json({
     status: "ok",
-    aiAvailable: Boolean(process.env.GEMINI_API_KEY),
+    app: "ISTAFA Portal Sekolah",
+    aiAvailable: hasApiKey,
+    apiKeySource: process.env.GEMINI_API_KEY
+      ? "GEMINI_API_KEY"
+      : process.env.GOOGLE_API_KEY
+      ? "GOOGLE_API_KEY"
+      : process.env.VITE_GEMINI_API_KEY
+      ? "VITE_GEMINI_API_KEY"
+      : hasApiKey
+      ? "API_KEY"
+      : "NONE",
     timestamp: new Date().toISOString(),
-    platform: "vercel-serverless",
+    platform: process.env.VERCEL ? "vercel-serverless" : "local-node",
+    nodeVersion: process.version,
   });
 }

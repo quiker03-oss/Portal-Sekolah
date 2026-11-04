@@ -1,8 +1,19 @@
 import { GoogleGenAI } from "@google/genai";
 import JSZip from "jszip";
 
+export function getGeminiApiKey(): string | undefined {
+  const key =
+    process.env.GEMINI_API_KEY ||
+    process.env.GOOGLE_API_KEY ||
+    process.env.VITE_GEMINI_API_KEY ||
+    process.env.API_KEY ||
+    "";
+  const trimmed = key.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
 export function getGeminiClient(): GoogleGenAI {
-  const apiKey = process.env.GEMINI_API_KEY;
+  const apiKey = getGeminiApiKey();
   if (!apiKey) {
     throw new Error(
       "GEMINI_API_KEY belum dikonfigurasi di server. Jika dideploy di Vercel, pastikan variabel GEMINI_API_KEY sudah disetel di menu Project Settings > Environment Variables, lalu lakukan redeploy."
@@ -20,9 +31,10 @@ export function getGeminiClient(): GoogleGenAI {
 
 // Reliable, high-throughput models prioritizing official Gemini models from gemini-api skill
 export const AI_FALLBACK_MODELS = [
+  "gemini-2.5-flash",
+  "gemini-flash-latest",
   "gemini-3.8-flash",
   "gemini-3.1-flash-lite",
-  "gemini-flash-latest",
 ];
 
 export function cleanAndParseJson(text: string): any {
@@ -104,12 +116,36 @@ export async function generateContentWithFallback(
 
   const originalMsg = lastError?.message || String(lastError);
   if (
+    originalMsg.includes("API_KEY_INVALID") ||
+    originalMsg.includes("API key not valid") ||
+    originalMsg.includes("PERMISSION_DENIED")
+  ) {
+    throw new Error(
+      "GEMINI_API_KEY tidak valid atau tidak memiliki izin akses. Pastikan API key Google AI Studio yang Anda setel di Vercel Dashboard aktif dan benar."
+    );
+  }
+  if (
+    originalMsg.includes("429") ||
+    originalMsg.includes("RESOURCE_EXHAUSTED") ||
+    originalMsg.includes("quota") ||
+    originalMsg.includes("Quota exceeded")
+  ) {
+    throw new Error(
+      "Kuota permintaan Gemini API terlampaui (Rate Limit / Quota Exceeded). Silakan tunggu beberapa saat atau periksa kuota akun di Google AI Studio."
+    );
+  }
+  if (
     originalMsg.includes("503") ||
     originalMsg.includes("UNAVAILABLE") ||
     originalMsg.includes("high demand")
   ) {
     throw new Error(
       "Layanan AI Google saat ini sedang mengalami antrean trafik tinggi. Silakan coba kembali dalam beberapa saat."
+    );
+  }
+  if (originalMsg.includes("Timeout") || originalMsg.includes("timeout")) {
+    throw new Error(
+      "Batas waktu permintaan AI habis (Timeout). Silakan coba kembali atau gunakan berkas yang lebih ringkas."
     );
   }
   throw lastError || new Error("Gagal mendapatkan respons dari model AI.");
@@ -567,7 +603,7 @@ export async function handleParsePdf(fileBase64: string, fileName: string = "dok
   }
 
   // Safe check if GEMINI_API_KEY is configured
-  if (!process.env.GEMINI_API_KEY) {
+  if (!getGeminiApiKey()) {
     return {
       success: false,
       code: "GEMINI_KEY_NOT_CONFIGURED",
@@ -578,10 +614,11 @@ export async function handleParsePdf(fileBase64: string, fileName: string = "dok
     };
   }
 
-  const cleanBase64 = fileBase64.replace(/^data:application\/pdf;base64,/, "");
-  const ai = getGeminiClient();
+  try {
+    const cleanBase64 = fileBase64.replace(/^data:application\/pdf;base64,/, "");
+    const ai = getGeminiClient();
 
-  const prompt = `Anda adalah sistem AI pemeriksa naskah ujian resmi sekolah Indonesia.
+    const prompt = `Anda adalah sistem AI pemeriksa naskah ujian resmi sekolah Indonesia.
 Analisis berkas PDF terlampir secara menyeluruh (baik halaman berupa teks digital maupun hasil scan/gambar OCR).
 
 ATURAN WAJIB & INTEGRITAS NASKAH SOAL:
@@ -630,56 +667,65 @@ ATURAN WAJIB & INTEGRITAS NASKAH SOAL:
   ]
 }`;
 
-  const responseText = await generateContentWithFallback(ai, {
-    contents: [
-      {
-        inlineData: {
-          mimeType: "application/pdf",
-          data: cleanBase64,
+    const responseText = await generateContentWithFallback(ai, {
+      contents: [
+        {
+          inlineData: {
+            mimeType: "application/pdf",
+            data: cleanBase64,
+          },
         },
+        {
+          text: prompt,
+        },
+      ],
+      config: {
+        responseMimeType: "application/json",
       },
-      {
-        text: prompt,
-      },
-    ],
-    config: {
-      responseMimeType: "application/json",
-    },
-  });
+    });
 
-  const parsed = cleanAndParseJson(responseText);
+    const parsed = cleanAndParseJson(responseText);
 
-  const questions = (parsed.soalList || []).map((q: any, idx: number) => ({
-    id: `soal-${Date.now()}-${idx + 1}`,
-    nomor: q.nomor || idx + 1,
-    tipe: q.tipe || "pilihan_ganda",
-    pertanyaan: q.pertanyaan || "",
-    pilihan: q.pilihan || undefined,
-    pilihanKompleks: q.pilihanKompleks || (q.tipe === 'pilihan_ganda_kompleks' ? q.pilihan : undefined),
-    kunciPilihanKompleks: q.kunciPilihanKompleks || undefined,
-    pasanganMenjodohkan: q.pasanganMenjodohkan || undefined,
-    kunciMenjodohkan: q.kunciMenjodohkan || undefined,
-    kunciJawaban: q.kunciJawaban || (q.kunciPilihanKompleks ? q.kunciPilihanKompleks.join(", ") : ""),
-    pembahasan: q.pembahasan || "",
-    gambarCaption: q.gambarDeskripsi || undefined,
-    nomorHalaman: q.nomorHalaman || undefined,
-    bobot: Number(q.bobot) > 0 ? Number(q.bobot) : 1,
-    perluVerifikasi: Boolean(q.perluVerifikasi || (!q.kunciJawaban && !q.kunciPilihanKompleks)),
-    catatanVerifikasi:
-      q.catatanVerifikasi ||
-      (!q.kunciJawaban && !q.kunciPilihanKompleks
-        ? "Kunci jawaban belum terdeteksi dari dokumen"
-        : undefined),
-  }));
+    const questions = (parsed.soalList || []).map((q: any, idx: number) => ({
+      id: `soal-${Date.now()}-${idx + 1}`,
+      nomor: q.nomor || idx + 1,
+      tipe: q.tipe || "pilihan_ganda",
+      pertanyaan: q.pertanyaan || "",
+      pilihan: q.pilihan || undefined,
+      pilihanKompleks: q.pilihanKompleks || (q.tipe === 'pilihan_ganda_kompleks' ? q.pilihan : undefined),
+      kunciPilihanKompleks: q.kunciPilihanKompleks || undefined,
+      pasanganMenjodohkan: q.pasanganMenjodohkan || undefined,
+      kunciMenjodohkan: q.kunciMenjodohkan || undefined,
+      kunciJawaban: q.kunciJawaban || (q.kunciPilihanKompleks ? q.kunciPilihanKompleks.join(", ") : ""),
+      pembahasan: q.pembahasan || "",
+      gambarCaption: q.gambarDeskripsi || undefined,
+      nomorHalaman: q.nomorHalaman || undefined,
+      bobot: Number(q.bobot) > 0 ? Number(q.bobot) : 1,
+      perluVerifikasi: Boolean(q.perluVerifikasi || (!q.kunciJawaban && !q.kunciPilihanKompleks)),
+      catatanVerifikasi:
+        q.catatanVerifikasi ||
+        (!q.kunciJawaban && !q.kunciPilihanKompleks
+          ? "Kunci jawaban belum terdeteksi dari dokumen"
+          : undefined),
+    }));
 
-  return {
-    success: true,
-    judul: parsed.judul || fileName.replace(/\.[^/.]+$/, ""),
-    mataPelajaran: parsed.mataPelajaran || "",
-    kelas: parsed.kelas || "",
-    soalList: questions,
-    totalSoal: questions.length,
-  };
+    return {
+      success: true,
+      judul: parsed.judul || fileName.replace(/\.[^/.]+$/, ""),
+      mataPelajaran: parsed.mataPelajaran || "",
+      kelas: parsed.kelas || "",
+      soalList: questions,
+      totalSoal: questions.length,
+    };
+  } catch (err: any) {
+    console.error("[handleParsePdf Error]:", err);
+    return {
+      success: false,
+      code: "AI_PROCESSING_ERROR",
+      error: err?.message || "Gagal memproses dokumen PDF dengan AI.",
+      soalList: [],
+    };
+  }
 }
 
 // 3. Core handler: Parse Raw Text Soal
@@ -693,7 +739,7 @@ export async function handleParseTextSoal(text: string) {
     };
   }
 
-  if (!process.env.GEMINI_API_KEY) {
+  if (!getGeminiApiKey()) {
     return {
       success: false,
       code: "GEMINI_KEY_NOT_CONFIGURED",
@@ -704,8 +750,9 @@ export async function handleParseTextSoal(text: string) {
     };
   }
 
-  const ai = getGeminiClient();
-  const prompt = `Anda adalah parser naskah ujian sekolah Indonesia.
+  try {
+    const ai = getGeminiClient();
+    const prompt = `Anda adalah parser naskah ujian sekolah Indonesia.
 Bacalah teks berikut dan ubah menjadi butir soal terstruktur secara akurat:
 
 ${text}
@@ -732,30 +779,39 @@ ATURAN:
   ]
 }`;
 
-  const responseText = await generateContentWithFallback(ai, {
-    contents: prompt,
-    config: {
-      responseMimeType: "application/json",
-    },
-  });
+    const responseText = await generateContentWithFallback(ai, {
+      contents: prompt,
+      config: {
+        responseMimeType: "application/json",
+      },
+    });
 
-  const parsed = cleanAndParseJson(responseText);
-  const questions = (parsed.soalList || []).map((q: any, idx: number) => ({
-    id: `soal-${Date.now()}-${idx + 1}`,
-    nomor: q.nomor || idx + 1,
-    tipe: q.tipe || "pilihan_ganda",
-    pertanyaan: q.pertanyaan || "",
-    pilihan: q.pilihan || undefined,
-    kunciJawaban: q.kunciJawaban || "",
-    bobot: Number(q.bobot) > 0 ? Number(q.bobot) : 1,
-    perluVerifikasi: !q.kunciJawaban,
-    catatanVerifikasi: !q.kunciJawaban ? "Kunci jawaban perlu diisi" : undefined,
-  }));
+    const parsed = cleanAndParseJson(responseText);
+    const questions = (parsed.soalList || []).map((q: any, idx: number) => ({
+      id: `soal-${Date.now()}-${idx + 1}`,
+      nomor: q.nomor || idx + 1,
+      tipe: q.tipe || "pilihan_ganda",
+      pertanyaan: q.pertanyaan || "",
+      pilihan: q.pilihan || undefined,
+      kunciJawaban: q.kunciJawaban || "",
+      bobot: Number(q.bobot) > 0 ? Number(q.bobot) : 1,
+      perluVerifikasi: !q.kunciJawaban,
+      catatanVerifikasi: !q.kunciJawaban ? "Kunci jawaban perlu diisi" : undefined,
+    }));
 
-  return {
-    success: true,
-    soalList: questions,
-  };
+    return {
+      success: true,
+      soalList: questions,
+    };
+  } catch (err: any) {
+    console.error("[handleParseTextSoal Error]:", err);
+    return {
+      success: false,
+      code: "AI_PROCESSING_ERROR",
+      error: err?.message || "Gagal memproses teks butir soal dengan AI.",
+      soalList: [],
+    };
+  }
 }
 
 // 4. PARSER GAMBAR NASKAH UJIAN (JPG / JPEG / PNG / SCAN MOBILE OCR)
@@ -773,27 +829,29 @@ export async function handleParseImage(
     };
   }
 
-  if (!process.env.GEMINI_API_KEY) {
+  if (!getGeminiApiKey()) {
     return {
       success: false,
       code: "GEMINI_KEY_NOT_CONFIGURED",
       error: "Variabel lingkungan GEMINI_API_KEY belum dikonfigurasi di server.",
+      hint: "Silakan buka Project Settings > Environment Variables di dashboard Vercel, tambahkan GEMINI_API_KEY, lalu redeploy.",
       soalList: [],
     };
   }
 
-  const cleanBase64 = fileBase64.replace(/^data:image\/[a-zA-Z+]+;base64,/, "");
-  let validMime = mimeType;
-  if (!validMime || validMime === "application/octet-stream") {
-    const ext = fileName.split(".").pop()?.toLowerCase();
-    if (ext === "png") validMime = "image/png";
-    else if (ext === "webp") validMime = "image/webp";
-    else validMime = "image/jpeg";
-  }
+  try {
+    const cleanBase64 = fileBase64.replace(/^data:image\/[a-zA-Z+]+;base64,/, "");
+    let validMime = mimeType;
+    if (!validMime || validMime === "application/octet-stream") {
+      const ext = fileName.split(".").pop()?.toLowerCase();
+      if (ext === "png") validMime = "image/png";
+      else if (ext === "webp") validMime = "image/webp";
+      else validMime = "image/jpeg";
+    }
 
-  const ai = getGeminiClient();
+    const ai = getGeminiClient();
 
-  const prompt = `Anda adalah sistem OCR dan analisis naskah ujian sekolah tingkat profesional di Indonesia.
+    const prompt = `Anda adalah sistem OCR dan analisis naskah ujian sekolah tingkat profesional di Indonesia.
 Analisis gambar naskah ujian terlampir secara teliti (hasil scan atau foto kamera HP/laptop).
 
 ATURAN WAJIB INTEGRITAS NASKAH SOAL:
@@ -846,58 +904,67 @@ ATURAN WAJIB INTEGRITAS NASKAH SOAL:
   ]
 }`;
 
-  const responseText = await generateContentWithFallback(ai, {
-    contents: [
-      {
-        inlineData: {
-          mimeType: validMime,
-          data: cleanBase64,
+    const responseText = await generateContentWithFallback(ai, {
+      contents: [
+        {
+          inlineData: {
+            mimeType: validMime,
+            data: cleanBase64,
+          },
         },
+        { text: prompt },
+      ],
+      config: {
+        responseMimeType: "application/json",
       },
-      { text: prompt },
-    ],
-    config: {
-      responseMimeType: "application/json",
-    },
-  });
+    });
 
-  const parsed = cleanAndParseJson(responseText);
+    const parsed = cleanAndParseJson(responseText);
 
-  const questions = (parsed.soalList || []).map((q: any, idx: number) => ({
-    id: `soal-${Date.now()}-${idx + 1}`,
-    nomor: q.nomor || idx + 1,
-    tipe: q.tipe || "pilihan_ganda",
-    pertanyaan: q.pertanyaan || "",
-    pilihan: q.pilihan || undefined,
-    pilihanKompleks: q.pilihanKompleks || (q.tipe === 'pilihan_ganda_kompleks' ? q.pilihan : undefined),
-    kunciPilihanKompleks: q.kunciPilihanKompleks || undefined,
-    pasanganMenjodohkan: q.pasanganMenjodohkan || undefined,
-    kunciMenjodohkan: q.kunciMenjodohkan || undefined,
-    kunciJawaban: q.kunciResmiDitemukan ? (q.kunciJawaban || "") : (q.saranKunciAI || q.kunciJawaban || ""),
-    kunciResmiDitemukan: Boolean(q.kunciResmiDitemukan),
-    saranKunciAI: q.saranKunciAI || undefined,
-    contohJawaban: q.contohJawaban || (q.tipe === 'esai' ? q.kunciJawaban : undefined),
-    rubrikPenilaian: q.rubrikPenilaian || undefined,
-    indikatorWajib: Array.isArray(q.indikatorWajib) ? q.indikatorWajib : undefined,
-    pembahasan: q.pembahasan || "",
-    bobot: Number(q.bobot) > 0 ? Number(q.bobot) : (q.tipe === 'esai' ? 2 : 1),
-    nilaiMaksimum: Number(q.bobot) > 0 ? Number(q.bobot) : (q.tipe === 'esai' ? 2 : 1),
-    perluVerifikasi: Boolean(q.perluVerifikasi || !q.kunciResmiDitemukan),
-    catatanVerifikasi:
-      q.catatanVerifikasi ||
-      (!q.kunciResmiDitemukan
-        ? "Kunci resmi tidak ditemukan di dokumen; verifikasi kunci rekomendasi AI"
-        : undefined),
-  }));
+    const questions = (parsed.soalList || []).map((q: any, idx: number) => ({
+      id: `soal-${Date.now()}-${idx + 1}`,
+      nomor: q.nomor || idx + 1,
+      tipe: q.tipe || "pilihan_ganda",
+      pertanyaan: q.pertanyaan || "",
+      pilihan: q.pilihan || undefined,
+      pilihanKompleks: q.pilihanKompleks || (q.tipe === 'pilihan_ganda_kompleks' ? q.pilihan : undefined),
+      kunciPilihanKompleks: q.kunciPilihanKompleks || undefined,
+      pasanganMenjodohkan: q.pasanganMenjodohkan || undefined,
+      kunciMenjodohkan: q.kunciMenjodohkan || undefined,
+      kunciJawaban: q.kunciResmiDitemukan ? (q.kunciJawaban || "") : (q.saranKunciAI || q.kunciJawaban || ""),
+      kunciResmiDitemukan: Boolean(q.kunciResmiDitemukan),
+      saranKunciAI: q.saranKunciAI || undefined,
+      contohJawaban: q.contohJawaban || (q.tipe === 'esai' ? q.kunciJawaban : undefined),
+      rubrikPenilaian: q.rubrikPenilaian || undefined,
+      indikatorWajib: Array.isArray(q.indikatorWajib) ? q.indikatorWajib : undefined,
+      pembahasan: q.pembahasan || "",
+      bobot: Number(q.bobot) > 0 ? Number(q.bobot) : (q.tipe === 'esai' ? 2 : 1),
+      nilaiMaksimum: Number(q.bobot) > 0 ? Number(q.bobot) : (q.tipe === 'esai' ? 2 : 1),
+      perluVerifikasi: Boolean(q.perluVerifikasi || !q.kunciResmiDitemukan),
+      catatanVerifikasi:
+        q.catatanVerifikasi ||
+        (!q.kunciResmiDitemukan
+          ? "Kunci resmi tidak ditemukan di dokumen; verifikasi kunci rekomendasi AI"
+          : undefined),
+    }));
 
-  return {
-    success: true,
-    judul: parsed.judul || fileName.replace(/\.[^/.]+$/, ""),
-    mataPelajaran: parsed.mataPelajaran || "",
-    kelas: parsed.kelas || "",
-    soalList: questions,
-    totalSoal: questions.length,
-  };
+    return {
+      success: true,
+      judul: parsed.judul || fileName.replace(/\.[^/.]+$/, ""),
+      mataPelajaran: parsed.mataPelajaran || "",
+      kelas: parsed.kelas || "",
+      soalList: questions,
+      totalSoal: questions.length,
+    };
+  } catch (err: any) {
+    console.error("[handleParseImage Error]:", err);
+    return {
+      success: false,
+      code: "AI_PROCESSING_ERROR",
+      error: err?.message || "Gagal memproses gambar naskah soal dengan AI.",
+      soalList: [],
+    };
+  }
 }
 
 // =========================================================================
@@ -912,38 +979,40 @@ export async function handleMatchAnswerKeys(
     fileName?: string;
   }
 ) {
-  if (!soalList || !soalList.length) {
-    return {
-      success: false,
-      code: "INVALID_INPUT",
-      error: "Daftar butir soal kosong, tidak dapat mencocokkan kunci.",
-      totalMatched: 0,
-      soalList: [],
-    };
-  }
+  try {
+    if (!soalList || !soalList.length) {
+      return {
+        success: false,
+        code: "INVALID_INPUT",
+        error: "Daftar butir soal kosong, tidak dapat mencocokkan kunci.",
+        totalMatched: 0,
+        soalList: [],
+      };
+    }
 
-  if (!process.env.GEMINI_API_KEY) {
-    return {
-      success: false,
-      code: "GEMINI_KEY_NOT_CONFIGURED",
-      isConfigError: true,
-      error: "Variabel lingkungan GEMINI_API_KEY belum dikonfigurasi di server.",
-      hint: "Silakan buka Project Settings > Environment Variables di dashboard Vercel, tambahkan GEMINI_API_KEY, lalu redeploy.",
-      totalMatched: 0,
-      soalList,
-    };
-  }
+    const apiKey = getGeminiApiKey();
+    if (!apiKey) {
+      return {
+        success: false,
+        code: "GEMINI_KEY_NOT_CONFIGURED",
+        isConfigError: true,
+        error: "Variabel lingkungan GEMINI_API_KEY belum dikonfigurasi di server.",
+        hint: "Silakan buka Project Settings > Environment Variables di dashboard Vercel, tambahkan GEMINI_API_KEY, lalu redeploy.",
+        totalMatched: 0,
+        soalList,
+      };
+    }
 
-  const ai = getGeminiClient();
+    const ai = getGeminiClient();
 
-  const soalSummary = soalList.map((s, idx) => ({
-    nomor: s.nomor || idx + 1,
-    tipe: s.tipe,
-    pertanyaan: s.pertanyaan?.slice(0, 100),
-    kunciSaatIni: s.kunciJawaban || "",
-  }));
+    const soalSummary = soalList.map((s, idx) => ({
+      nomor: s.nomor || idx + 1,
+      tipe: s.tipe,
+      pertanyaan: s.pertanyaan?.slice(0, 100),
+      kunciSaatIni: s.kunciJawaban || "",
+    }));
 
-  const prompt = `Anda adalah asisten pemeriksa kunci jawaban ujian sekolah.
+    const prompt = `Anda adalah asisten pemeriksa kunci jawaban ujian sekolah.
 Tugas Anda adalah membaca dokumen atau teks kunci jawaban berikut, lalu mencocokkannya secara tepat berdasarkan nomor soal pada daftar butir soal yang sudah ada.
 
 DAFTAR NOMOR SOAL:
@@ -967,60 +1036,70 @@ ATURAN PENCOCOKAN:
   ]
 }`;
 
-  const contents: any[] = [];
+    const contents: any[] = [];
 
-  if (keySource.keyFileBase64) {
-    const cleanB64 = keySource.keyFileBase64.replace(/^data:[^;]+;base64,/, "");
-    contents.push({
-      inlineData: {
-        mimeType: keySource.keyMimeType || "application/pdf",
-        data: cleanB64,
-      },
-    });
-  }
-
-  if (keySource.keyText) {
-    contents.push({ text: `TEKS KUNCI JAWABAN:\n${keySource.keyText}` });
-  }
-
-  contents.push({ text: prompt });
-
-  const responseText = await generateContentWithFallback(ai, {
-    contents,
-    config: { responseMimeType: "application/json" },
-  });
-
-  const parsed = cleanAndParseJson(responseText);
-  const matchedKeys: any[] = parsed.matchedKeys || [];
-
-  const keyMap = new Map<number, any>();
-  matchedKeys.forEach((k) => {
-    keyMap.set(Number(k.nomor), k);
-  });
-
-  const updatedSoalList = soalList.map((soal, idx) => {
-    const no = soal.nomor || idx + 1;
-    const match = keyMap.get(no);
-    if (match && match.kunciJawaban) {
-      return {
-        ...soal,
-        kunciJawaban: match.kunciJawaban,
-        contohJawaban: match.contohJawaban || soal.contohJawaban || match.kunciJawaban,
-        rubrikPenilaian: match.rubrikPenilaian || soal.rubrikPenilaian,
-        pembahasan: match.pembahasan || soal.pembahasan,
-        kunciResmiDitemukan: true,
-        perluVerifikasi: false,
-        catatanVerifikasi: undefined,
-      };
+    if (keySource.keyFileBase64) {
+      const cleanB64 = keySource.keyFileBase64.replace(/^data:[^;]+;base64,/, "");
+      contents.push({
+        inlineData: {
+          mimeType: keySource.keyMimeType || "application/pdf",
+          data: cleanB64,
+        },
+      });
     }
-    return soal;
-  });
 
-  return {
-    success: true,
-    totalMatched: matchedKeys.length,
-    soalList: updatedSoalList,
-  };
+    if (keySource.keyText) {
+      contents.push({ text: `TEKS KUNCI JAWABAN:\n${keySource.keyText}` });
+    }
+
+    contents.push({ text: prompt });
+
+    const responseText = await generateContentWithFallback(ai, {
+      contents,
+      config: { responseMimeType: "application/json" },
+    });
+
+    const parsed = cleanAndParseJson(responseText);
+    const matchedKeys: any[] = parsed.matchedKeys || [];
+
+    const keyMap = new Map<number, any>();
+    matchedKeys.forEach((k) => {
+      keyMap.set(Number(k.nomor), k);
+    });
+
+    const updatedSoalList = soalList.map((soal, idx) => {
+      const no = soal.nomor || idx + 1;
+      const match = keyMap.get(no);
+      if (match && match.kunciJawaban) {
+        return {
+          ...soal,
+          kunciJawaban: match.kunciJawaban,
+          contohJawaban: match.contohJawaban || soal.contohJawaban || match.kunciJawaban,
+          rubrikPenilaian: match.rubrikPenilaian || soal.rubrikPenilaian,
+          pembahasan: match.pembahasan || soal.pembahasan,
+          kunciResmiDitemukan: true,
+          perluVerifikasi: false,
+          catatanVerifikasi: undefined,
+        };
+      }
+      return soal;
+    });
+
+    return {
+      success: true,
+      totalMatched: matchedKeys.length,
+      soalList: updatedSoalList,
+    };
+  } catch (err: any) {
+    console.error("[handleMatchAnswerKeys Error]:", err);
+    return {
+      success: false,
+      code: "AI_PROCESSING_ERROR",
+      error: err?.message || "Gagal mencocokkan kunci jawaban dengan AI.",
+      totalMatched: 0,
+      soalList,
+    };
+  }
 }
 
 // =========================================================================
@@ -1047,33 +1126,35 @@ export async function handleGradeEssay(params: {
     bobotMaksimal = 10,
   } = params;
 
-  if (!jawabanSiswa.trim()) {
-    return {
-      success: true,
-      skorRekomendasi: 0,
-      alasanPenilaian: "Siswa tidak mengisi jawaban (jawaban kosong).",
-      indikatorDitemukan: [],
-      saranFeedbackSiswa: "Silakan jawab pertanyaan uraian dengan lengkap sesuai materi yang dipelajari.",
-    };
-  }
+  try {
+    if (!jawabanSiswa.trim()) {
+      return {
+        success: true,
+        skorRekomendasi: 0,
+        alasanPenilaian: "Siswa tidak mengisi jawaban (jawaban kosong).",
+        indikatorDitemukan: [],
+        saranFeedbackSiswa: "Silakan jawab pertanyaan uraian dengan lengkap sesuai materi yang dipelajari.",
+      };
+    }
 
-  if (!process.env.GEMINI_API_KEY) {
-    return {
-      success: false,
-      code: "GEMINI_KEY_NOT_CONFIGURED",
-      isConfigError: true,
-      error: "Variabel lingkungan GEMINI_API_KEY belum dikonfigurasi di server.",
-      hint: "Silakan buka Project Settings > Environment Variables di dashboard Vercel, tambahkan GEMINI_API_KEY, lalu redeploy.",
-      skorRekomendasi: 0,
-      alasanPenilaian: "Koreksi otomatis membutuhkan GEMINI_API_KEY di server. Anda dapat memberi nilai manual pada kolom skor di atas.",
-      indikatorDitemukan: [],
-      saranFeedbackSiswa: "",
-    };
-  }
+    const apiKey = getGeminiApiKey();
+    if (!apiKey) {
+      return {
+        success: false,
+        code: "GEMINI_KEY_NOT_CONFIGURED",
+        isConfigError: true,
+        error: "Variabel lingkungan GEMINI_API_KEY belum dikonfigurasi di server.",
+        hint: "Silakan buka Project Settings > Environment Variables di dashboard Vercel, tambahkan GEMINI_API_KEY, lalu redeploy.",
+        skorRekomendasi: 0,
+        alasanPenilaian: "Koreksi otomatis membutuhkan GEMINI_API_KEY di server. Anda dapat memberi nilai manual pada kolom skor di atas.",
+        indikatorDitemukan: [],
+        saranFeedbackSiswa: "",
+      };
+    }
 
-  const ai = getGeminiClient();
+    const ai = getGeminiClient();
 
-  const prompt = `Anda adalah penilai esai akademik sekolah berstandar nasional Indonesia yang objektif, mendidik, dan adil.
+    const prompt = `Anda adalah penilai esai akademik sekolah berstandar nasional Indonesia yang objektif, mendidik, dan adil.
 Tugas Anda adalah menilai jawaban esai peserta didik berdasarkan rubrik penilaian dan konsep materi acuan yang telah ditetapkan guru.
 
 DATA SOAL & PEDOMAN GURU:
@@ -1102,23 +1183,35 @@ FORMAT OUTPUT HARUS JSON VALID:
   "saranFeedbackSiswa": "catatan edukatif untuk siswa meningkatkan pemahamannya"
 }`;
 
-  const responseText = await generateContentWithFallback(ai, {
-    contents: prompt,
-    config: { responseMimeType: "application/json" },
-  });
+    const responseText = await generateContentWithFallback(ai, {
+      contents: prompt,
+      config: { responseMimeType: "application/json" },
+    });
 
-  const parsed = cleanAndParseJson(responseText);
+    const parsed = cleanAndParseJson(responseText);
 
-  let skor = Number(parsed.skorRekomendasi);
-  if (isNaN(skor) || skor < 0) skor = 0;
-  if (skor > bobotMaksimal) skor = bobotMaksimal;
+    let skor = Number(parsed.skorRekomendasi);
+    if (isNaN(skor) || skor < 0) skor = 0;
+    if (skor > bobotMaksimal) skor = bobotMaksimal;
 
-  return {
-    success: true,
-    skorRekomendasi: Math.round(skor * 10) / 10,
-    alasanPenilaian: parsed.alasanPenilaian || "Dinilai berdasarkan kecocokan konsep dengan rubrik.",
-    indikatorDitemukan: Array.isArray(parsed.indikatorDitemukan) ? parsed.indikatorDitemukan : [],
-    saranFeedbackSiswa: parsed.saranFeedbackSiswa || "Terima kasih telah menjawab.",
-  };
+    return {
+      success: true,
+      skorRekomendasi: Math.round(skor * 10) / 10,
+      alasanPenilaian: parsed.alasanPenilaian || "Dinilai berdasarkan kecocokan konsep dengan rubrik.",
+      indikatorDitemukan: Array.isArray(parsed.indikatorDitemukan) ? parsed.indikatorDitemukan : [],
+      saranFeedbackSiswa: parsed.saranFeedbackSiswa || "Terima kasih telah menjawab.",
+    };
+  } catch (err: any) {
+    console.error("[handleGradeEssay Error]:", err);
+    return {
+      success: false,
+      code: "AI_PROCESSING_ERROR",
+      error: err?.message || "Gagal melakukan penilaian esai dengan AI.",
+      skorRekomendasi: 0,
+      alasanPenilaian: "Gagal memproses penilaian otomatis dengan AI. Silakan beri skor manual.",
+      indikatorDitemukan: [],
+      saranFeedbackSiswa: "",
+    };
+  }
 }
 

@@ -9,40 +9,20 @@
   },
   "rewrites": [
     {
-      "source": "/api/ujian/parse-docx",
-      "destination": "/api/ujian/parse-docx"
+      "source": "/api/ujian/session/:action",
+      "destination": "/api/ujian/session/:action"
     },
     {
-      "source": "/api/ujian/parse-pdf",
-      "destination": "/api/ujian/parse-pdf"
-    },
-    {
-      "source": "/api/ujian/parse-text-soal",
-      "destination": "/api/ujian/parse-text-soal"
-    },
-    {
-      "source": "/api/ai/buat-soal",
-      "destination": "/api/ai/buat-soal"
-    },
-    {
-      "source": "/api/ai/regenerasi-soal",
-      "destination": "/api/ai/regenerasi-soal"
-    },
-    {
-      "source": "/api/ai/buat-modul",
-      "destination": "/api/ai/buat-modul"
-    },
-    {
-      "source": "/api/ai/buat-materi",
-      "destination": "/api/ai/buat-materi"
+      "source": "/api/ujian/:action",
+      "destination": "/api/ujian/:action"
     },
     {
       "source": "/api/health",
       "destination": "/api/health"
     },
     {
-      "source": "/api/(.*)",
-      "destination": "/api"
+      "source": "/api",
+      "destination": "/api/index"
     },
     {
       "source": "/((?!api/).*)",

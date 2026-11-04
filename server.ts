@@ -198,7 +198,7 @@ async function startServer() {
       res.json(result);
     } catch (err: any) {
       console.error("API /api/ujian/session/start error:", err);
-      res.status(500).json({ success: false, error: err.message || "Gagal memverifikasi sesi ujian." });
+      res.status(200).json({ success: false, error: err.message || "Gagal memverifikasi sesi ujian." });
     }
   });
 
@@ -212,7 +212,7 @@ async function startServer() {
       res.json(result);
     } catch (err: any) {
       console.error("API /api/ujian/session/save-answer error:", err);
-      res.status(500).json({ success: false, error: err.message || "Gagal menyimpan jawaban ke server." });
+      res.status(200).json({ success: false, error: err.message || "Gagal menyimpan jawaban ke server." });
     }
   });
 
@@ -223,7 +223,7 @@ async function startServer() {
       res.json(result);
     } catch (err: any) {
       console.error("API /api/ujian/session/heartbeat error:", err);
-      res.status(500).json({ success: false, error: err.message || "Gagal memeriksa status sesi." });
+      res.status(200).json({ success: false, error: err.message || "Gagal memeriksa status sesi." });
     }
   });
 
@@ -237,7 +237,7 @@ async function startServer() {
       res.json(result);
     } catch (err: any) {
       console.error("API /api/ujian/session/submit error:", err);
-      res.status(500).json({ success: false, error: err.message || "Gagal menyelesaikan ujian di server." });
+      res.status(200).json({ success: false, error: err.message || "Gagal menyelesaikan ujian di server." });
     }
   });
 
@@ -248,7 +248,7 @@ async function startServer() {
       res.json(result);
     } catch (err: any) {
       console.error("API /api/ujian/session/unlock error:", err);
-      res.status(500).json({ success: false, error: err.message || "Gagal membuka kunci ujian." });
+      res.status(200).json({ success: false, error: err.message || "Gagal membuka kunci ujian." });
     }
   });
 
@@ -260,7 +260,7 @@ async function startServer() {
       res.json(result);
     } catch (err: any) {
       console.error("API /api/ujian/session/reset error:", err);
-      res.status(500).json({ success: false, error: err.message || "Gagal mereset sesi." });
+      res.status(200).json({ success: false, error: err.message || "Gagal mereset sesi." });
     }
   });
 
@@ -272,7 +272,7 @@ async function startServer() {
       res.json(result);
     } catch (err: any) {
       console.error("API /api/ujian/session/audit-logs error:", err);
-      res.status(500).json({ success: false, error: err.message || "Gagal memuat log audit." });
+      res.status(200).json({ success: false, error: err.message || "Gagal memuat log audit." });
     }
   });
 
