@@ -6,7 +6,7 @@ import {
   handleMatchAnswerKeys,
   handleGradeEssay,
   getGeminiApiKey,
-} from "./_lib/geminiBackend";
+} from "./_lib/geminiBackend.ts";
 import {
   handleStartExamSession,
   handleSaveAnswerSession,
@@ -15,7 +15,8 @@ import {
   handleUnlockSession,
   handleGetProctoringAuditLogs,
   handleResetExamSession,
-} from "./_lib/examSessionBackend";
+} from "./_lib/examSessionBackend.ts";
+import { logBackendStep, logBackendError } from "./_lib/diagnosticHelper.ts";
 
 export const config = {
   maxDuration: 60,
@@ -221,14 +222,18 @@ export default async function handler(req: any, res: any) {
 
     return res.status(404).json({
       success: false,
+      code: "ENDPOINT_NOT_FOUND",
       error: `Endpoint ${pathname} tidak ditemukan di server Vercel API.`,
     });
   } catch (err: any) {
-    console.error(`[Vercel API Catch-All Error on ${pathname}]:`, err);
-    return res.status(200).json({
+    const errorInfo = logBackendError(pathname, "api_index_catch", err);
+    return res.status(errorInfo.httpStatus).json({
       success: false,
-      code: "INTERNAL_API_ERROR",
-      error: err?.message || "Terjadi kesalahan internal pada pemrosesan API.",
+      code: errorInfo.code,
+      category: errorInfo.category,
+      error: errorInfo.message,
+      hint: errorInfo.hint,
+      timestamp: new Date().toISOString(),
     });
   }
 }

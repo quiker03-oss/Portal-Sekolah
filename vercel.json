@@ -1,5 +1,6 @@
 {
   "$schema": "https://openapi.vercel.sh/vercel.json",
+  "framework": "vite",
   "cleanUrls": true,
   "functions": {
     "api/**/*.ts": {
@@ -8,22 +9,6 @@
     }
   },
   "rewrites": [
-    {
-      "source": "/api/ujian/session/:action",
-      "destination": "/api/ujian/session/:action"
-    },
-    {
-      "source": "/api/ujian/:action",
-      "destination": "/api/ujian/:action"
-    },
-    {
-      "source": "/api/health",
-      "destination": "/api/health"
-    },
-    {
-      "source": "/api",
-      "destination": "/api/index"
-    },
     {
       "source": "/((?!api/).*)",
       "destination": "/index.html"

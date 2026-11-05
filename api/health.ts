@@ -1,3 +1,5 @@
+import { getSafeKeyDiagnostics } from "./_lib/diagnosticHelper.ts";
+
 export default function handler(req: any, res: any) {
   res.setHeader("Access-Control-Allow-Origin", "*");
   res.setHeader("Access-Control-Allow-Methods", "GET, OPTIONS");
@@ -7,28 +9,19 @@ export default function handler(req: any, res: any) {
     return res.status(200).end();
   }
 
-  const hasApiKey = Boolean(
-    process.env.GEMINI_API_KEY ||
-    process.env.GOOGLE_API_KEY ||
-    process.env.VITE_GEMINI_API_KEY ||
-    process.env.API_KEY
-  );
+  const diag = getSafeKeyDiagnostics();
 
   return res.status(200).json({
     status: "ok",
     app: "ISTAFA Portal Sekolah",
-    aiAvailable: hasApiKey,
-    apiKeySource: process.env.GEMINI_API_KEY
-      ? "GEMINI_API_KEY"
-      : process.env.GOOGLE_API_KEY
-      ? "GOOGLE_API_KEY"
-      : process.env.VITE_GEMINI_API_KEY
-      ? "VITE_GEMINI_API_KEY"
-      : hasApiKey
-      ? "API_KEY"
-      : "NONE",
-    timestamp: new Date().toISOString(),
-    platform: process.env.VERCEL ? "vercel-serverless" : "local-node",
-    nodeVersion: process.version,
+    diagnostics: {
+      aiAvailable: diag.exists,
+      apiKeySource: diag.source,
+      apiKeyLength: diag.length,
+      apiKeyPreview: diag.maskedPreview,
+      platform: process.env.VERCEL ? "vercel-serverless" : "local-node",
+      nodeVersion: process.version,
+      timestamp: new Date().toISOString(),
+    },
   });
 }

@@ -9,7 +9,7 @@ import {
   handleParseImage,
   handleMatchAnswerKeys,
   handleGradeEssay,
-} from "./api/_lib/geminiBackend";
+} from "./api/_lib/geminiBackend.ts";
 import {
   handleStartExamSession,
   handleSaveAnswerSession,
@@ -18,7 +18,8 @@ import {
   handleUnlockSession,
   handleGetProctoringAuditLogs,
   handleResetExamSession,
-} from "./api/_lib/examSessionBackend";
+} from "./api/_lib/examSessionBackend.ts";
+import { getSafeKeyDiagnostics } from "./api/_lib/diagnosticHelper.ts";
 
 dotenv.config();
 
@@ -43,10 +44,19 @@ async function startServer() {
 
   // Health check
   app.get("/api/health", (req, res) => {
+    const diag = getSafeKeyDiagnostics();
     res.json({
       status: "ok",
-      aiAvailable: Boolean(process.env.GEMINI_API_KEY),
-      timestamp: new Date().toISOString(),
+      app: "ISTAFA Portal Sekolah",
+      diagnostics: {
+        aiAvailable: diag.exists,
+        apiKeySource: diag.source,
+        apiKeyLength: diag.length,
+        apiKeyPreview: diag.maskedPreview,
+        platform: "local-node",
+        nodeVersion: process.version,
+        timestamp: new Date().toISOString(),
+      },
     });
   });
 

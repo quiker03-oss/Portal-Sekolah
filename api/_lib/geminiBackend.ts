@@ -1,31 +1,28 @@
 import { GoogleGenAI } from "@google/genai";
 import JSZip from "jszip";
+import {
+  resolveGeminiApiKey,
+  getSafeKeyDiagnostics,
+  logBackendStep,
+  logBackendError,
+} from "./diagnosticHelper.ts";
 
 export function getGeminiApiKey(): string | undefined {
-  const key =
-    process.env.GEMINI_API_KEY ||
-    process.env.GOOGLE_API_KEY ||
-    process.env.VITE_GEMINI_API_KEY ||
-    process.env.API_KEY ||
-    "";
-  const trimmed = key.trim();
-  return trimmed.length > 0 ? trimmed : undefined;
+  return resolveGeminiApiKey();
 }
+
+export { getSafeKeyDiagnostics, logBackendStep, logBackendError };
 
 export function getGeminiClient(): GoogleGenAI {
   const apiKey = getGeminiApiKey();
   if (!apiKey) {
+    const diag = getSafeKeyDiagnostics();
     throw new Error(
-      "GEMINI_API_KEY belum dikonfigurasi di server. Jika dideploy di Vercel, pastikan variabel GEMINI_API_KEY sudah disetel di menu Project Settings > Environment Variables, lalu lakukan redeploy."
+      `GEMINI_API_KEY belum dikonfigurasi di server (status: ${diag.source}). Silakan buka Project Settings > Environment Variables di dashboard Vercel, pastikan GEMINI_API_KEY terdaftar untuk environment Production, lalu lakukan redeploy.`
     );
   }
   return new GoogleGenAI({
     apiKey,
-    httpOptions: {
-      headers: {
-        "User-Agent": "aistudio-build",
-      },
-    },
   });
 }
 
@@ -444,7 +441,8 @@ export async function handleParseDocx(fileBase64: string, fileName: string = "do
   let parsed: any = null;
   let aiSucceeded = false;
 
-  if (process.env.GEMINI_API_KEY) {
+  const geminiKey = getGeminiApiKey();
+  if (geminiKey) {
     try {
       const ai = getGeminiClient();
       const prompt = `Anda adalah parser naskah ujian sekolah profesional Indonesia.
