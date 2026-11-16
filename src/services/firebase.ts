@@ -9,6 +9,8 @@ export const db = getFirestore(app, firebaseConfig.firestoreDatabaseId);
 export const auth = getAuth(app);
 export const googleProvider = new GoogleAuthProvider();
 export const storage = getStorage(app);
+storage.maxUploadRetryTime = 6000;
+storage.maxOperationRetryTime = 6000;
 
 export { signInWithPopup, firebaseSignOut };
 export { doc, setDoc, getDoc, getDocFromServer, collection, collectionGroup, getDocs, updateDoc, deleteDoc, onSnapshot, query, where, writeBatch };

@@ -63,26 +63,16 @@ export default async function handler(req: any, res: any) {
         return res.status(405).json({ success: false, error: "Metode request harus POST." });
       }
 
-      const { fileBase64, fileName = "dokumen-soal", mimeType, text } = body && typeof body === "object" ? body : {};
+      const {
+        fileBase64,
+        fileName = "dokumen-soal",
+        mimeType,
+        text,
+        pages,
+      } = body && typeof body === "object" ? body : {};
       const hasValidBase64 = typeof fileBase64 === "string" && fileBase64.trim().length > 0;
       const hasValidText = typeof text === "string" && text.trim().length > 0;
       const safeFileName = typeof fileName === "string" && fileName.trim() ? fileName.trim() : "dokumen-soal";
-
-      if (!hasValidBase64 && !hasValidText) {
-        return res.status(400).json({
-          success: false,
-          error: "Data berkas atau teks soal tidak ditemukan dalam request.",
-        });
-      }
-
-      const resolvedMime =
-        typeof mimeType === "string" && mimeType.trim()
-          ? mimeType.trim().toLowerCase()
-          : safeFileName.toLowerCase().endsWith(".pdf")
-          ? "application/pdf"
-          : hasValidBase64
-          ? "image/jpeg"
-          : "text/plain";
 
       const allowedMimes = new Set([
         "application/pdf",
@@ -94,7 +84,52 @@ export default async function handler(req: any, res: any) {
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
       ]);
 
-      if (!allowedMimes.has(resolvedMime)) {
+      const normalizedPages = Array.isArray(pages)
+        ? pages
+            .filter(
+              (p: any) =>
+                p &&
+                typeof p === "object" &&
+                typeof p.imageBase64 === "string" &&
+                p.imageBase64.trim().length > 0
+            )
+            .map((p: any) => ({
+              pageNumber: typeof p.pageNumber === "number" ? p.pageNumber : undefined,
+              imageBase64: p.imageBase64.trim(),
+              mimeType:
+                typeof p.mimeType === "string" && p.mimeType.trim()
+                  ? p.mimeType.trim().toLowerCase()
+                  : "image/jpeg",
+            }))
+        : [];
+      const hasValidPages = normalizedPages.length > 0;
+
+      if (!hasValidBase64 && !hasValidText && !hasValidPages) {
+        return res.status(400).json({
+          success: false,
+          error: "Data berkas atau teks soal tidak ditemukan dalam request.",
+        });
+      }
+
+      for (const p of normalizedPages) {
+        if (!allowedMimes.has(p.mimeType)) {
+          return res.status(400).json({
+            success: false,
+            error: `Tipe gambar halaman (${p.mimeType}) tidak didukung.`,
+          });
+        }
+      }
+
+      const resolvedMime =
+        typeof mimeType === "string" && mimeType.trim()
+          ? mimeType.trim().toLowerCase()
+          : safeFileName.toLowerCase().endsWith(".pdf")
+          ? "application/pdf"
+          : hasValidBase64
+          ? "image/jpeg"
+          : "text/plain";
+
+      if ((hasValidBase64 || hasValidText) && !allowedMimes.has(resolvedMime)) {
         return res.status(400).json({
           success: false,
           error: `Tipe berkas (${resolvedMime}) tidak didukung.`,
@@ -116,6 +151,7 @@ export default async function handler(req: any, res: any) {
           fileBase64: hasValidBase64 ? fileBase64 : undefined,
           mimeType: resolvedMime,
           fileName: safeFileName,
+          pages: hasValidPages ? normalizedPages : undefined,
         });
 
         return res.status(200).json({

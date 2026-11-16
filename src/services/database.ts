@@ -950,11 +950,21 @@ class DatabaseService {
 
   private async syncToFirestore(schoolId: string, collectionName: string, item: any): Promise<void> {
     if (!schoolId || !item || !item.id) return;
+    const path = `schools/${schoolId}/${collectionName}/${String(item.id)}`;
     try {
       const sanitized = this.sanitizeForFirestore(item);
       await setDoc(doc(firestoreDb, `schools/${schoolId}/${collectionName}`, String(item.id)), sanitized);
-    } catch (e) {
-      console.error(`[Firestore Sync Error] school=${schoolId} col=${collectionName} id=${item?.id}:`, e);
+    } catch (e: any) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (msg.toLowerCase().includes('permission') || msg.toLowerCase().includes('insufficient')) {
+        console.error('Firestore Error:', JSON.stringify({
+          error: msg,
+          operationType: 'write',
+          path,
+        }));
+      } else {
+        console.error(`[Firestore Sync Error] path=${path}:`, e);
+      }
     }
   }
 
@@ -3551,8 +3561,11 @@ class DatabaseService {
     const list = this.getItem<ExamImageMeta[]>(STORAGE_KEYS.EXAM_IMAGES, []);
     const idx = list.findIndex((m) => m.id === prepared.id);
     const updated = idx >= 0 ? list.map((m, i) => (i === idx ? prepared : m)) : [prepared, ...list];
-    this.setItem(STORAGE_KEYS.EXAM_IMAGES, updated);
-    await this.syncToFirestore(schoolId, 'exam_images', prepared).catch(() => {});
+    this.setItem(STORAGE_KEYS.EXAM_IMAGES, updated, false);
+    await Promise.race([
+      this.syncToFirestore(schoolId, 'exam_images', prepared).catch(() => {}),
+      new Promise<void>((resolve) => setTimeout(resolve, 4000)),
+    ]);
     return prepared;
   }
 
@@ -3566,8 +3579,11 @@ class DatabaseService {
     const targetSchool = schoolId || this.getActiveSchoolId();
     const list = this.getItem<ExamImageMeta[]>(STORAGE_KEYS.EXAM_IMAGES, []);
     const updated = list.filter((m) => m.id !== imageId);
-    this.setItem(STORAGE_KEYS.EXAM_IMAGES, updated);
-    await this.deleteFromFirestore(targetSchool, 'exam_images', imageId).catch(() => {});
+    this.setItem(STORAGE_KEYS.EXAM_IMAGES, updated, false);
+    await Promise.race([
+      this.deleteFromFirestore(targetSchool, 'exam_images', imageId).catch(() => {}),
+      new Promise<void>((resolve) => setTimeout(resolve, 4000)),
+    ]);
   }
 
   async saveUjian(ujian: UjianOnline): Promise<UjianOnline> {
@@ -3589,11 +3605,16 @@ class DatabaseService {
       updated = [prepared, ...list];
     }
 
-    this.setItem(STORAGE_KEYS.UJIAN_ONLINE, updated);
-    await this.syncToFirestore(prepared.schoolId || activeSchoolId, "exams", prepared).catch(() => {});
+    this.setItem(STORAGE_KEYS.UJIAN_ONLINE, updated, false);
     if (typeof window !== 'undefined') {
       window.dispatchEvent(new CustomEvent("ujian_online_updated", { detail: updated }));
     }
+
+    // Wait up to 6s for Firestore server confirmation; if network/WebChannel is slow, SDK continues sync in background
+    await Promise.race([
+      this.syncToFirestore(prepared.schoolId || activeSchoolId, "exams", prepared).catch(() => {}),
+      new Promise<void>((resolve) => setTimeout(resolve, 6000)),
+    ]);
     return prepared;
   }
 

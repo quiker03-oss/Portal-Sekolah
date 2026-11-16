@@ -323,16 +323,24 @@ function buildPdfPageText(items: any[]): string {
  * Extracts text, embedded images, and scanned page snapshots from a PDF file using pdfjs-dist.
  * Uses locally hosted /pdf.worker.min.mjs (no external CDN dependency) with automatic fallback.
  */
+export interface ScannedPdfPagePayload {
+  pageNumber: number;
+  imageBase64: string;
+  mimeType: string;
+}
+
 async function extractFromPdf(arrayBuffer: ArrayBuffer): Promise<{
   text: string;
   pageCount: number;
   assets: ExtractedImageAsset[];
   pageImages: Record<number, string[]>;
+  scannedPages: ScannedPdfPagePayload[];
   failedImagesCount: number;
   imageWarnings: string[];
 }> {
   const assets: ExtractedImageAsset[] = [];
   const pageImages: Record<number, string[]> = {};
+  const scannedPages: ScannedPdfPagePayload[] = [];
   const imageWarnings: string[] = [];
   let failedImagesCount = 0;
 
@@ -397,8 +405,8 @@ async function extractFromPdf(arrayBuffer: ArrayBuffer): Promise<{
           );
           const isLowTextPage = pageText.trim().length < 80;
 
-          // Only render canvas when page has images or looks scanned (keeps digital text PDFs ultra fast)
-          if (hasImageOps || (isLowTextPage && i <= 10)) {
+          // Render canvas when page has images or looks scanned (up to 25 pages for low-text PDFs)
+          if (hasImageOps || (isLowTextPage && i <= 25)) {
             const viewport = page.getViewport({ scale: 1.4 });
             const canvas = document.createElement('canvas');
             canvas.width = Math.round(viewport.width);
@@ -408,15 +416,25 @@ async function extractFromPdf(arrayBuffer: ArrayBuffer): Promise<{
             if (ctx) {
               await page.render({ canvasContext: ctx, viewport }).promise;
 
-              if (isLowTextPage || i <= 5) {
-                const pageDataUrl = canvas.toDataURL('image/jpeg', 0.8);
-                assets.push({
-                  id: `pdf_page_${i}`,
-                  url: pageDataUrl,
-                  label: `Halaman PDF ${i} (Pratinjau / Scan)`,
-                  pageNumber: i,
-                  source: 'pdf-page',
-                });
+              if (isLowTextPage || i <= 8) {
+                const pageDataUrl = canvas.toDataURL('image/jpeg', 0.78);
+                const commaIdx = pageDataUrl.indexOf(',');
+                if (commaIdx !== -1) {
+                  scannedPages.push({
+                    pageNumber: i,
+                    imageBase64: pageDataUrl.slice(commaIdx + 1),
+                    mimeType: 'image/jpeg',
+                  });
+                }
+                if (isLowTextPage || i <= 5) {
+                  assets.push({
+                    id: `pdf_page_${i}`,
+                    url: pageDataUrl,
+                    label: `Halaman PDF ${i} (Pratinjau / Scan)`,
+                    pageNumber: i,
+                    source: 'pdf-page',
+                  });
+                }
               }
 
               const seenObjIds = new Set<string>();
@@ -492,6 +510,7 @@ async function extractFromPdf(arrayBuffer: ArrayBuffer): Promise<{
       pageCount: pdf.numPages,
       assets,
       pageImages,
+      scannedPages,
       failedImagesCount,
       imageWarnings: Array.from(new Set(imageWarnings)),
     };
@@ -502,6 +521,7 @@ async function extractFromPdf(arrayBuffer: ArrayBuffer): Promise<{
       pageCount: 0,
       assets: [],
       pageImages: {},
+      scannedPages: [],
       failedImagesCount: 0,
       imageWarnings: [],
     };
@@ -513,10 +533,25 @@ async function extractFromPdf(arrayBuffer: ArrayBuffer): Promise<{
  * into explicit numbered questions (1., 2., 3.) and options (A., B., C., D., E.).
  */
 function expandWordOrderedListsInDom(root: HTMLElement): void {
+  const docRef = root.ownerDocument || document;
   let globalQuestionCounter = 0;
+
+  const insertPrefixIntoLi = (li: HTMLLIElement, prefixText: string) => {
+    const firstEl = li.firstElementChild;
+    if (firstEl && (firstEl.tagName === 'P' || firstEl.tagName === 'DIV')) {
+      firstEl.insertBefore(docRef.createTextNode(prefixText), firstEl.firstChild);
+    } else {
+      li.insertBefore(docRef.createTextNode(prefixText), li.firstChild);
+    }
+  };
 
   const processList = (ol: HTMLOListElement, isOptionList: boolean) => {
     const listType = (ol.getAttribute('type') || '').toLowerCase();
+    const startAttr = parseInt(ol.getAttribute('start') || '', 10);
+    if (!isOptionList && Number.isFinite(startAttr) && startAttr > globalQuestionCounter) {
+      globalQuestionCounter = startAttr - 1;
+    }
+
     const listItems = Array.from(ol.children).filter(
       (el): el is HTMLLIElement => el.tagName === 'LI'
     );
@@ -525,7 +560,6 @@ function expandWordOrderedListsInDom(root: HTMLElement): void {
       isOptionList || listType === 'a' || listType === 'i';
 
     listItems.forEach((li, itemIdx) => {
-      // First recursively expand any nested <ol> inside this <li> as options!
       const nestedOls = Array.from(li.querySelectorAll(':scope > ol')) as HTMLOListElement[];
       nestedOls.forEach((nested) => {
         processList(nested, true);
@@ -538,22 +572,21 @@ function expandWordOrderedListsInDom(root: HTMLElement): void {
       if (effectiveOptionList) {
         if (!alreadyHasLetter && itemIdx < 5) {
           const letter = String.fromCharCode(65 + itemIdx); // A..E
-          li.insertBefore(document.createTextNode(`${letter}. `), li.firstChild);
+          insertPrefixIntoLi(li, `${letter}. `);
         }
       } else {
         globalQuestionCounter++;
         if (!alreadyHasNumber && !alreadyHasLetter) {
-          li.insertBefore(document.createTextNode(`${globalQuestionCounter}. `), li.firstChild);
+          insertPrefixIntoLi(li, `${globalQuestionCounter}. `);
         }
       }
     });
 
-    // Replace <ol> with block wrapper so DOM order stays intact
-    const div = document.createElement('div');
+    const div = docRef.createElement('div');
     while (ol.firstChild) {
       const child = ol.firstChild;
       if (child instanceof HTMLElement && child.tagName === 'LI') {
-        const p = document.createElement('p');
+        const p = docRef.createElement('p');
         while (child.firstChild) p.appendChild(child.firstChild);
         div.appendChild(p);
         ol.removeChild(child);
@@ -564,19 +597,34 @@ function expandWordOrderedListsInDom(root: HTMLElement): void {
     ol.replaceWith(div);
   };
 
-  // Process top-level <ol> elements in document order
+  // Sync manual numbered paragraphs preceding any <ol> so mixed manual + auto-numbered docs continue sequentially
   const allOls = Array.from(root.querySelectorAll('ol'));
   for (const ol of allOls) {
     if (!ol.isConnected) continue;
-    // Skip if inside another <ol> (will be handled recursively by parent)
     if (ol.parentElement?.closest('ol')) continue;
+
+    // Scan preceding sibling blocks to detect highest manual question number seen so far
+    let scanSibling: Element | null = ol.previousElementSibling;
+    let highestManualBefore = 0;
+    let steps = 0;
+    while (scanSibling && steps < 40) {
+      steps++;
+      const t = (scanSibling.textContent || '').trim();
+      const m = t.match(/^(?:soal\s*|no\.?\s*)?\(?(\d{1,3})[\.\)]/i);
+      if (m) {
+        const n = parseInt(m[1], 10);
+        if (n > highestManualBefore && n < 500) highestManualBefore = n;
+      }
+      scanSibling = scanSibling.previousElementSibling;
+    }
+    if (highestManualBefore > globalQuestionCounter) {
+      globalQuestionCounter = highestManualBefore;
+    }
 
     const listType = (ol.getAttribute('type') || '').toLowerCase();
     const directLis = Array.from(ol.children).filter((el) => el.tagName === 'LI');
     const hasNestedOl = directLis.some((li) => Boolean(li.querySelector('ol')));
 
-    // Heuristic: Is this standalone top-level <ol> actually options for a preceding numbered <p>?
-    // Walk up to 3 preceding siblings (skipping image markers) to detect the question prompt
     let precededByNumberedQuestion = false;
     let probe: Element | null = ol.previousElementSibling;
     for (let step = 0; step < 3 && probe; step++) {
@@ -711,14 +759,30 @@ function convertHtmlTablesToMarkdown(html: string): {
         );
       });
 
-      const isLayoutTable = parsedRows.some((cells) =>
+      const headerCells = parsedRows[0] || [];
+      const looksLikeDataTableHeader =
+        headerCells.length >= 2 &&
+        headerCells.some((h) =>
+          /^(?:no\.?|nama|nilai|jumlah|frekuensi|data|bulan|tahun|kelas|siswa|hasil|skor|keterangan|jenis|persentase|hari|tanggal|mata pelajaran|mapel|kunci)$/i.test(
+            h.trim()
+          )
+        );
+
+      const hasExplicitQuestionOrOptionLayout = parsedRows.some((cells) =>
         cells.some(
           (c) =>
             c.includes('[[IMAGE_DATA:') ||
-            /^\d+[\.\)]?$/.test(c) ||
-            /^\(?[A-Ea-e][\.\)]\s*/.test(c)
+            c.includes('[[IMAGE_ERROR:') ||
+            /^(?:soal\s*)?\d+[\.\)]\s+/i.test(c) ||
+            /^\(?[A-Ea-e][\.\)](?:\s|$)/.test(c)
         )
       );
+
+      const hasStandaloneNumberColumn =
+        !looksLikeDataTableHeader &&
+        parsedRows.some((cells) => /^\d+[\.\)]?$/.test(cells[0] || ''));
+
+      const isLayoutTable = hasExplicitQuestionOrOptionLayout || hasStandaloneNumberColumn;
 
       if (isLayoutTable) {
         return '\n' + formatLayoutTableRows(parsedRows).join('\n') + '\n';
@@ -794,19 +858,33 @@ function convertHtmlTablesToMarkdown(html: string): {
       }
     });
 
-    const isLayoutTable = parsedRows.some((cells) =>
+    const headerCells = parsedRows[0] || [];
+    const looksLikeDataTableHeader =
+      headerCells.length >= 2 &&
+      headerCells.some((h) =>
+        /^(?:no\.?|nama|nilai|jumlah|frekuensi|data|bulan|tahun|kelas|siswa|hasil|skor|keterangan|jenis|persentase|hari|tanggal|mata pelajaran|mapel|kunci)$/i.test(
+          h.trim()
+        )
+      );
+
+    const hasExplicitQuestionOrOptionLayout = parsedRows.some((cells) =>
       cells.some(
         (c) =>
           c.includes('[[IMAGE_DATA:') ||
           c.includes('[[IMAGE_ERROR:') ||
-          /^\d+[\.\)]?$/.test(c) ||
           /^(?:soal\s*)?\d+[\.\)]\s+/i.test(c) ||
           /^\(?[A-Ea-e][\.\)](?:\s|$)/.test(c)
       )
     );
 
+    const hasStandaloneNumberColumn =
+      !looksLikeDataTableHeader &&
+      parsedRows.some((cells) => /^\d+[\.\)]?$/.test(cells[0] || ''));
+
+    const isLayoutTable = hasExplicitQuestionOrOptionLayout || hasStandaloneNumberColumn;
+
     if (isLayoutTable) {
-      table.replaceWith(document.createTextNode('\n' + formatLayoutTableRows(parsedRows).join('\n') + '\n'));
+      table.replaceWith(docRef.createTextNode('\n' + formatLayoutTableRows(parsedRows).join('\n') + '\n'));
     } else {
       const rows: string[] = [];
       parsedRows.forEach((cells, rIdx) => {
@@ -818,7 +896,7 @@ function convertHtmlTablesToMarkdown(html: string): {
 
       if (rows.length > 0) {
         const tableMd = '\n\n' + rows.join('\n') + '\n\n';
-        table.replaceWith(document.createTextNode(tableMd));
+        table.replaceWith(docRef.createTextNode(tableMd));
       }
     }
   });
@@ -983,6 +1061,7 @@ export function parseQuestionsFromText(
     'kunci jawaban',
     'kunci jawaban soal',
     'pedoman kunci jawaban',
+    'lampiran kunci jawaban',
     'kunci soal',
     'kunci jawaban pilihan ganda',
     'daftar kunci jawaban',
@@ -992,12 +1071,19 @@ export function parseQuestionsFromText(
   let splitIndex = -1;
   for (let i = 0; i < allLines.length; i++) {
     const cleanLine = allLines[i].toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+    const withoutPrefix = cleanLine.replace(/^(?:[ivx]{1,4}|[a-d]|bagian\s+[a-z0-9]+)\s+/, '').trim();
+    const isTableKeyHeader = /^\|\s*no\.?\s*\|\s*kunci/i.test(allLines[i]);
     if (
+      isTableKeyHeader ||
       keySectionKeywords.some(
-        (kw) => cleanLine === kw || cleanLine.startsWith(kw + ' ') || cleanLine === '#' + kw
+        (kw) =>
+          cleanLine === kw ||
+          cleanLine.startsWith(kw + ' ') ||
+          withoutPrefix === kw ||
+          withoutPrefix.startsWith(kw + ' ')
       )
     ) {
-      if (i > 5) {
+      if (i >= 2) {
         splitIndex = i;
         break;
       }
@@ -1015,7 +1101,7 @@ export function parseQuestionsFromText(
   const trailingKeys = extractAnswerKeysFromSection(answerKeySectionText);
 
   // 3. Process question lines
-  const imageUris = Object.values(imageMap);
+  const imageUris = Array.from(new Set(Object.values(imageMap)));
   let nextImageIdx = 0;
 
   const soalList: SoalUjian[] = [];
@@ -1174,11 +1260,13 @@ export function parseQuestionsFromText(
     );
     const isOptionShape = /^[\(\[]?[A-Ea-e]\s*[\.\)\]]/.test(line);
     const optMatch = line.match(/^[\(\[]?([A-Ea-e])\s*[\.\)\]]\s*(.*)/);
-    const keyMatch = line.match(/^(?:kunci(?:\s+jawaban)?|jawaban|kunci)\s*[:=]\s*([A-Ea-e])/i);
+    const keyMatch = line.match(/^(?:kunci(?:\s+jawaban)?|jawaban(?:\s+benar)?|kj)\s*[:=\-]\s*\(?([A-Ea-e])\)?/i);
+    const parsedNum = qMatch ? parseInt(qMatch[1], 10) : 0;
+    const isLikelyQuestionNumber = Boolean(qMatch) && parsedNum >= 1 && parsedNum <= 500;
 
-    if (qMatch && !isOptionShape) {
+    if (qMatch && isLikelyQuestionNumber && !isOptionShape) {
       finalizeSoal();
-      const num = parseInt(qMatch[1], 10);
+      const num = parsedNum;
       currentSoal = {
         nomor: num,
         kunciJawaban: '',
@@ -1297,8 +1385,10 @@ async function callBackendParserFallback(payload: {
   fileBase64?: string;
   mimeType?: string;
   fileName: string;
+  pages?: ScannedPdfPagePayload[];
 }): Promise<{
   success: boolean;
+  status?: number;
   data?: any;
   error?: string;
 }> {
@@ -1315,15 +1405,160 @@ async function callBackendParserFallback(payload: {
 
     const json = await resp.json().catch(() => null);
     if (resp.ok && json?.success && json?.data && Array.isArray(json.data.soalList)) {
-      return { success: true, data: json.data };
+      return { success: true, status: resp.status, data: json.data };
     }
     return {
       success: false,
-      error: json?.error || `Server merespons status ${resp.status}`,
+      status: resp.status,
+      error:
+        resp.status === 413
+          ? 'Ukuran dokumen melebihi batas request server (4.5MB). Memecah per halaman...'
+          : json?.error || `Server merespons status ${resp.status}`,
     };
   } catch (err: any) {
     return { success: false, error: err?.message || 'Gagal menghubungi server parser.' };
   }
+}
+
+/**
+ * Splits page images into Vercel-safe <= 2.2 MB JSON request batches and merges questions in exact order.
+ */
+async function callBackendParserInBatches(
+  pages: ScannedPdfPagePayload[],
+  fileName: string
+): Promise<{
+  success: boolean;
+  data?: { judul?: string; mataPelajaran?: string; kelas?: string; petunjukUmum?: string; soalList: any[] };
+  error?: string;
+}> {
+  if (!pages || pages.length === 0) {
+    return { success: false, error: 'Tidak ada halaman gambar untuk diproses.' };
+  }
+
+  const MAX_BATCH_BASE64_CHARS = 2_100_000; // ~2.1MB payload safely below Vercel's 4.5MB hard edge limit
+  const MAX_PAGES_PER_BATCH = 3;
+
+  const batches: ScannedPdfPagePayload[][] = [];
+  let currentBatch: ScannedPdfPagePayload[] = [];
+  let currentSize = 0;
+
+  for (const page of pages) {
+    const pageSize = page.imageBase64.length;
+    if (
+      currentBatch.length > 0 &&
+      (currentSize + pageSize > MAX_BATCH_BASE64_CHARS || currentBatch.length >= MAX_PAGES_PER_BATCH)
+    ) {
+      batches.push(currentBatch);
+      currentBatch = [];
+      currentSize = 0;
+    }
+    currentBatch.push(page);
+    currentSize += pageSize;
+  }
+  if (currentBatch.length > 0) batches.push(currentBatch);
+
+  let mergedJudul: string | undefined;
+  let mergedMapel: string | undefined;
+  let mergedKelas: string | undefined;
+  let mergedPetunjuk: string | undefined;
+  const mergedSoal: any[] = [];
+  let lastError: string | undefined;
+
+  for (const batch of batches) {
+    const res = await callBackendParserFallback({
+      pages: batch,
+      fileName,
+    });
+    if (res.success && res.data) {
+      if (!mergedJudul && res.data.judul) mergedJudul = res.data.judul;
+      if (!mergedMapel && res.data.mataPelajaran) mergedMapel = res.data.mataPelajaran;
+      if (!mergedKelas && res.data.kelas) mergedKelas = res.data.kelas;
+      if (!mergedPetunjuk && res.data.petunjukUmum) mergedPetunjuk = res.data.petunjukUmum;
+      if (Array.isArray(res.data.soalList)) {
+        mergedSoal.push(...res.data.soalList);
+      }
+    } else if (res.error) {
+      lastError = res.error;
+    }
+  }
+
+  if (mergedSoal.length > 0) {
+    const renumbered = mergedSoal.map((q, idx) => ({ ...q, nomor: idx + 1 }));
+    return {
+      success: true,
+      data: {
+        judul: mergedJudul,
+        mataPelajaran: mergedMapel,
+        kelas: mergedKelas,
+        petunjukUmum: mergedPetunjuk,
+        soalList: renumbered,
+      },
+    };
+  }
+
+  return {
+    success: false,
+    error: lastError || 'OCR halaman tidak menemukan soal yang terbaca.',
+  };
+}
+
+/**
+ * Downscales an uploaded image file so base64 stays safely under Vercel's 4.5MB body limit.
+ */
+async function prepareImageFileForUpload(
+  file: File | { name: string; arrayBuffer: () => Promise<ArrayBuffer> },
+  arrayBuffer: ArrayBuffer
+): Promise<{ base64: string; mimeType: string; dataUri: string }> {
+  const name = file.name.toLowerCase();
+  const fallbackMime = name.endsWith('.png')
+    ? 'image/png'
+    : name.endsWith('.webp')
+    ? 'image/webp'
+    : 'image/jpeg';
+
+  const uint8Array = new Uint8Array(arrayBuffer);
+  let binary = '';
+  for (let i = 0; i < uint8Array.byteLength; i++) {
+    binary += String.fromCharCode(uint8Array[i]);
+  }
+  const rawBase64 = typeof btoa !== 'undefined' ? btoa(binary) : Buffer.from(uint8Array).toString('base64');
+  const rawDataUri = `data:${fallbackMime};base64,${rawBase64}`;
+
+  if (rawBase64.length <= 2_400_000 || typeof document === 'undefined') {
+    return { base64: rawBase64, mimeType: fallbackMime, dataUri: rawDataUri };
+  }
+
+  return await new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const maxDim = 1800;
+      let w = img.width;
+      let h = img.height;
+      if (w > maxDim || h > maxDim) {
+        const scale = Math.min(maxDim / w, maxDim / h);
+        w = Math.round(w * scale);
+        h = Math.round(h * scale);
+      }
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) {
+        resolve({ base64: rawBase64, mimeType: fallbackMime, dataUri: rawDataUri });
+        return;
+      }
+      ctx.drawImage(img, 0, 0, w, h);
+      const compressedDataUri = canvas.toDataURL('image/jpeg', 0.82);
+      const comma = compressedDataUri.indexOf(',');
+      resolve({
+        base64: comma !== -1 ? compressedDataUri.slice(comma + 1) : rawBase64,
+        mimeType: 'image/jpeg',
+        dataUri: compressedDataUri,
+      });
+    };
+    img.onerror = () => resolve({ base64: rawBase64, mimeType: fallbackMime, dataUri: rawDataUri });
+    img.src = rawDataUri;
+  });
 }
 
 /**
@@ -1508,7 +1743,7 @@ export async function parseExamDocument(
                 .replace(/[ \t]+/g, ' ')
                 .trim();
 
-            const outBlocks: string[] = [];
+            const outHtmlBlocks: string[] = [];
             const blockRe = /<w:tbl\b[^>]*>[\s\S]*?<\/w:tbl>|<w:p\b[^>]*>[\s\S]*?<\/w:p>/g;
             let m: RegExpExecArray | null;
             let lastTblEnd = 0;
@@ -1525,14 +1760,14 @@ export async function parseExamDocument(
                   return `<tr>${cells.map((c) => `<${tag}>${c}</${tag}>`).join('')}</tr>`;
                 });
                 if (rowsHtml.length > 0) {
-                  outBlocks.push(`\n[[TABLE_HTML:<table><tbody>${rowsHtml.join('')}</tbody></table>]]\n`);
+                  outHtmlBlocks.push(`<table><tbody>${rowsHtml.join('')}</tbody></table>`);
                 }
               } else {
                 const txt = cleanXmlText(block);
-                if (txt) outBlocks.push(txt);
+                if (txt) outHtmlBlocks.push(`<p>${txt}</p>`);
               }
             }
-            const xmlDerivedText = outBlocks.join('\n').trim();
+            const xmlDerivedText = convertHtmlTablesToMarkdown(outHtmlBlocks.join('\n')).textWithTables.trim();
             if (xmlDerivedText.length > rawDocxText.trim().length) {
               rawDocxText = xmlDerivedText;
             }
@@ -1585,7 +1820,10 @@ export async function parseExamDocument(
           fileName: file.name,
         });
         if (aiRes.success && aiRes.data?.soalList?.length > 0) {
-          const formatted = formatAiParsedSoalList(aiRes.data.soalList, false);
+          let formatted = formatAiParsedSoalList(aiRes.data.soalList, false);
+          if (rawDocxText.toLowerCase().includes('kunci')) {
+            formatted = applyAnswerKeysFromText(formatted, rawDocxText).updatedSoalList;
+          }
           const pgQuestions = formatted.filter((s) => s.tipe === 'pilihan_ganda');
           const kunciDitemukanCount = pgQuestions.filter((s) => Boolean(s.kunciJawaban)).length;
           return {
@@ -1614,6 +1852,49 @@ export async function parseExamDocument(
         }
       }
 
+      // Image-only DOCX fallback (e.g. exam screenshots pasted inside Word without text)
+      if (docxAssets.length > 0) {
+        const docxPages: ScannedPdfPagePayload[] = docxAssets
+          .map((asset, idx) => {
+            const commaIdx = asset.url.indexOf(',');
+            const mimeMatch = asset.url.match(/^data:([^;]+);base64,/i);
+            return {
+              pageNumber: idx + 1,
+              imageBase64: commaIdx !== -1 ? asset.url.slice(commaIdx + 1) : '',
+              mimeType: mimeMatch?.[1]?.toLowerCase() || 'image/png',
+            };
+          })
+          .filter((p) => p.imageBase64.length > 0);
+
+        if (docxPages.length > 0) {
+          const ocrDocxRes = await callBackendParserInBatches(docxPages, file.name);
+          if (ocrDocxRes.success && ocrDocxRes.data?.soalList?.length) {
+            const formatted = formatAiParsedSoalList(ocrDocxRes.data.soalList, true);
+            const pgQuestions = formatted.filter((s) => s.tipe === 'pilihan_ganda');
+            const kunciDitemukanCount = pgQuestions.filter((s) => Boolean(s.kunciJawaban)).length;
+            return {
+              success: true,
+              judul: ocrDocxRes.data.judul || metadata.judul,
+              mataPelajaran: ocrDocxRes.data.mataPelajaran || metadata.mapel,
+              kelas: ocrDocxRes.data.kelas || metadata.kelas,
+              petunjukUmum: ocrDocxRes.data.petunjukUmum || metadata.petunjuk,
+              soalList: formatted,
+              extractedImagesCount: totalExtractedImages,
+              failedImagesCount: totalFailedImages,
+              imageWarnings: allWarnings,
+              extractedImages: docxAssets,
+              originalText:
+                rawDocxText.replace(/\[\[IMAGE_DATA:[^\]]+\]\]/g, '[Gambar Tersemat]') ||
+                'Dokumen Word berisi gambar soal (OCR diterapkan)',
+              originalHtml: rawDocxHtml,
+              kunciDitemukanCount,
+              kunciBelumDitemukanCount: pgQuestions.length - kunciDitemukanCount,
+              siapDiterbitkan: pgQuestions.length - kunciDitemukanCount === 0,
+            };
+          }
+        }
+      }
+
       return {
         success: false,
         soalList: [],
@@ -1628,19 +1909,76 @@ export async function parseExamDocument(
         siapDiterbitkan: false,
         error:
           rawDocxText.trim().length < 15
-            ? 'Dokumen Word kosong atau hanya berisi gambar tanpa teks soal yang terbaca. Pastikan file .docx berisi teks soal (bukan gambar hasil screenshot yang ditempel ke Word).'
+            ? 'Dokumen Word kosong atau hanya berisi gambar tanpa teks soal yang terbaca. Pastikan berkas .docx memuat naskah soal yang jelas atau konfigurasi GEMINI_API_KEY aktif di server.'
             : 'Tidak ditemukan butir soal yang dapat dikenali dalam dokumen Word ini. Pastikan format nomor soal jelas (misal 1., 2.) dan pilihan ganda (A., B., C., D.).',
       };
     }
 
     // ------------------------------------------------------------------------
-    // 2. PDF PARSER (pdfjs-dist text + embedded images + AI/OCR fallback)
+    // 2. IMAGE EXAM UPLOAD (.JPG, .JPEG, .PNG, .WEBP) VIA OCR
+    // ------------------------------------------------------------------------
+    if (/\.(jpg|jpeg|png|webp)$/i.test(filename)) {
+      const preparedImg = await prepareImageFileForUpload(file as any, arrayBuffer);
+      const imgAssets: ExtractedImageAsset[] = [
+        {
+          id: 'uploaded_exam_image_1',
+          url: preparedImg.dataUri,
+          label: `Foto Naskah (${file.name})`,
+          source: 'pdf-page',
+        },
+      ];
+      const ocrRes = await callBackendParserFallback({
+        fileBase64: preparedImg.base64,
+        mimeType: preparedImg.mimeType,
+        fileName: file.name,
+      });
+
+      if (ocrRes.success && ocrRes.data?.soalList?.length > 0) {
+        const formatted = formatAiParsedSoalList(ocrRes.data.soalList, true);
+        const pgQuestions = formatted.filter((s) => s.tipe === 'pilihan_ganda');
+        const kunciDitemukanCount = pgQuestions.filter((s) => Boolean(s.kunciJawaban)).length;
+        return {
+          success: true,
+          judul: ocrRes.data.judul,
+          mataPelajaran: ocrRes.data.mataPelajaran,
+          kelas: ocrRes.data.kelas,
+          petunjukUmum: ocrRes.data.petunjukUmum,
+          soalList: formatted,
+          extractedImagesCount: 1,
+          failedImagesCount: 0,
+          imageWarnings: [],
+          extractedImages: imgAssets,
+          originalText: `Berkas Gambar Naskah: ${file.name} (OCR Diterapkan)`,
+          kunciDitemukanCount,
+          kunciBelumDitemukanCount: pgQuestions.length - kunciDitemukanCount,
+          siapDiterbitkan: pgQuestions.length - kunciDitemukanCount === 0,
+        };
+      }
+
+      return {
+        success: false,
+        soalList: [],
+        extractedImagesCount: 1,
+        failedImagesCount: 0,
+        imageWarnings: [],
+        extractedImages: imgAssets,
+        originalText: `Berkas Gambar Naskah: ${file.name}`,
+        kunciDitemukanCount: 0,
+        kunciBelumDitemukanCount: 0,
+        siapDiterbitkan: false,
+        error: `Gagal membaca soal dari gambar "${file.name}"${ocrRes.error ? `: ${ocrRes.error}` : ''}. Pastikan foto jelas dan GEMINI_API_KEY aktif di Vercel.`,
+      };
+    }
+
+    // ------------------------------------------------------------------------
+    // 3. PDF PARSER (pdfjs-dist text + embedded images + Vercel-safe OCR fallback)
     // ------------------------------------------------------------------------
     if (filename.endsWith('.pdf')) {
       const {
         text: pdfText,
         pageCount,
         assets: pdfAssets,
+        scannedPages,
         failedImagesCount: pdfImgFailed,
         imageWarnings: pdfImgWarnings,
       } = await extractFromPdf(arrayBuffer);
@@ -1651,7 +1989,7 @@ export async function parseExamDocument(
         .trim();
       const rasterAssetsOnly = pdfAssets.filter((a) => a.source === 'pdf');
 
-      // 2a. Local deterministic text extraction
+      // 3a. Local deterministic text extraction
       if (cleanDigitalText.length > 30) {
         const { soalList, metadata, imageWarnings: parseImgWarnings, failedImagesCount: parseFailed } =
           parseQuestionsFromText(pdfText);
@@ -1687,56 +2025,80 @@ export async function parseExamDocument(
           };
         }
 
-        // 2b. Digital PDF text exists, but layout/numbering needs AI structuring fallback
-        const textFallbackRes = await callBackendParserFallback({
-          text: cleanDigitalText,
-          fileName: file.name,
-        });
-        if (textFallbackRes.success && textFallbackRes.data?.soalList?.length > 0) {
-          const formatted = formatAiParsedSoalList(textFallbackRes.data.soalList, false);
-          const pgQuestions = formatted.filter((s) => s.tipe === 'pilihan_ganda');
-          const kunciDitemukanCount = pgQuestions.filter((s) => Boolean(s.kunciJawaban)).length;
-          return {
-            success: true,
-            judul: textFallbackRes.data.judul || metadata.judul,
-            mataPelajaran: textFallbackRes.data.mataPelajaran || metadata.mapel,
-            kelas: textFallbackRes.data.kelas || metadata.kelas,
-            petunjukUmum: textFallbackRes.data.petunjukUmum || metadata.petunjuk,
-            soalList: formatted,
-            extractedImagesCount: rasterAssetsOnly.length,
-            failedImagesCount: pdfImgFailed,
-            imageWarnings: pdfImgWarnings,
-            extractedImages: pdfAssets,
-            originalText: pdfText.replace(/\[\[IMAGE_DATA:[^\]]+\]\]/g, '[Gambar Tersemat]'),
-            pageCount,
-            kunciDitemukanCount,
-            kunciBelumDitemukanCount: pgQuestions.length - kunciDitemukanCount,
-            siapDiterbitkan: pgQuestions.length - kunciDitemukanCount === 0,
-          };
+        // 3b. Digital PDF text exists and pages aren't mostly scanned -> AI text structuring fallback
+        if (scannedPages.length === 0 || cleanDigitalText.length > 400) {
+          const textFallbackRes = await callBackendParserFallback({
+            text: cleanDigitalText,
+            fileName: file.name,
+          });
+          if (textFallbackRes.success && textFallbackRes.data?.soalList?.length > 0) {
+            let formatted = formatAiParsedSoalList(textFallbackRes.data.soalList, false);
+            if (cleanDigitalText.toLowerCase().includes('kunci')) {
+              formatted = applyAnswerKeysFromText(formatted, cleanDigitalText).updatedSoalList;
+            }
+            const pgQuestions = formatted.filter((s) => s.tipe === 'pilihan_ganda');
+            const kunciDitemukanCount = pgQuestions.filter((s) => Boolean(s.kunciJawaban)).length;
+            return {
+              success: true,
+              judul: textFallbackRes.data.judul || metadata.judul,
+              mataPelajaran: textFallbackRes.data.mataPelajaran || metadata.mapel,
+              kelas: textFallbackRes.data.kelas || metadata.kelas,
+              petunjukUmum: textFallbackRes.data.petunjukUmum || metadata.petunjuk,
+              soalList: formatted,
+              extractedImagesCount: rasterAssetsOnly.length,
+              failedImagesCount: pdfImgFailed,
+              imageWarnings: pdfImgWarnings,
+              extractedImages: pdfAssets,
+              originalText: pdfText.replace(/\[\[IMAGE_DATA:[^\]]+\]\]/g, '[Gambar Tersemat]'),
+              pageCount,
+              kunciDitemukanCount,
+              kunciBelumDitemukanCount: pgQuestions.length - kunciDitemukanCount,
+              siapDiterbitkan: pgQuestions.length - kunciDitemukanCount === 0,
+            };
+          }
         }
       }
 
-      // 2c. Scanned PDF or client PDF worker unavailable -> Multimodal PDF OCR via backend
+      // 3c. Scanned PDF or client PDF worker unavailable -> Vercel-safe Visual PDF OCR
       const scanWarnings = [
         ...pdfImgWarnings,
         'Dokumen PDF diproses melalui pembacaan visual/OCR. Jika soal memiliki gambar atau diagram, halaman PDF tersedia di "Atur / Crop -> Gambar Tersedia".',
       ];
 
-      const uint8Array = new Uint8Array(arrayBuffer);
-      let binary = '';
-      for (let i = 0; i < uint8Array.byteLength; i++) {
-        binary += String.fromCharCode(uint8Array[i]);
-      }
-      const fileBase64 = typeof btoa !== 'undefined' ? btoa(binary) : Buffer.from(uint8Array).toString('base64');
+      let ocrRes: { success: boolean; data?: any; error?: string } = { success: false };
 
-      const ocrRes = await callBackendParserFallback({
-        fileBase64,
-        fileName: file.name,
-        mimeType: 'application/pdf',
-      });
+      // Only send raw PDF directly if <= 2.4MB binary (~3.2MB base64, safely under Vercel's 4.5MB limit)
+      if (arrayBuffer.byteLength <= 2_400_000) {
+        const uint8Array = new Uint8Array(arrayBuffer);
+        let binary = '';
+        for (let i = 0; i < uint8Array.byteLength; i++) {
+          binary += String.fromCharCode(uint8Array[i]);
+        }
+        const fileBase64 =
+          typeof btoa !== 'undefined' ? btoa(binary) : Buffer.from(uint8Array).toString('base64');
+
+        ocrRes = await callBackendParserFallback({
+          fileBase64,
+          fileName: file.name,
+          mimeType: 'application/pdf',
+        });
+      }
+
+      // If PDF exceeded 2.4MB (Vercel 4.5MB protection) OR direct PDF call failed, process rendered page images in <=2.1MB batches!
+      if ((!ocrRes.success || !ocrRes.data?.soalList?.length) && scannedPages.length > 0) {
+        const batchedRes = await callBackendParserInBatches(scannedPages, file.name);
+        if (batchedRes.success && batchedRes.data?.soalList?.length) {
+          ocrRes = batchedRes;
+        } else if (!ocrRes.error && batchedRes.error) {
+          ocrRes = batchedRes;
+        }
+      }
 
       if (ocrRes.success && ocrRes.data && Array.isArray(ocrRes.data.soalList) && ocrRes.data.soalList.length > 0) {
-        const formattedSoalList = formatAiParsedSoalList(ocrRes.data.soalList, true);
+        let formattedSoalList = formatAiParsedSoalList(ocrRes.data.soalList, true);
+        if (cleanDigitalText.toLowerCase().includes('kunci')) {
+          formattedSoalList = applyAnswerKeysFromText(formattedSoalList, cleanDigitalText).updatedSoalList;
+        }
         const pgQuestions = formattedSoalList.filter((s) => s.tipe === 'pilihan_ganda');
         const kunciDitemukanCount = pgQuestions.filter((s) => Boolean(s.kunciJawaban)).length;
         const kunciBelumDitemukanCount = pgQuestions.length - kunciDitemukanCount;
@@ -1775,7 +2137,9 @@ export async function parseExamDocument(
         error:
           cleanDigitalText.length > 30
             ? `Teks PDF terbaca (${cleanDigitalText.length} karakter), namun struktur nomor soal belum dikenali. Pastikan penomoran menggunakan format 1., 2., dan pilihan A., B., C., D.${ocrRes.error ? ` (${ocrRes.error})` : ''}`
-            : `PDF tidak memuat teks digital (kemungkinan hasil scan gambar) dan OCR otomatis belum berhasil${ocrRes.error ? `: ${ocrRes.error}` : ''}. Pastikan GEMINI_API_KEY aktif untuk PDF scan, atau gunakan file Word (.docx) / PDF teks digital.`,
+            : arrayBuffer.byteLength > 2_400_000 && scannedPages.length === 0
+            ? 'Ukuran PDF melebihi 2.4 MB dan halaman gagal dirender di browser. Perkecil/kompres ukuran PDF lalu unggah ulang.'
+            : `PDF tidak memuat teks digital (kemungkinan hasil scan gambar) dan OCR otomatis belum berhasil${ocrRes.error ? `: ${ocrRes.error}` : ''}. Pastikan GEMINI_API_KEY aktif di Vercel Environment Variables untuk PDF scan, atau gunakan file Word (.docx) / PDF teks digital.`,
       };
     }
 

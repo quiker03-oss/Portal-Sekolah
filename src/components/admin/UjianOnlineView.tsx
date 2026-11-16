@@ -135,6 +135,7 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
     warnings: string[];
   }>({ extractedCount: 0, failedCount: 0, warnings: [] });
   const [isSavingExam, setIsSavingExam] = useState<boolean>(false);
+  const [savingStatusText, setSavingStatusText] = useState<string>('');
 
   // Manual Image Management & Lightbox State (Fitur Gambar Lengkap)
   const [activeImageModal, setActiveImageModal] = useState<{
@@ -626,6 +627,12 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
     setIsParsingDoc(true);
     setParseError(null);
     setUploadedFileName(file.name);
+    // Clear previous document results so an upload strictly reflects the newly uploaded file
+    setParsedSoalList([]);
+    setExtractedDocImages([]);
+    setDocImageStats({ extractedCount: 0, failedCount: 0, warnings: [] });
+    setOriginalDocText('');
+    setOriginalDocHtml('');
 
     try {
       const result: ParseDocumentResult = await parseExamDocument(file);
@@ -640,9 +647,16 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
       setOriginalDocText(result.originalText || '');
       setOriginalDocHtml(result.originalHtml || '');
 
-      if (result.judul && !formJudul) setFormJudul(result.judul);
-      if (result.mataPelajaran && !formMapel) setFormMapel(result.mataPelajaran);
-      if (result.kelas && formKelasTarget.length === 0) setFormKelasTarget([result.kelas]);
+      if (!editingUjian) {
+        if (result.judul) setFormJudul(result.judul);
+        if (result.mataPelajaran) setFormMapel(result.mataPelajaran);
+        if (result.kelas) setFormKelasTarget([result.kelas]);
+        if (result.petunjukUmum) setFormPetunjuk(result.petunjukUmum);
+      } else {
+        if (result.judul && !formJudul) setFormJudul(result.judul);
+        if (result.mataPelajaran && !formMapel) setFormMapel(result.mataPelajaran);
+        if (result.kelas && formKelasTarget.length === 0) setFormKelasTarget([result.kelas]);
+      }
 
       if (result.success && result.soalList.length > 0) {
         setParsedSoalList(result.soalList);
@@ -704,18 +718,35 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
     }
 
     setIsSavingExam(true);
+    setSavingStatusText('Mempersiapkan naskah & gambar soal...');
     try {
       const schoolId = db.getActiveSchoolId();
       const examId = editingUjian?.id || `cbt-${Date.now()}`;
       const renumberedList = parsedSoalList.map((s, idx) => ({ ...s, nomor: idx + 1 }));
 
-      // Upload all embedded / cropped Data URI images permanently to Firebase Storage + exam_images Firestore collection
-      const syncedSoalList = await uploadExamQuestionsImages(
-        schoolId,
-        examId,
-        renumberedList,
-        currentUser.id
-      );
+      // Upload all embedded / cropped Data URI images to Firebase Storage with bounded fallback timeout
+      let syncedSoalList = renumberedList;
+      try {
+        syncedSoalList = await Promise.race([
+          uploadExamQuestionsImages(
+            schoolId,
+            examId,
+            renumberedList,
+            currentUser.id,
+            (msg) => setSavingStatusText(msg)
+          ),
+          new Promise<SoalUjian[]>((resolve) =>
+            setTimeout(() => {
+              console.warn('[UjianOnlineView] Image upload timeout guard triggered; continuing with local Data URIs.');
+              resolve(renumberedList);
+            }, 15000)
+          ),
+        ]);
+      } catch (imgErr) {
+        console.warn('[UjianOnlineView] Image optimization/upload warning, continuing save:', imgErr);
+      }
+
+      setSavingStatusText(status === 'aktif' ? 'Menerbitkan ujian ke server...' : 'Menyimpan draf ujian...');
 
       const examData: UjianOnline = {
         id: examId,
@@ -743,6 +774,8 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
       };
 
       await db.saveUjian(examData);
+      setUjianList(db.getUjianList());
+
       try {
         sound.playSuccess();
       } catch {}
@@ -761,6 +794,7 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
       toast.error(`Gagal menyimpan ujian: ${err?.message || 'Terjadi kesalahan sistem'}`);
     } finally {
       setIsSavingExam(false);
+      setSavingStatusText('');
     }
   };
 
@@ -1136,16 +1170,16 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
             <div className="border-2 border-dashed border-slate-300 hover:border-blue-500 rounded-2xl p-6 sm:p-8 text-center transition-all bg-slate-50/50">
               <Upload className="w-10 h-10 text-blue-700 mx-auto mb-2" />
               <label className="inline-block px-5 py-2.5 bg-blue-700 hover:bg-blue-600 text-white rounded-xl text-xs font-bold shadow-md transition-all cursor-pointer">
-                <span>Pilih Berkas DOCX / PDF</span>
+                <span>Pilih Berkas DOCX / PDF / Foto Soal</span>
                 <input
                   type="file"
-                  accept=".docx,.doc,.pdf,.txt"
+                  accept=".docx,.doc,.pdf,.txt,.jpg,.jpeg,.png,.webp"
                   onChange={handleUploadDocument}
                   className="hidden"
                 />
               </label>
               <p className="text-[11px] text-slate-400 mt-2">
-                Mendukung Microsoft Word (.docx), PDF seluruh halaman, tabel, dan media gambar tersemat.
+                Mendukung Microsoft Word (.docx), PDF (teks digital & hasil scan), maupun foto lembar soal (JPG/PNG/WEBP).
               </p>
               {uploadedFileName && (
                 <div className="mt-3 text-xs font-semibold text-blue-800 bg-blue-50 py-1.5 px-3 rounded-lg inline-block">
@@ -1779,10 +1813,13 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
 
             {/* Approval & Publish Buttons */}
             <div className="pt-6 border-t border-slate-100 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
-              <span className="text-xs text-slate-500 font-medium">
-                {isSavingExam
-                  ? 'Mengunggah gambar soal ke Cloud Storage & menyimpan naskah ujian...'
-                  : 'Pastikan seluruh butir soal, gambar, dan kunci telah diperiksa dengan seksama.'}
+              <span className="text-xs text-slate-500 font-medium flex items-center gap-2">
+                {isSavingExam && <RefreshCw className="w-3.5 h-3.5 animate-spin text-blue-600" />}
+                <span>
+                  {isSavingExam
+                    ? savingStatusText || 'Mengunggah gambar soal & menyimpan naskah ujian...'
+                    : 'Pastikan seluruh butir soal, gambar, dan kunci telah diperiksa dengan seksama.'}
+                </span>
               </span>
 
               <div className="flex flex-wrap gap-2">

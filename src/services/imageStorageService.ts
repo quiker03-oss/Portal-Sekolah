@@ -51,6 +51,20 @@ export function validateImageFile(file: File): { valid: boolean; error?: string 
  * Compresses and resizes high-resolution images (e.g., from Android camera or scanner)
  * using HTML5 Canvas, preserving aspect ratio and converting to optimized WebP/JPEG.
  */
+async function withTimeout<T>(promise: Promise<T>, ms: number, message: string): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
 export async function compressAndOptimizeImage(
   source: File | Blob | string,
   maxWidth = 1400,
@@ -74,56 +88,60 @@ export async function compressAndOptimizeImage(
     throw new Error('Lingkungan browser tidak tersedia untuk kompresi gambar.');
   }
 
-  return new Promise((resolve, reject) => {
+  const decodePromise = new Promise<{ dataUrl: string; width: number; height: number; sizeBytes: number; mimeType: string }>((resolve, reject) => {
     const img = new Image();
     img.crossOrigin = 'anonymous';
 
     img.onload = () => {
-      let { width, height } = img;
-      if (!width || !height) {
-        reject(new Error('Dimensi gambar tidak valid (0x0).'));
-        return;
+      try {
+        let { width, height } = img;
+        if (!width || !height) {
+          reject(new Error('Dimensi gambar tidak valid (0x0).'));
+          return;
+        }
+
+        // Calculate proportional dimensions (aspect ratio preserved)
+        if (width > maxWidth || height > maxHeight) {
+          const ratio = Math.min(maxWidth / width, maxHeight / height);
+          width = Math.round(width * ratio);
+          height = Math.round(height * ratio);
+        }
+
+        const canvas = document.createElement('canvas');
+        canvas.width = width;
+        canvas.height = height;
+        const ctx = canvas.getContext('2d');
+
+        if (!ctx) {
+          reject(new Error('Canvas context tidak tersedia.'));
+          return;
+        }
+
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(img, 0, 0, width, height);
+
+        // Try webp first, fallback to jpeg
+        let mimeType = 'image/webp';
+        let dataUrl = canvas.toDataURL('image/webp', quality);
+        if (!dataUrl.startsWith('data:image/webp')) {
+          mimeType = 'image/jpeg';
+          dataUrl = canvas.toDataURL('image/jpeg', quality);
+        }
+
+        const base64Len = dataUrl.length - (dataUrl.indexOf(',') + 1);
+        const sizeBytes = Math.round((base64Len * 3) / 4);
+
+        resolve({
+          dataUrl,
+          width,
+          height,
+          sizeBytes,
+          mimeType,
+        });
+      } catch (canvasErr) {
+        reject(canvasErr);
       }
-
-      // Calculate proportional dimensions (aspect ratio preserved)
-      if (width > maxWidth || height > maxHeight) {
-        const ratio = Math.min(maxWidth / width, maxHeight / height);
-        width = Math.round(width * ratio);
-        height = Math.round(height * ratio);
-      }
-
-      const canvas = document.createElement('canvas');
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-
-      if (!ctx) {
-        reject(new Error('Canvas context tidak tersedia.'));
-        return;
-      }
-
-      ctx.imageSmoothingEnabled = true;
-      ctx.imageSmoothingQuality = 'high';
-      ctx.drawImage(img, 0, 0, width, height);
-
-      // Try webp first, fallback to jpeg
-      let mimeType = 'image/webp';
-      let dataUrl = canvas.toDataURL('image/webp', quality);
-      if (!dataUrl.startsWith('data:image/webp')) {
-        mimeType = 'image/jpeg';
-        dataUrl = canvas.toDataURL('image/jpeg', quality);
-      }
-
-      const base64Len = dataUrl.length - (dataUrl.indexOf(',') + 1);
-      const sizeBytes = Math.round((base64Len * 3) / 4);
-
-      resolve({
-        dataUrl,
-        width,
-        height,
-        sizeBytes,
-        mimeType,
-      });
     };
 
     img.onerror = () => reject(new Error('Gagal memuat atau memproses berkas gambar.'));
@@ -139,6 +157,24 @@ export async function compressAndOptimizeImage(
       reader.readAsDataURL(source);
     }
   });
+
+  try {
+    return await withTimeout(decodePromise, 5000, 'Waktu pemrosesan gambar habis.');
+  } catch (err) {
+    if (typeof source === 'string' && source.startsWith('data:image/')) {
+      const mimeMatch = source.match(/^data:([^;]+);base64,/);
+      const mimeType = mimeMatch ? mimeMatch[1] : 'image/png';
+      const base64Len = source.length - (source.indexOf(',') + 1);
+      return {
+        dataUrl: source,
+        width: 0,
+        height: 0,
+        sizeBytes: Math.round((base64Len * 3) / 4),
+        mimeType,
+      };
+    }
+    throw err;
+  }
 }
 
 /**
@@ -216,14 +252,17 @@ export async function uploadExamImage(
     choiceLetter?: string;
     caption?: string;
     createdBy?: string;
+    skipStorage?: boolean;
+    timeoutMs?: number;
   }
-): Promise<UploadedImageResult> {
+): Promise<UploadedImageResult & { storageFailed?: boolean }> {
   const safeSchoolId = schoolId || db.getActiveSchoolId() || 'global';
   const safeExamId = examId || 'general';
   const targetType = options?.targetType || 'soal';
+  const uploadTimeoutMs = options?.timeoutMs ?? 5500;
 
   // 1. Compress & optimize in browser first (saves bandwidth & storage, keeps aspect ratio)
-  const optimized = await compressAndOptimizeImage(source);
+  let optimized = await compressAndOptimizeImage(source);
 
   // 2. Generate unique image ID & storage path
   const imageId = generateImageId();
@@ -233,29 +272,53 @@ export async function uploadExamImage(
 
   let finalUrl = optimized.dataUrl;
   let finalStoragePath: string | undefined = undefined;
+  let storageFailed = false;
 
-  try {
-    const storageRef = ref(storage, storagePath);
-    await uploadString(storageRef, optimized.dataUrl, 'data_url', {
-      contentType: optimized.mimeType,
-      customMetadata: {
-        imageId,
-        schoolId: safeSchoolId,
-        examId: safeExamId,
-        soalId: soalId || '',
-        targetType,
-        choiceLetter: options?.choiceLetter || '',
-        uploadedAt: new Date().toISOString(),
-      },
-    });
-
-    finalUrl = await getDownloadURL(storageRef);
-    finalStoragePath = storagePath;
-  } catch (storageErr) {
-    console.warn('[ImageStorageService] Firebase Storage upload fallback to Data URI:', storageErr);
+  if (!options?.skipStorage) {
+    try {
+      const storageRef = ref(storage, storagePath);
+      await withTimeout(
+        (async () => {
+          await uploadString(storageRef, optimized.dataUrl, 'data_url', {
+            contentType: optimized.mimeType,
+            customMetadata: {
+              imageId,
+              schoolId: safeSchoolId,
+              examId: safeExamId,
+              soalId: soalId || '',
+              targetType,
+              choiceLetter: options?.choiceLetter || '',
+              uploadedAt: new Date().toISOString(),
+            },
+          });
+          finalUrl = await getDownloadURL(storageRef);
+        })(),
+        uploadTimeoutMs,
+        'Batas waktu unggah gambar ke Firebase Storage terlampaui.'
+      );
+      finalStoragePath = storagePath;
+    } catch (storageErr) {
+      storageFailed = true;
+      console.warn('[ImageStorageService] Firebase Storage upload fallback to Data URI:', storageErr);
+    }
+  } else {
+    storageFailed = true;
   }
 
-  // 3. Record metadata in Firestore exam_images collection (avoid saving giant data URI in meta if fallback)
+  // If Storage is unavailable and fallback Data URI is still large, tighten compression so Firestore doc stays lightweight
+  if (!finalStoragePath && finalUrl.startsWith('data:image/') && finalUrl.length > 130000) {
+    try {
+      const compact = await compressAndOptimizeImage(finalUrl, 850, 850, 0.7);
+      if (compact.dataUrl.length < finalUrl.length) {
+        optimized = compact;
+        finalUrl = compact.dataUrl;
+      }
+    } catch {
+      // Keep existing optimized Data URI
+    }
+  }
+
+  // 3. Record metadata in Firestore exam_images collection without stalling publish flow
   const metaRecord: ExamImageMeta = {
     id: imageId,
     schoolId: safeSchoolId,
@@ -274,9 +337,13 @@ export async function uploadExamImage(
     createdAt: new Date().toISOString(),
   };
 
-  await db.saveExamImageMeta(metaRecord).catch((e) => {
-    console.warn('[ImageStorageService] Metadata save warning:', e);
-  });
+  await withTimeout(
+    db.saveExamImageMeta(metaRecord).catch((e) => {
+      console.warn('[ImageStorageService] Metadata save warning:', e);
+    }),
+    3000,
+    'Metadata gambar disimpan lokal'
+  ).catch(() => {});
 
   return {
     imageId,
@@ -286,26 +353,43 @@ export async function uploadExamImage(
     width: optimized.width,
     height: optimized.height,
     mimeType: optimized.mimeType,
+    storageFailed,
   };
 }
 
 /**
  * Ensures all inline Data URI images across an exam's question list (from Word/PDF/Crop)
- * are permanently uploaded to Firebase Storage and registered in `exam_images` before saving the exam document.
+ * are uploaded to Firebase Storage (when reachable) or compacted safely so publishing never hangs.
  */
 export async function uploadExamQuestionsImages(
   schoolId: string,
   examId: string,
   soalList: SoalUjian[],
-  createdBy?: string
+  createdBy?: string,
+  onProgress?: (message: string) => void
 ): Promise<SoalUjian[]> {
   const results: SoalUjian[] = [];
+  let storageUnavailable = false;
+  let totalEmbeddedImages = 0;
+
+  for (const s of soalList) {
+    if (s.gambar && s.gambar.startsWith('data:image/')) totalEmbeddedImages++;
+    if (s.pilihanGambar) {
+      for (const val of Object.values(s.pilihanGambar)) {
+        if (val && val.startsWith('data:image/')) totalEmbeddedImages++;
+      }
+    }
+  }
+
+  let processedImages = 0;
 
   for (let i = 0; i < soalList.length; i++) {
     const soal = { ...soalList[i] };
 
     // 1. Question image
     if (soal.gambar && soal.gambar.startsWith('data:image/')) {
+      processedImages++;
+      onProgress?.(`Mengoptimalkan & mengunggah gambar ${processedImages}/${totalEmbeddedImages}...`);
       try {
         const up = await uploadExamImage(
           schoolId,
@@ -317,13 +401,17 @@ export async function uploadExamQuestionsImages(
             targetType: 'soal',
             caption: soal.gambarCaption,
             createdBy,
+            skipStorage: storageUnavailable,
+            timeoutMs: 5000,
           }
         );
+        if (up.storageFailed) storageUnavailable = true;
         soal.gambar = up.url;
         soal.gambarId = up.imageId;
         soal.gambarStoragePath = up.storagePath;
         soal.gambarStatus = 'ok';
       } catch (err: any) {
+        storageUnavailable = true;
         soal.gambarStatus = 'warning';
         soal.gambarWarning = err?.message || 'Gagal mengunggah gambar ke cloud storage.';
       }
@@ -337,6 +425,8 @@ export async function uploadExamQuestionsImages(
       for (const letter of Object.keys(updatedChoices)) {
         const imgVal = updatedChoices[letter];
         if (imgVal && imgVal.startsWith('data:image/')) {
+          processedImages++;
+          onProgress?.(`Mengoptimalkan & mengunggah gambar ${processedImages}/${totalEmbeddedImages}...`);
           try {
             const up = await uploadExamImage(
               schoolId,
@@ -348,14 +438,18 @@ export async function uploadExamQuestionsImages(
                 targetType: 'pilihan',
                 choiceLetter: letter,
                 createdBy,
+                skipStorage: storageUnavailable,
+                timeoutMs: 5000,
               }
             );
+            if (up.storageFailed) storageUnavailable = true;
             updatedChoices[letter] = up.url;
             updatedMeta[letter] = {
               imageId: up.imageId,
               storagePath: up.storagePath,
             };
           } catch {
+            storageUnavailable = true;
             // Retain existing Data URI on error
           }
         }
