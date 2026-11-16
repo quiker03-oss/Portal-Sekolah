@@ -4,6 +4,7 @@ import { Guru } from '../../types';
 import { exportToExcel, exportToCsv } from '../../utils/exportHelper';
 import { ConfirmModal } from '../common/ConfirmModal';
 import { compressImage } from '../../utils/imageCompressor';
+import { toast } from '../../utils/toast';
 import {
   Plus,
   Search,
@@ -128,7 +129,7 @@ export const DataGuruView: React.FC<DataGuruViewProps> = ({ onNavigateToQr }) =>
     e.preventDefault();
 
     if (!nama.trim()) {
-      alert('Nama guru wajib diisi!');
+      toast.warning('Nama guru wajib diisi!');
       return;
     }
     
@@ -300,6 +301,10 @@ export const DataGuruView: React.FC<DataGuruViewProps> = ({ onNavigateToQr }) =>
                             'https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=400&q=80'
                           }
                           alt={guru.nama}
+                          onError={(e) => {
+                            e.currentTarget.onerror = null;
+                            e.currentTarget.src = '/logo.svg';
+                          }}
                           className="w-full h-full object-cover"
                         />
                       </div>
@@ -502,7 +507,7 @@ export const DataGuruView: React.FC<DataGuruViewProps> = ({ onNavigateToQr }) =>
                               }
                             } catch (err) {
                               console.error('Foto guru compression error:', err);
-                              alert('Gagal memproses foto.');
+                              toast.error('Gagal memproses foto.');
                             } finally {
                               setIsUploadingPhoto(false);
                               e.target.value = '';

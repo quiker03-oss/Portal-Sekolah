@@ -5,6 +5,8 @@ import { db } from '../../services/database';
 import { sound } from '../../services/audio';
 import { Guru, AbsensiGuru } from '../../types';
 import { exportToExcel } from '../../utils/exportHelper';
+import { getWibDateStr, getWibTimeStr } from '../../utils/dateHelper';
+import { toast } from '../../utils/toast';
 import { PrintRekapModal } from './PrintRekapModal';
 import {
   Camera,
@@ -54,7 +56,7 @@ export const AbsensiGuruView: React.FC = () => {
   const lastScanTimeRef = useRef<number>(0);
 
   // Rekap filters
-  const [filterTanggal, setFilterTanggal] = useState(new Date().toISOString().split('T')[0]);
+  const [filterTanggal, setFilterTanggal] = useState(getWibDateStr());
   const [searchRekap, setSearchRekap] = useState('');
   const [showPrintModal, setShowPrintModal] = useState(false);
   const [deleteTargetAbsensi, setDeleteTargetAbsensi] = useState<AbsensiGuru | null>(null);
@@ -166,12 +168,12 @@ export const AbsensiGuruView: React.FC = () => {
 
     if (!guru) {
       sound.playError();
-      alert(`ID Guru "${cleanId}" tidak terdaftar di database guru.`);
+      toast.error(`ID Guru "${cleanId}" tidak terdaftar di database guru.`);
       return;
     }
 
-    const today = new Date().toISOString().split('T')[0];
-    const nowTime = new Date().toLocaleTimeString('id-ID', { hour12: false });
+    const today = getWibDateStr();
+    const nowTime = getWibTimeStr();
 
     // Check existing record today:
     // If not exists -> Scan 1: MASUK
@@ -257,13 +259,14 @@ export const AbsensiGuruView: React.FC = () => {
           if (code && code.data) {
             processTeacherQr(code.data);
           } else {
-            alert('Tidak dapat mendeteksi QR Code guru.');
+            toast.error('Tidak dapat mendeteksi QR Code guru.');
           }
         }
       };
       img.src = evt.target?.result as string;
     };
     reader.readAsDataURL(file);
+    e.target.value = '';
   };
 
   // Filtered Rekap
@@ -581,16 +584,16 @@ export const AbsensiGuruView: React.FC = () => {
             <div className="bg-white rounded-3xl p-6 border border-slate-200 shadow-xs space-y-3">
               <div className="flex items-center justify-between pb-2 border-b border-slate-100">
                 <h4 className="font-bold text-xs text-slate-800 uppercase tracking-wider">
-                  Presensi Guru Hari Ini ({new Date().toISOString().split('T')[0]})
+                  Presensi Guru Hari Ini ({getWibDateStr()})
                 </h4>
                 <span className="text-[11px] font-semibold text-emerald-700 bg-emerald-50 px-2 py-0.5 rounded">
-                  {absensiList.filter((a) => a.tanggal === new Date().toISOString().split('T')[0]).length} Guru Hadir
+                  {absensiList.filter((a) => a.tanggal === getWibDateStr()).length} Guru Hadir
                 </span>
               </div>
 
               <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
                 {absensiList
-                  .filter((a) => a.tanggal === new Date().toISOString().split('T')[0])
+                  .filter((a) => a.tanggal === getWibDateStr())
                   .map((item) => (
                     <div
                       key={item.id}
@@ -614,7 +617,7 @@ export const AbsensiGuruView: React.FC = () => {
                     </div>
                   ))}
 
-                {absensiList.filter((a) => a.tanggal === new Date().toISOString().split('T')[0]).length === 0 && (
+                {absensiList.filter((a) => a.tanggal === getWibDateStr()).length === 0 && (
                   <div className="text-center py-8 text-slate-400 text-xs">
                     Belum ada guru yang melakukan scan presensi hari ini.
                   </div>

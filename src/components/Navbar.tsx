@@ -125,10 +125,15 @@ export const Navbar: React.FC<NavbarProps> = ({
             >
               <div className="relative w-12 h-12 flex-shrink-0 rounded-xl overflow-hidden bg-blue-50 p-1 border border-blue-200 group-hover:border-blue-400 transition-colors shadow-xs">
                 <img
-                  src={sekolah.logo}
+                  src={sekolah.logo || '/logo.svg'}
                   alt={sekolah.nama}
                   className="w-full h-full object-contain"
                   referrerPolicy="no-referrer"
+                  onError={(e) => {
+                    if (!e.currentTarget.src.endsWith('/logo.svg')) {
+                      e.currentTarget.src = '/logo.svg';
+                    }
+                  }}
                 />
               </div>
               <div>

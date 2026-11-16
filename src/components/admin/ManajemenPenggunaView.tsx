@@ -82,10 +82,15 @@ export const ManajemenPenggunaView: React.FC<ManajemenPenggunaViewProps> = ({ cu
     refreshData();
   }, []);
 
-  const copyToClipboard = (text: string, id: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedId(id);
-    setTimeout(() => setCopiedId(null), 2000);
+  const copyToClipboard = async (text: string, id: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedId(id);
+      setTimeout(() => setCopiedId(null), 2000);
+    } catch {
+      setErrorMsg('Gagal menyalin ke clipboard. Silakan salin teks secara manual.');
+      setTimeout(() => setErrorMsg(''), 3000);
+    }
   };
 
   const togglePasswordReveal = (userId: string) => {
@@ -159,6 +164,7 @@ export const ManajemenPenggunaView: React.FC<ManajemenPenggunaViewProps> = ({ cu
       return;
     }
 
+    const linkedGuru = selectedGuruId ? guruList.find((g) => g.id === selectedGuruId) : undefined;
     const newUser: User = {
       id: `usr-${Date.now()}`,
       username: cleanUsername,
@@ -167,6 +173,7 @@ export const ManajemenPenggunaView: React.FC<ManajemenPenggunaViewProps> = ({ cu
       role: regRole,
       nip: regNip.trim() || undefined,
       guruId: selectedGuruId || undefined,
+      kelasId: linkedGuru?.kelasId || undefined,
     };
 
     db.saveUser(newUser);

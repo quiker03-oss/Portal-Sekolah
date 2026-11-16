@@ -34,7 +34,6 @@ import { BellRing,
 
 // Subviews
 import { DashboardView } from './DashboardView';
-import { UjianOnlineAdmin } from './UjianOnlineAdmin';
 import { DataSiswaView } from './DataSiswaView';
 import { ImportSiswaView } from './ImportSiswaView';
 import { QrCodeSiswaView } from './QrCodeSiswaView';
@@ -50,6 +49,7 @@ import { PengaturanView } from './PengaturanView';
 import { BelOtomatisView } from './BelOtomatisView';
 import { ManajemenPenggunaView } from './ManajemenPenggunaView';
 import { UangKasView } from './UangKasView';
+import { UjianOnlineView } from './UjianOnlineView';
 
 interface AdminLayoutProps {
   currentUser: User;
@@ -63,6 +63,8 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
   const [activeTab, setActiveTab] = useState<string>('dashboard');
   const [settings, setSettings] = useState<Settings>(db.getSettings());
   const [isSidebarOpenMobile, setIsSidebarOpenMobile] = useState(false);
+  const [importInitialKelas, setImportInitialKelas] = useState<string | undefined>(undefined);
+  const [dataSiswaInitialFilter, setDataSiswaInitialFilter] = useState<string | undefined>(undefined);
   const [targetQrId, setTargetQrId] = useState<string | undefined>();
 
   useEffect(() => {
@@ -144,12 +146,6 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
       ],
     },
     {
-      label: 'Ujian & Asesmen',
-      items: [
-        { id: 'ujian-online', label: 'Ujian Online (CBT)', icon: FileQuestion, visible: true },
-      ],
-    },
-    {
       label: 'Kesiswaan & Guru',
       items: [
         { id: 'data-siswa', label: 'Data Siswa', icon: GraduationCap, visible: true },
@@ -161,6 +157,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
     {
       label: 'Akademik & Presensi',
       items: [
+        { id: 'ujian-online', label: 'Ujian Online (CBT)', icon: FileQuestion, visible: true },
         { id: 'kelas-mapel', label: 'Kelas & Mapel', icon: BookOpen, visible: true },
         { id: 'nilai-harian', label: 'Nilai Harian Siswa', icon: FileSpreadsheet, visible: true },
         { id: 'absensi-siswa', label: 'Presensi Siswa', icon: CalendarCheck, visible: true },
@@ -193,8 +190,15 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
 
           <div className="flex items-center gap-2.5">
             <img
-              src={settings.logoUrl}
+              src={settings.logoUrl || '/logo.svg'}
               alt="Logo"
+              onError={(e) => {
+                const img = e.currentTarget as HTMLImageElement;
+                if (!img.dataset.fallbackApplied) {
+                  img.dataset.fallbackApplied = '1';
+                  img.src = '/logo.svg';
+                }
+              }}
               className="w-9 h-9 object-contain"
             />
             <div>
@@ -245,7 +249,7 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
           }`}
         >
           {/* Scrollable nav items */}
-          <div className="p-3 space-y-5 overflow-y-auto max-h-[calc(100vh-8rem)]">
+          <div className="flex-1 p-3 space-y-5 overflow-y-auto">
             {menuSections.map((sec, sIdx) => {
               const visibleItems = sec.items.filter((item) => item.visible);
               if (visibleItems.length === 0) return null;
@@ -316,17 +320,25 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
                 <DashboardView currentUser={currentUser} onNavigate={(tab) => setActiveTab(tab)} />
               )}
 
-              {activeTab === 'ujian-online' && <UjianOnlineAdmin currentUser={currentUser} />}
-
               {activeTab === 'data-siswa' && (
                 <DataSiswaView
-                  onNavigateToImport={() => setActiveTab('import-siswa')}
+                  initialFilterKelas={dataSiswaInitialFilter}
+                  onNavigateToImport={(currentFilter) => {
+                    setImportInitialKelas(currentFilter || undefined);
+                    setActiveTab('import-siswa');
+                  }}
                   onNavigateToQr={navigateToQrSiswa}
                 />
               )}
 
               {activeTab === 'import-siswa' && (
-                <ImportSiswaView onSuccess={() => setActiveTab('data-siswa')} />
+                <ImportSiswaView
+                  initialKelas={importInitialKelas}
+                  onSuccess={(importedKelas) => {
+                    setDataSiswaInitialFilter(importedKelas || '');
+                    setActiveTab('data-siswa');
+                  }}
+                />
               )}
 
               {activeTab === 'qr-siswa' && <QrCodeSiswaView initialSiswaId={targetQrId} />}
@@ -336,6 +348,8 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
               {activeTab === 'data-guru' && <DataGuruView onNavigateToQr={navigateToQrGuru} />}
 
               {activeTab === 'qr-guru' && <QrCodeGuruView initialGuruId={targetQrId} />}
+
+              {activeTab === 'ujian-online' && <UjianOnlineView currentUser={currentUser} />}
 
               {activeTab === 'kelas-mapel' && <DataKelasMapelView />}
 

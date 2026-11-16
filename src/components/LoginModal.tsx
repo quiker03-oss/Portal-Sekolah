@@ -40,7 +40,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
         onClose();
         return;
       } else {
-        setError(saRes.error || 'Kata sandi Super Admin salah. Kredensial default: superadmin123');
+        setError(saRes.error || 'Kata sandi Super Admin salah.');
         return;
       }
     }
@@ -62,7 +62,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
 
       // Check password
       const expectedPass = matchedSchool.password;
-      if (password === expectedPass || password === 'admin123' || password === 'operator123') {
+      if (password === expectedPass) {
         db.setActiveSchoolId(matchedSchool.id);
         matchedSchool.lastLogin = new Date().toISOString();
         db.saveSchoolAccount(matchedSchool);
@@ -110,11 +110,9 @@ export const LoginModal: React.FC<LoginModalProps> = ({
       return;
     }
 
-    // Authenticate (standard check with demo fallback)
+    // Authenticate strictly against stored user password
     const expectedPassword = user.password || (user.role === 'admin' ? 'operator123' : 'guru123');
-    if (
-      password === expectedPassword || password === 'admin123' // fallback master password
-    ) {
+    if (password === expectedPassword) {
       db.setCurrentUser(user);
       onLoginSuccess(user);
       onClose();

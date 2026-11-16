@@ -2,23 +2,6 @@ import express from "express";
 import path from "path";
 import { createServer as createViteServer } from "vite";
 import dotenv from "dotenv";
-import {
-  handleParseDocx,
-  handleParsePdf,
-  handleParseTextSoal,
-  handleParseImage,
-  handleMatchAnswerKeys,
-  handleGradeEssay,
-} from "./api/_lib/geminiBackend.ts";
-import {
-  handleStartExamSession,
-  handleSaveAnswerSession,
-  handleHeartbeatSession,
-  handleSubmitSession,
-  handleUnlockSession,
-  handleGetProctoringAuditLogs,
-  handleResetExamSession,
-} from "./api/_lib/examSessionBackend.ts";
 import { getSafeKeyDiagnostics } from "./api/_lib/diagnosticHelper.ts";
 
 dotenv.config();
@@ -27,7 +10,7 @@ async function startServer() {
   const app = express();
   const PORT = 3000;
 
-  // Body parser with 50mb limit for large docx and pdf uploads
+  // Body parser with 50mb limit
   app.use(express.json({ limit: "50mb" }));
   app.use(express.urlencoded({ extended: true, limit: "50mb" }));
 
@@ -48,11 +31,11 @@ async function startServer() {
     res.json({
       status: "ok",
       app: "ISTAFA Portal Sekolah",
+      aiAvailable: diag.exists,
+      platform: "local-node",
+      timestamp: new Date().toISOString(),
       diagnostics: {
         aiAvailable: diag.exists,
-        apiKeySource: diag.source,
-        apiKeyLength: diag.length,
-        apiKeyPreview: diag.maskedPreview,
         platform: "local-node",
         nodeVersion: process.version,
         timestamp: new Date().toISOString(),
@@ -60,229 +43,76 @@ async function startServer() {
     });
   });
 
-  // 1. Endpoint: Parse Soal dari Word (.docx)
-  app.post("/api/ujian/parse-docx", async (req, res) => {
+  // Exam document parsing endpoint
+  app.post("/api/ujian/parse", async (req, res) => {
     try {
-      const { fileBase64, fileName = "dokumen-soal.docx" } = req.body || {};
-      if (!fileBase64) {
-        return res.status(400).json({ success: false, error: "Data fileBase64 tidak ditemukan." });
+      const { fileBase64, fileName = "dokumen-soal", mimeType, text } = req.body && typeof req.body === "object" ? req.body : {};
+      const hasValidBase64 = typeof fileBase64 === "string" && fileBase64.trim().length > 0;
+      const hasValidText = typeof text === "string" && text.trim().length > 0;
+      const safeFileName = typeof fileName === "string" && fileName.trim() ? fileName.trim() : "dokumen-soal";
+
+      if (!hasValidBase64 && !hasValidText) {
+        return res.status(400).json({
+          success: false,
+          error: "Data berkas (fileBase64) atau teks soal tidak ditemukan dalam request.",
+        });
       }
-      const result = await handleParseDocx(fileBase64, fileName);
-      res.json(result);
+
+      const resolvedMime =
+        typeof mimeType === "string" && mimeType.trim()
+          ? mimeType.trim().toLowerCase()
+          : safeFileName.toLowerCase().endsWith(".pdf")
+          ? "application/pdf"
+          : hasValidBase64
+          ? "image/jpeg"
+          : "text/plain";
+
+      const allowedMimes = new Set([
+        "application/pdf",
+        "image/jpeg",
+        "image/jpg",
+        "image/png",
+        "image/webp",
+        "text/plain",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      ]);
+
+      if (!allowedMimes.has(resolvedMime)) {
+        return res.status(400).json({
+          success: false,
+          error: `Tipe berkas (${resolvedMime}) tidak didukung.`,
+        });
+      }
+
+      const { parseExamDocumentWithGemini, getGeminiApiKey } = await import("./api/_lib/geminiBackend.ts");
+
+      const apiKey = getGeminiApiKey();
+      if (!apiKey) {
+        return res.json({
+          success: false,
+          fallbackToLocal: true,
+          error: "GEMINI_API_KEY tidak disetel di environment server. Sistem menggunakan parser lokal.",
+        });
+      }
+
+      const result = await parseExamDocumentWithGemini({
+        text: hasValidText ? text : undefined,
+        fileBase64: hasValidBase64 ? fileBase64 : undefined,
+        mimeType: resolvedMime,
+        fileName: safeFileName,
+      });
+
+      res.json({
+        success: true,
+        data: result,
+      });
     } catch (err: any) {
-      console.error("API /api/ujian/parse-docx error:", err);
-      res.status(200).json({
+      console.warn("[/api/ujian/parse warn]:", err?.message);
+      res.json({
         success: false,
-        error: err.message || "Gagal memproses file Word (.docx).",
+        fallbackToLocal: true,
+        error: err?.message || "Gagal memproses dokumen dengan AI. Beralih ke parser lokal.",
       });
-    }
-  });
-
-  // 5. Endpoint: Parse Soal dari PDF (Teks & Scan/OCR)
-  app.post("/api/ujian/parse-pdf", async (req, res) => {
-    try {
-      const { fileBase64, fileName = "dokumen-soal.pdf" } = req.body || {};
-      if (!fileBase64) {
-        return res.status(400).json({ success: false, error: "Data fileBase64 PDF tidak ditemukan." });
-      }
-      const result = await handleParsePdf(fileBase64, fileName);
-      res.json(result);
-    } catch (err: any) {
-      console.error("API /api/ujian/parse-pdf error:", err);
-      res.status(200).json({
-        success: false,
-        error: err.message || "Gagal memproses file PDF.",
-      });
-    }
-  });
-
-  // 6. Endpoint: Parse Soal dari Teks Bebas (Copy-Paste)
-  app.post("/api/ujian/parse-text-soal", async (req, res) => {
-    try {
-      const { text } = req.body || {};
-      if (!text || !text.trim()) {
-        return res.status(400).json({ success: false, error: "Teks soal tidak boleh kosong." });
-      }
-      const result = await handleParseTextSoal(text);
-      res.json(result);
-    } catch (err: any) {
-      console.error("API /api/ujian/parse-text-soal error:", err);
-      res.status(200).json({
-        success: false,
-        error: err.message || "Gagal memproses teks soal.",
-      });
-    }
-  });
-
-  // 7. Endpoint: Parse Soal dari Gambar (JPG / JPEG / PNG / Scan Kamera HP)
-  app.post("/api/ujian/parse-image", async (req, res) => {
-    try {
-      const { fileBase64, fileName = "naskah-ujian.jpg", mimeType = "image/jpeg" } = req.body || {};
-      if (!fileBase64) {
-        return res.status(400).json({ success: false, error: "Data gambar (fileBase64) tidak ditemukan." });
-      }
-      const result = await handleParseImage(fileBase64, fileName, mimeType);
-      res.json(result);
-    } catch (err: any) {
-      console.error("API /api/ujian/parse-image error:", err);
-      res.status(200).json({
-        success: false,
-        error: err.message || "Gagal memproses gambar naskah soal.",
-      });
-    }
-  });
-
-  // 8. Endpoint: Pencocokan Kunci Jawaban Terpisah ke Butir Soal Ujian
-  app.post("/api/ujian/match-answer-keys", async (req, res) => {
-    try {
-      const { soalList, keyFileBase64, keyMimeType, keyText, fileName } = req.body || {};
-      if (!soalList || !Array.isArray(soalList) || soalList.length === 0) {
-        return res.status(400).json({ success: false, error: "Daftar butir soal tidak boleh kosong." });
-      }
-      const result = await handleMatchAnswerKeys(soalList, {
-        keyFileBase64,
-        keyMimeType,
-        keyText,
-        fileName,
-      });
-      res.json(result);
-    } catch (err: any) {
-      console.error("API /api/ujian/match-answer-keys error:", err);
-      res.status(200).json({
-        success: false,
-        error: err.message || "Gagal mencocokkan dokumen kunci jawaban ke butir soal.",
-      });
-    }
-  });
-
-  // 9. Endpoint: Penilaian Jawaban Esai Siswa Menggunakan Rubrik Berbantu AI
-  app.post("/api/ujian/ai-grade-essay", async (req, res) => {
-    try {
-      const {
-        pertanyaan,
-        kunciJawaban,
-        contohJawaban,
-        rubrikPenilaian,
-        indikatorWajib,
-        variasiJawaban,
-        jawabanSiswa,
-        bobotMaksimal,
-      } = req.body || {};
-
-      if (!pertanyaan) {
-        return res.status(400).json({ success: false, error: "Teks pertanyaan wajib disertakan." });
-      }
-
-      const result = await handleGradeEssay({
-        pertanyaan,
-        kunciJawaban,
-        contohJawaban,
-        rubrikPenilaian,
-        indikatorWajib,
-        variasiJawaban,
-        jawabanSiswa: jawabanSiswa || "",
-        bobotMaksimal: Number(bobotMaksimal) || 10,
-      });
-      res.json(result);
-    } catch (err: any) {
-      console.error("API /api/ujian/ai-grade-essay error:", err);
-      res.status(200).json({
-        success: false,
-        error: err.message || "Gagal melakukan penilaian esai dengan AI.",
-      });
-    }
-  });
-
-  // =========================================================================
-  // SISTEM KEAMANAN SESI UJIAN: DETEKSI PERANGKAT BERBEDA & PENGUNCIAN SERVER
-  // =========================================================================
-
-  // Endpoint: Mulai / Pulihkan Sesi Ujian (Deteksi Perangkat Ganda Secara Atomik)
-  app.post("/api/ujian/session/start", async (req, res) => {
-    try {
-      const clientIp = (req.headers["x-forwarded-for"] as string) || req.socket.remoteAddress || req.ip;
-      const result = await handleStartExamSession(req.body, clientIp);
-      if ("locked" in result && result.locked) {
-        return res.status(403).json(result);
-      }
-      res.json(result);
-    } catch (err: any) {
-      console.error("API /api/ujian/session/start error:", err);
-      res.status(200).json({ success: false, error: err.message || "Gagal memverifikasi sesi ujian." });
-    }
-  });
-
-  // Endpoint: Simpan Jawaban Siswa (Ditolak Jika Terkunci)
-  app.post("/api/ujian/session/save-answer", async (req, res) => {
-    try {
-      const result = await handleSaveAnswerSession(req.body);
-      if ("locked" in result && result.locked) {
-        return res.status(403).json(result);
-      }
-      res.json(result);
-    } catch (err: any) {
-      console.error("API /api/ujian/session/save-answer error:", err);
-      res.status(200).json({ success: false, error: err.message || "Gagal menyimpan jawaban ke server." });
-    }
-  });
-
-  // Endpoint: Heartbeat & Pemantauan Penguncian Real-Time
-  app.post("/api/ujian/session/heartbeat", async (req, res) => {
-    try {
-      const result = await handleHeartbeatSession(req.body);
-      res.json(result);
-    } catch (err: any) {
-      console.error("API /api/ujian/session/heartbeat error:", err);
-      res.status(200).json({ success: false, error: err.message || "Gagal memeriksa status sesi." });
-    }
-  });
-
-  // Endpoint: Selesai / Kumpulkan Lembar Ujian
-  app.post("/api/ujian/session/submit", async (req, res) => {
-    try {
-      const result = await handleSubmitSession(req.body);
-      if (result.locked) {
-        return res.status(403).json(result);
-      }
-      res.json(result);
-    } catch (err: any) {
-      console.error("API /api/ujian/session/submit error:", err);
-      res.status(200).json({ success: false, error: err.message || "Gagal menyelesaikan ujian di server." });
-    }
-  });
-
-  // Endpoint: Buka Kunci Ujian oleh Guru Pengawas yang Berwenang
-  app.post("/api/ujian/session/unlock", async (req, res) => {
-    try {
-      const result = await handleUnlockSession(req.body);
-      res.json(result);
-    } catch (err: any) {
-      console.error("API /api/ujian/session/unlock error:", err);
-      res.status(200).json({ success: false, error: err.message || "Gagal membuka kunci ujian." });
-    }
-  });
-
-  // Endpoint: Reset Sesi Siswa oleh Guru Pengawas
-  app.post("/api/ujian/session/reset", async (req, res) => {
-    try {
-      const { ujianId, siswaId, guruNama } = req.body || {};
-      const result = await handleResetExamSession(ujianId, siswaId, guruNama);
-      res.json(result);
-    } catch (err: any) {
-      console.error("API /api/ujian/session/reset error:", err);
-      res.status(200).json({ success: false, error: err.message || "Gagal mereset sesi." });
-    }
-  });
-
-  // Endpoint: Ambil Audit Log & Sesi Aktif untuk Dashboard Guru Pengawas
-  app.get("/api/ujian/session/audit-logs", (req, res) => {
-    try {
-      const ujianId = req.query.ujianId as string | undefined;
-      const result = handleGetProctoringAuditLogs(ujianId);
-      res.json(result);
-    } catch (err: any) {
-      console.error("API /api/ujian/session/audit-logs error:", err);
-      res.status(200).json({ success: false, error: err.message || "Gagal memuat log audit." });
     }
   });
 

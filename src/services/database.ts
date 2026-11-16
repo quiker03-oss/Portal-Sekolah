@@ -1,4 +1,5 @@
-import { db as firestoreDb, doc, setDoc, getDoc, deleteDoc, collection, onSnapshot, query, getDocs, writeBatch } from './firebase';
+import { db as firestoreDb, doc, setDoc, getDoc, getDocFromServer, deleteDoc, collection, collectionGroup, onSnapshot, query, where, getDocs, writeBatch } from './firebase';
+import { getWibDateStr, getWibTimeStr } from '../utils/dateHelper';
 import {
   User,
   SekolahInfo,
@@ -21,15 +22,16 @@ import {
   SuperAdminUser,
   SuperAdminLog,
   NilaiHarianItem,
-  NaskahUjianAI,
   ModulAjarAI,
   BahanAjarAI,
-  UjianOnline,
-  JawabanSiswaUjian,
-  SoalUjian,
-  RiwayatPerubahanKunci,
-  LogPelanggaranUjian,
   BelJadwal,
+  UjianOnline,
+  SesiUjianSiswa,
+  SoalUjian,
+  StatusUjian,
+  DetailJawabanSiswa,
+  LogPelanggaranSesi,
+  ExamImageMeta,
 } from '../types';
 
 const STORAGE_KEYS = {
@@ -56,12 +58,12 @@ const STORAGE_KEYS = {
   SUPERADMIN_LOGS: 'sdn2_superadmin_logs',
   SUPERADMIN_AUTH: 'sdn2_superadmin_auth_session',
   ACTIVE_SCHOOL_ID: 'sdn2_active_school_id',
-  AI_SOAL: 'sdn2_ai_soal',
   AI_MODUL: 'sdn2_ai_modul',
   AI_MATERI: 'sdn2_ai_materi',
-  UJIAN_ONLINE: 'sdn2_ujian_online',
-  JAWABAN_UJIAN: 'sdn2_jawaban_ujian',
   BEL_JADWAL: 'sdn2_bel_jadwal',
+  UJIAN_ONLINE: 'sdn2_ujian_online',
+  SESI_UJIAN: 'sdn2_sesi_ujian',
+  EXAM_IMAGES: 'sdn2_exam_images',
 };
 
 // Default school emblem
@@ -533,8 +535,8 @@ const INITIAL_SETTINGS: AppSettings = {
   bobotProyek: 10,
 };
 
-// Seed today's attendance for immediate lively dashboard
-const getTodayStr = () => new Date().toISOString().split('T')[0];
+// Seed today's attendance for immediate lively dashboard (WIB / Asia/Jakarta)
+const getTodayStr = () => getWibDateStr();
 
 const INITIAL_ABSENSI_SISWA: AbsensiSiswa[] = [
   {
@@ -1046,9 +1048,10 @@ class DatabaseService {
       [STORAGE_KEYS.SETTINGS]: 'settings',
       [STORAGE_KEYS.SEKOLAH]: 'sekolah',
       [STORAGE_KEYS.LANDING_CONFIG]: 'landing_config',
-      [STORAGE_KEYS.UJIAN_ONLINE]: 'ujian_online',
-      [STORAGE_KEYS.JAWABAN_UJIAN]: 'jawaban_ujian',
       [STORAGE_KEYS.BEL_JADWAL]: 'bel_jadwal',
+      [STORAGE_KEYS.UJIAN_ONLINE]: 'exams',
+      [STORAGE_KEYS.SESI_UJIAN]: 'exam_sessions',
+      [STORAGE_KEYS.EXAM_IMAGES]: 'exam_images',
     };
 
     Object.entries(collectionsMap).forEach(([storageKey, colName]) => {
@@ -1147,15 +1150,16 @@ class DatabaseService {
               console.error('Storage error:', e);
             }
             window.dispatchEvent(new Event(`data_${colName}_changed`));
-            if (colName === 'ujian_online') {
-              window.dispatchEvent(new CustomEvent('ujian_online_updated', { detail: list }));
-            }
-            if (colName === 'jawaban_ujian') {
-              window.dispatchEvent(new CustomEvent('jawaban_ujian_updated', { detail: list }));
-            }
+
             if (colName === 'bel_jadwal') {
               window.dispatchEvent(new CustomEvent('bel_jadwal_updated', { detail: list }));
               window.dispatchEvent(new Event('bel_jadwal_updated'));
+            }
+            if (colName === 'exams') {
+              window.dispatchEvent(new CustomEvent('ujian_online_updated', { detail: list }));
+            }
+            if (colName === 'exam_sessions') {
+              window.dispatchEvent(new CustomEvent('sesi_ujian_updated', { detail: list }));
             }
           },
           (err) => {
@@ -1170,10 +1174,20 @@ class DatabaseService {
   }
 
   getActiveSchoolId(): string {
+    if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
+      return 'sch-1';
+    }
     return localStorage.getItem(STORAGE_KEYS.ACTIVE_SCHOOL_ID) || 'sch-1';
   }
 
   setActiveSchoolId(schoolId: string): void {
+    if (typeof window === 'undefined' || typeof localStorage === 'undefined' || !schoolId) {
+      return;
+    }
+    const prev = this.getActiveSchoolId();
+    if (prev === schoolId && this.firestoreSchoolUnsubs.length > 0) {
+      return;
+    }
     localStorage.setItem(STORAGE_KEYS.ACTIVE_SCHOOL_ID, schoolId);
     this.cache.clear();
     this.initFirestore(schoolId);
@@ -1253,13 +1267,44 @@ class DatabaseService {
     }
   }
 
-  setItemForSchool<T>(schoolId: string, key: string, value: T): void {
+  setItemForSchool<T>(schoolId: string, key: string, value: T, syncRemote = true): void {
     const actualKey = this.getSchoolScopedKey(schoolId, key);
-    this.cache.set(actualKey, value);
-    try {
-      localStorage.setItem(actualKey, JSON.stringify(value));
-    } catch (e) {
-      console.error('Storage error:', e);
+    const previous = this.cache.get(actualKey);
+    const colName = key.replace('sdn2_', '');
+
+    if (syncRemote && this.isSchoolScopedKey(key)) {
+      const arrayCollections = new Set([
+        'absensi_siswa', 'absensi_guru', 'kas', 'siswa', 'guru', 'kelas', 'mapel',
+        'nilai', 'nilai_harian', 'catatan_rapor', 'pengumuman', 'berita', 'galeri',
+        'users', 'bel_jadwal', 'exams', 'exam_sessions', 'exam_images', 'ai_modul', 'ai_materi'
+      ]);
+      if (arrayCollections.has(colName) && Array.isArray(value)) {
+        const prevList = Array.isArray(previous) ? previous : [];
+        value.forEach((item: any) => {
+          if (!item || !item.id) return;
+          const prevItem = prevList.find((p: any) => p.id === item.id);
+          if (!prevItem || JSON.stringify(prevItem) !== JSON.stringify(item)) {
+            this.syncToFirestore(schoolId, colName, item);
+          }
+        });
+        prevList.forEach((prevItem: any) => {
+          if (!prevItem || !prevItem.id) return;
+          if (!value.find((v: any) => v.id === prevItem.id)) {
+            this.deleteFromFirestore(schoolId, colName, prevItem.id);
+          }
+        });
+      } else if (colName === 'settings' || colName === 'landing_config' || colName === 'sekolah') {
+        this.syncToFirestore(schoolId, colName, { ...(value as any), id: 'default' });
+      }
+    }
+
+    this.cache.set(actualKey, Array.isArray(value) ? [...value] : value);
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem(actualKey, JSON.stringify(value));
+      } catch (e) {
+        console.error('Storage error:', e);
+      }
     }
   }
 
@@ -1333,7 +1378,7 @@ class DatabaseService {
          }
       }
 
-    if (colName === 'absensi_siswa' || colName === 'kas' || colName === 'siswa' || colName === 'guru' || colName === 'kelas' || colName === 'mapel' || colName === 'nilai' || colName === 'nilai_harian' || colName === 'catatan_rapor' || colName === 'pengumuman' || colName === 'berita' || colName === 'galeri' || colName === 'users' || colName === 'school_accounts' || colName === 'ujian_online' || colName === 'jawaban_ujian' || colName === 'bel_jadwal') {
+    if (colName === 'absensi_siswa' || colName === 'kas' || colName === 'siswa' || colName === 'guru' || colName === 'kelas' || colName === 'mapel' || colName === 'nilai' || colName === 'nilai_harian' || colName === 'catatan_rapor' || colName === 'pengumuman' || colName === 'berita' || colName === 'galeri' || colName === 'users' || colName === 'school_accounts' || colName === 'bel_jadwal' || colName === 'exams' || colName === 'exam_sessions' || colName === 'exam_images') {
       if (Array.isArray(value)) {
         const previous = (this.cache.get(actualKey) as any[]) || [];
         
@@ -1361,19 +1406,36 @@ class DatabaseService {
     }
 
     this.cache.set(actualKey, Array.isArray(value) ? [...value] : value);
-    try {
-      localStorage.setItem(actualKey, JSON.stringify(value));
-    } catch (e) {
-      console.error('Storage error:', e);
+    if (typeof localStorage !== 'undefined') {
+      try {
+        localStorage.setItem(actualKey, JSON.stringify(value));
+      } catch (e) {
+        console.error('Storage error:', e);
+      }
     }
   }
 
 
 
+  private async testFirestoreConnection(): Promise<void> {
+    try {
+      const activeId = this.getActiveSchoolId() || 'sch-1';
+      await getDocFromServer(doc(firestoreDb, 'schools', activeId, 'settings', 'default'));
+    } catch (error) {
+      if (error instanceof Error && error.message.includes('the client is offline')) {
+        console.warn('Firestore offline: menjalankan mode cache lokal sementara hingga jaringan tersambung.');
+      }
+    }
+  }
+
   // Initializer
   init(): void {
+    if (typeof window === 'undefined' || typeof localStorage === 'undefined') {
+      return;
+    }
     this.initFirestore(this.getActiveSchoolId());
     this.initFirestore('superadmin');
+    this.testFirestoreConnection().catch(() => {});
     if (!localStorage.getItem(STORAGE_KEYS.SEKOLAH)) {
       this.setItem(STORAGE_KEYS.SEKOLAH, INITIAL_SEKOLAH);
     }
@@ -1520,6 +1582,9 @@ class DatabaseService {
   }
 
   getCurrentUser(): User | null {
+    if (typeof window === 'undefined' || typeof sessionStorage === 'undefined') {
+      return null;
+    }
     try {
       const sessionData = sessionStorage.getItem(STORAGE_KEYS.AUTH_USER);
       if (sessionData) {
@@ -1532,13 +1597,16 @@ class DatabaseService {
   }
 
   setCurrentUser(user: User | null): void {
+    if (typeof window === 'undefined') {
+      return;
+    }
     try {
       if (user) {
-        sessionStorage.setItem(STORAGE_KEYS.AUTH_USER, JSON.stringify(user));
-        localStorage.setItem(STORAGE_KEYS.AUTH_USER, JSON.stringify(user));
+        if (typeof sessionStorage !== 'undefined') sessionStorage.setItem(STORAGE_KEYS.AUTH_USER, JSON.stringify(user));
+        if (typeof localStorage !== 'undefined') localStorage.setItem(STORAGE_KEYS.AUTH_USER, JSON.stringify(user));
       } else {
-        sessionStorage.removeItem(STORAGE_KEYS.AUTH_USER);
-        localStorage.removeItem(STORAGE_KEYS.AUTH_USER);
+        if (typeof sessionStorage !== 'undefined') sessionStorage.removeItem(STORAGE_KEYS.AUTH_USER);
+        if (typeof localStorage !== 'undefined') localStorage.removeItem(STORAGE_KEYS.AUTH_USER);
       }
     } catch (e) {
       console.error('Storage error:', e);
@@ -1589,7 +1657,11 @@ class DatabaseService {
   }
 
   getSiswaById(id: string): Siswa | undefined {
-    return this.getSiswaList().find((s) => s.id === id || s.qrId === id);
+    if (!id) return undefined;
+    const clean = id.trim();
+    return this.getSiswaList().find(
+      (s) => s.id === clean || s.qrId === clean || (s.nisn && s.nisn === clean) || (s.nomorInduk && s.nomorInduk === clean)
+    );
   }
 
   ensureClassesExist(classNames: string[]): void {
@@ -1618,7 +1690,9 @@ class DatabaseService {
     });
     if (changed) {
       this.setItem(STORAGE_KEYS.KELAS, list);
-      window.dispatchEvent(new Event('data_kelas_changed'));
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new Event('data_kelas_changed'));
+      }
     }
   }
 
@@ -1642,7 +1716,9 @@ class DatabaseService {
     this.syncToFirestore(schoolId, 'siswa', prepared).catch((e) =>
       console.warn('[saveSiswa Firestore Sync Error]:', e)
     );
-    window.dispatchEvent(new Event('data_siswa_changed'));
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('data_siswa_changed'));
+    }
     return prepared;
   }
 
@@ -1754,7 +1830,9 @@ class DatabaseService {
       this.ensureClassesExist(classes);
     }
 
-    window.dispatchEvent(new Event('data_siswa_changed'));
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('data_siswa_changed'));
+    }
     return { savedCount, updatedCount, skippedCount, errors };
   }
 
@@ -1765,7 +1843,9 @@ class DatabaseService {
     this.deleteFromFirestore(schoolId, 'siswa', id).catch((e) =>
       console.warn('[deleteSiswa Firestore Delete Error]:', e)
     );
-    window.dispatchEvent(new Event('data_siswa_changed'));
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new Event('data_siswa_changed'));
+    }
   }
 
   // Guru
@@ -1959,7 +2039,7 @@ class DatabaseService {
   recordAbsensiGuru(guru: Guru): { success: boolean; type: 'MASUK' | 'PULANG'; message: string; data?: AbsensiGuru } {
     const list = this.getAbsensiGuruList();
     const today = getTodayStr();
-    const nowTime = new Date().toLocaleTimeString('id-ID', { hour12: false });
+    const nowTime = getWibTimeStr();
 
     // Find existing entry for today
     const existingIndex = list.findIndex((a) => a.guruId === guru.id && a.tanggal === today);
@@ -2939,12 +3019,11 @@ class DatabaseService {
     this.saveSchoolAccount(target);
 
     // Also update operator user username for this school if exists
-    const usersKey = schoolId === 'sch-1' ? STORAGE_KEYS.USERS : `school_${schoolId}_users`;
-    const schoolUsers = this.getItem<User[]>(usersKey, []);
+    const schoolUsers = this.getItemForSchool<User[]>(schoolId, STORAGE_KEYS.USERS, []);
     const op = schoolUsers.find((u) => u.username.toLowerCase() === oldUsername.toLowerCase() && u.role === 'admin');
     if (op) {
       op.username = cleanUsername;
-      this.setItem(usersKey, schoolUsers);
+      this.setItemForSchool(schoolId, STORAGE_KEYS.USERS, schoolUsers);
     }
 
     this.addSuperAdminLog({
@@ -2973,12 +3052,11 @@ class DatabaseService {
     this.saveSchoolAccount(target);
 
     // Also update operator user password for this school
-    const usersKey = schoolId === 'sch-1' ? STORAGE_KEYS.USERS : `school_${schoolId}_users`;
-    const schoolUsers = this.getItem<User[]>(usersKey, []);
+    const schoolUsers = this.getItemForSchool<User[]>(schoolId, STORAGE_KEYS.USERS, []);
     const op = schoolUsers.find((u) => u.username.toLowerCase() === target.username.toLowerCase());
     if (op) {
       op.password = cleanPassword;
-      this.setItem(usersKey, schoolUsers);
+      this.setItemForSchool(schoolId, STORAGE_KEYS.USERS, schoolUsers);
     }
 
     this.addSuperAdminLog({
@@ -3081,13 +3159,12 @@ class DatabaseService {
     const cleanUser = (username || '').trim().toLowerCase();
     const saUser = (sa?.username || 'superadmin').toLowerCase();
 
-    if (cleanUser !== saUser && cleanUser !== 'superadmin') {
-      return { success: false, error: 'Username Super Admin tidak ditemukan. Username bawaan: superadmin' };
+    if (cleanUser !== saUser) {
+      return { success: false, error: 'Username Super Admin tidak ditemukan.' };
     }
 
-    const validPasswords = [sa?.password, 'superadmin123', 'admin123'].filter(Boolean);
-    if (!validPasswords.includes(password)) {
-      return { success: false, error: 'Kata sandi Super Admin salah. Kata sandi bawaan: superadmin123' };
+    if (!sa?.password || password !== sa.password) {
+      return { success: false, error: 'Kata sandi Super Admin salah.' };
     }
 
     const sessionUser: SuperAdminUser = {
@@ -3107,7 +3184,7 @@ class DatabaseService {
 
   updateSuperAdminCredentials(currentPassword: string, newUsername?: string, newPassword?: string): { success: boolean; message: string } {
     const sa = this.getSuperAdminUser();
-    if (currentPassword !== sa.password && currentPassword !== 'superadmin123') {
+    if (!sa?.password || currentPassword !== sa.password) {
       return { success: false, message: 'Kata sandi Super Admin saat ini tidak cocok!' };
     }
 
@@ -3168,50 +3245,8 @@ class DatabaseService {
     this.setItem(STORAGE_KEYS.SUPERADMIN_LOGS, updated);
   }
 
-  // ==================== ASISTEN AI GURU (BANK SOAL & MODUL) ====================
-  getNaskahSoalList(): NaskahUjianAI[] {
-    return this.getItem<NaskahUjianAI[]>(STORAGE_KEYS.AI_SOAL, []);
-  }
-
-  saveNaskahSoal(item: NaskahUjianAI): NaskahUjianAI {
-    const list = this.getNaskahSoalList();
-    const activeSchoolId = this.getActiveSchoolId();
-    const preparedItem: NaskahUjianAI = {
-      ...item,
-      schoolId: item.schoolId || activeSchoolId,
-    };
-    const existingIndex = list.findIndex((s) => s.id === item.id);
-    let updated: NaskahUjianAI[];
-    if (existingIndex >= 0) {
-      updated = [...list];
-      updated[existingIndex] = preparedItem;
-    } else {
-      updated = [preparedItem, ...list];
-    }
-    this.setItem(STORAGE_KEYS.AI_SOAL, updated);
-
-    // Sync to Firestore
-    this.syncToFirestore(preparedItem.schoolId || activeSchoolId, 'ai_soal', preparedItem).catch((e) => {
-      console.warn('Sync ai_soal to firestore warning:', e);
-    });
-
-    window.dispatchEvent(new CustomEvent('ai_soal_updated', { detail: updated }));
-    return preparedItem;
-  }
-
-  deleteNaskahSoal(id: string): void {
-    const list = this.getNaskahSoalList();
-    const target = list.find((s) => s.id === id);
-    const updated = list.filter((s) => s.id !== id);
-    this.setItem(STORAGE_KEYS.AI_SOAL, updated);
-
-    const schoolId = target?.schoolId || this.getActiveSchoolId();
-    this.deleteFromFirestore(schoolId, 'ai_soal', id).catch(() => {});
-
-    window.dispatchEvent(new CustomEvent('ai_soal_updated', { detail: updated }));
-  }
-
-  getModulAjarList(): ModulAjarAI[] {
+  // ==================== ASISTEN AI GURU (MODUL & LKPD) ====================
+    getModulAjarList(): ModulAjarAI[] {
     return this.getItem<ModulAjarAI[]>(STORAGE_KEYS.AI_MODUL, []);
   }
 
@@ -3297,911 +3332,595 @@ class DatabaseService {
 
   // ==================== UJIAN ONLINE / CBT METHODS ====================
 
-  getUjianOnlineList(): UjianOnline[] {
-    const actualKey = this.resolveStorageKey(STORAGE_KEYS.UJIAN_ONLINE);
-    if (this.cache.has(actualKey)) {
-      const cached = this.cache.get(actualKey);
-      if (Array.isArray(cached)) {
-        return [...cached] as UjianOnline[];
-      }
-      return cached as UjianOnline[];
-    }
-
-    try {
-      const raw = localStorage.getItem(actualKey);
-      if (raw !== null) {
-        const parsed = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          this.cache.set(actualKey, parsed);
-          return [...parsed];
-        }
-      }
-    } catch (e) {
-      console.error('Failed to parse ujian_online list:', e);
-    }
-
-    // Only if raw is strictly null (first time ever on this device for default school sch-1):
-    const activeSchoolId = this.getActiveSchoolId();
-    if (activeSchoolId === 'sch-1') {
-      const initial = getInitialUjianOnlineList();
-      this.setItem(STORAGE_KEYS.UJIAN_ONLINE, initial);
-      return initial;
-    }
-
-    this.cache.set(actualKey, []);
-    return [];
+  getUjianList(): UjianOnline[] {
+    return this.getItem<UjianOnline[]>(STORAGE_KEYS.UJIAN_ONLINE, []);
   }
 
-  getUjianOnlineById(id: string): UjianOnline | undefined {
-    const list = this.getUjianOnlineList();
-    const found = list.find((u) => u.id === id);
-    if (found) return found;
-
-    // Check all cache entries across schools
-    for (const [key, val] of this.cache.entries()) {
-      if (key.includes('ujian_online') && Array.isArray(val)) {
-        const item = val.find((u: any) => u && u.id === id);
-        if (item) return item as UjianOnline;
-      }
-    }
-    return undefined;
+  getUjianById(id: string): UjianOnline | undefined {
+    return this.getUjianList().find((u) => u.id === id);
   }
 
-  async getUjianOnlineByIdAsync(id: string, explicitSchoolId?: string): Promise<UjianOnline | undefined> {
-    // 1. Check local cache / localStorage first
-    const cached = this.getUjianOnlineById(id);
-    if (cached) return cached;
-
-    // 2. Identify candidate school IDs
-    const schoolCandidates: string[] = [];
-    if (explicitSchoolId && explicitSchoolId.trim()) {
-      schoolCandidates.push(explicitSchoolId.trim());
-    }
-    const active = this.getActiveSchoolId();
-    if (active && !schoolCandidates.includes(active)) {
-      schoolCandidates.push(active);
-    }
-    if (!schoolCandidates.includes('sch-1')) {
-      schoolCandidates.push('sch-1');
-    }
-
-    // Direct targeted lookup in candidate schools
-    for (const schId of schoolCandidates) {
-      try {
-        const docRef = doc(firestoreDb, `schools/${schId}/ujian_online`, id);
-        const docSnap = await getDoc(docRef);
-        if (docSnap.exists()) {
-          const exam = { ...docSnap.data(), id: docSnap.id, schoolId: schId } as UjianOnline;
-          const currentList = this.getItemForSchool<UjianOnline[]>(schId, STORAGE_KEYS.UJIAN_ONLINE, []);
-          if (!currentList.some((u) => u.id === exam.id)) {
-            this.setItemForSchool(schId, STORAGE_KEYS.UJIAN_ONLINE, [...currentList, exam]);
-          }
-          return exam;
-        }
-      } catch (err) {
-        console.warn(`[getUjianOnlineByIdAsync] Search in school ${schId} error:`, err);
-      }
-    }
-
-    // 3. Resilient fallback: Search across all registered school accounts
-    try {
-      const schoolsSnap = await getDocs(collection(firestoreDb, 'schools/superadmin/school_accounts'));
-      for (const sDoc of schoolsSnap.docs) {
-        const sId = sDoc.id;
-        if (schoolCandidates.includes(sId)) continue;
-        try {
-          const examSnap = await getDoc(doc(firestoreDb, `schools/${sId}/ujian_online`, id));
-          if (examSnap.exists()) {
-            const exam = { ...examSnap.data(), id: examSnap.id, schoolId: sId } as UjianOnline;
-            const currentList = this.getItemForSchool<UjianOnline[]>(sId, STORAGE_KEYS.UJIAN_ONLINE, []);
-            if (!currentList.some((u) => u.id === exam.id)) {
-              this.setItemForSchool(sId, STORAGE_KEYS.UJIAN_ONLINE, [...currentList, exam]);
-            }
-            return exam;
-          }
-        } catch {}
-      }
-    } catch (e) {
-      console.warn('[getUjianOnlineByIdAsync] Fallback lookup across schools error:', e);
-    }
-
-    return undefined;
+  /**
+   * Returns sanitized exam data for student taking:
+   * ALL answer keys and scoring rubrics are completely stripped to prevent DevTools inspection!
+   */
+  getUjianForStudent(id: string): UjianOnline | undefined {
+    const raw = this.getUjianById(id);
+    if (!raw) return undefined;
+    return this.sanitizeExamForStudent(raw);
   }
 
-  async getSiswaForUjianAsync(exam: UjianOnline): Promise<Siswa[]> {
-    const schoolId = exam.schoolId || this.getActiveSchoolId() || 'sch-1';
-    const localSiswa = this.getItemForSchool<Siswa[]>(schoolId, STORAGE_KEYS.SISWA, []);
-    if (localSiswa && localSiswa.length > 0) {
-      return localSiswa;
-    }
+  private sanitizeExamForStudent(raw: UjianOnline): UjianOnline {
+    return {
+      ...raw,
+      soalList: (raw.soalList || []).map((s) => ({
+        ...s,
+        kunciJawaban: '', // Strictly sanitized for student security
+        pedomanPenilaian: undefined,
+        catatanVerifikasi: undefined,
+        gambarWarning: undefined,
+      })),
+    };
+  }
 
+  private async hydrateSchoolForStudentExam(schoolId: string): Promise<void> {
+    if (!schoolId) return;
     try {
-      const snap = await getDocs(collection(firestoreDb, `schools/${schoolId}/siswa`));
-      if (!snap.empty) {
-        const remoteSiswa = snap.docs.map((d) => ({ ...d.data(), id: d.id })) as Siswa[];
-        this.setItemForSchool(schoolId, STORAGE_KEYS.SISWA, remoteSiswa);
-        return remoteSiswa;
+      this.setActiveSchoolId(schoolId);
+      const [siswaSnap, settingsSnap, sekolahSnap] = await Promise.all([
+        getDocs(collection(firestoreDb, `schools/${schoolId}/siswa`)).catch(() => null),
+        getDocs(collection(firestoreDb, `schools/${schoolId}/settings`)).catch(() => null),
+        getDocs(collection(firestoreDb, `schools/${schoolId}/sekolah`)).catch(() => null),
+      ]);
+
+      if (siswaSnap && !siswaSnap.empty) {
+        const siswaList = siswaSnap.docs.map((d) => d.data() as Siswa);
+        this.setItemForSchool(schoolId, STORAGE_KEYS.SISWA, siswaList, false);
+        if (typeof window !== 'undefined') window.dispatchEvent(new Event('data_siswa_changed'));
+      }
+      if (settingsSnap && !settingsSnap.empty) {
+        const { id: _id, ...cleanSettings } = settingsSnap.docs[0].data() as any;
+        this.setItemForSchool(schoolId, STORAGE_KEYS.SETTINGS, cleanSettings, false);
+        if (typeof window !== 'undefined') window.dispatchEvent(new Event('settings_updated'));
+      }
+      if (sekolahSnap && !sekolahSnap.empty) {
+        const { id: _id, ...cleanSekolah } = sekolahSnap.docs[0].data() as any;
+        this.setItemForSchool(schoolId, STORAGE_KEYS.SEKOLAH, cleanSekolah, false);
+        if (typeof window !== 'undefined') window.dispatchEvent(new Event('sekolah_updated'));
       }
     } catch (err) {
-      console.warn(`[getSiswaForUjianAsync] Failed to fetch siswa for school ${schoolId}:`, err);
+      console.warn('hydrateSchoolForStudentExam warning:', err);
     }
-
-    return this.getSiswa();
   }
 
-  async saveUjianOnline(item: UjianOnline): Promise<UjianOnline> {
-    const list = this.getUjianOnlineList();
-    const existingIndex = list.findIndex((u) => u.id === item.id);
+  /**
+   * Cross-device async resolver for student exam links (#ujian?id=...&school=...).
+   * Discovers the school tenant automatically via collectionGroup if schoolId is omitted.
+   */
+  async resolveExamFromFirestore(examId: string, preferredSchoolId?: string): Promise<UjianOnline | undefined> {
+    if (!examId) return undefined;
+    if (preferredSchoolId) {
+      this.setActiveSchoolId(preferredSchoolId);
+    }
+
+    const localHit = this.getUjianById(examId);
+    if (localHit) {
+      return this.sanitizeExamForStudent(localHit);
+    }
+
+    try {
+      let resolvedExam: UjianOnline | undefined;
+      let resolvedSchoolId = preferredSchoolId || this.getActiveSchoolId();
+
+      if (preferredSchoolId) {
+        const snap = await getDoc(doc(firestoreDb, `schools/${preferredSchoolId}/exams`, examId));
+        if (snap.exists()) {
+          resolvedExam = snap.data() as UjianOnline;
+          resolvedSchoolId = resolvedExam.schoolId || preferredSchoolId;
+        }
+      }
+
+      if (!resolvedExam) {
+        const cgSnap = await getDocs(query(collectionGroup(firestoreDb, 'exams'), where('id', '==', examId)));
+        if (!cgSnap.empty) {
+          const firstDoc = cgSnap.docs[0];
+          resolvedExam = firstDoc.data() as UjianOnline;
+          resolvedSchoolId = firstDoc.ref.parent.parent?.id || resolvedExam.schoolId || resolvedSchoolId;
+        }
+      }
+
+      if (resolvedExam) {
+        await this.hydrateSchoolForStudentExam(resolvedSchoolId);
+        const currentExams = this.getUjianList();
+        const merged = currentExams.some((u) => u.id === resolvedExam!.id)
+          ? currentExams.map((u) => (u.id === resolvedExam!.id ? resolvedExam! : u))
+          : [resolvedExam, ...currentExams];
+        this.setItem(STORAGE_KEYS.UJIAN_ONLINE, merged, false);
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('ujian_online_updated', { detail: merged }));
+        }
+        return this.sanitizeExamForStudent(resolvedExam);
+      }
+    } catch (err) {
+      console.warn('resolveExamFromFirestore warning:', err);
+    }
+
+    return undefined;
+  }
+
+  /**
+   * Cross-device async resolver for 6-digit pairing passCode or sessionToken links.
+   */
+  async resolveSessionFromFirestore(opts: { token?: string; passCode?: string; schoolId?: string }): Promise<SesiUjianSiswa | undefined> {
+    if (opts.schoolId) {
+      this.setActiveSchoolId(opts.schoolId);
+    }
+    const cleanCode = opts.passCode?.replace(/\s+/g, '').toUpperCase();
+
+    if (opts.token) {
+      const localToken = this.getSesiByToken(opts.token);
+      if (localToken) return localToken;
+    }
+    if (cleanCode) {
+      const localCode = this.getSesiUjianList().find((s) => (s.passCode || '').toUpperCase() === cleanCode);
+      if (localCode) return localCode;
+    }
+
+    try {
+      let foundSesi: SesiUjianSiswa | undefined;
+      let foundSchoolId = opts.schoolId || this.getActiveSchoolId();
+
+      if (opts.token) {
+        const snap = await getDocs(query(collectionGroup(firestoreDb, 'exam_sessions'), where('sessionToken', '==', opts.token)));
+        if (!snap.empty) {
+          const docSnap = snap.docs[0];
+          foundSesi = docSnap.data() as SesiUjianSiswa;
+          foundSchoolId = docSnap.ref.parent.parent?.id || foundSesi.schoolId || foundSchoolId;
+        }
+      } else if (cleanCode) {
+        const snap = await getDocs(query(collectionGroup(firestoreDb, 'exam_sessions'), where('passCode', '==', cleanCode)));
+        if (!snap.empty) {
+          const docSnap = snap.docs[0];
+          foundSesi = docSnap.data() as SesiUjianSiswa;
+          foundSchoolId = docSnap.ref.parent.parent?.id || foundSesi.schoolId || foundSchoolId;
+        }
+      }
+
+      if (foundSesi) {
+        await this.resolveExamFromFirestore(foundSesi.ujianId, foundSchoolId);
+        const currentSessions = this.getSesiUjianList();
+        const merged = currentSessions.some((s) => s.id === foundSesi!.id)
+          ? currentSessions.map((s) => (s.id === foundSesi!.id ? foundSesi! : s))
+          : [foundSesi, ...currentSessions];
+        this.setItem(STORAGE_KEYS.SESI_UJIAN, merged, false);
+        if (typeof window !== 'undefined') {
+          window.dispatchEvent(new CustomEvent('sesi_ujian_updated', { detail: merged }));
+        }
+        return foundSesi;
+      }
+    } catch (err) {
+      console.warn('resolveSessionFromFirestore warning:', err);
+    }
+
+    return undefined;
+  }
+
+  /**
+   * Resolves a student record by QR ID / NISN / Nomor Induk for CBT verification,
+   * pulling fresh school siswa collection from Firestore if not yet cached locally.
+   */
+  async resolveSiswaForVerification(identifier: string, schoolId?: string): Promise<Siswa | undefined> {
+    if (!identifier) return undefined;
+    const clean = identifier.trim();
+    const targetSchool = schoolId || this.getActiveSchoolId();
+
+    const findInList = (list: Siswa[]) =>
+      list.find(
+        (s) =>
+          s.id === clean ||
+          s.qrId === clean ||
+          (s.nisn && s.nisn === clean) ||
+          (s.nomorInduk && s.nomorInduk === clean)
+      );
+
+    const localMatch = findInList(this.getAllSiswaListUnfiltered());
+    if (localMatch) return localMatch;
+
+    try {
+      const snap = await getDocs(collection(firestoreDb, `schools/${targetSchool}/siswa`));
+      if (!snap.empty) {
+        const remoteList = snap.docs.map((d) => d.data() as Siswa);
+        this.setItemForSchool(targetSchool, STORAGE_KEYS.SISWA, remoteList, false);
+        if (typeof window !== 'undefined') window.dispatchEvent(new Event('data_siswa_changed'));
+        return findInList(remoteList);
+      }
+    } catch (err) {
+      console.warn('resolveSiswaForVerification warning:', err);
+    }
+
+    return undefined;
+  }
+
+  async saveExamImageMeta(meta: ExamImageMeta): Promise<ExamImageMeta> {
+    const schoolId = meta.schoolId || this.getActiveSchoolId();
+    const prepared: ExamImageMeta = {
+      ...meta,
+      schoolId,
+      createdAt: meta.createdAt || new Date().toISOString(),
+    };
+    const list = this.getItem<ExamImageMeta[]>(STORAGE_KEYS.EXAM_IMAGES, []);
+    const idx = list.findIndex((m) => m.id === prepared.id);
+    const updated = idx >= 0 ? list.map((m, i) => (i === idx ? prepared : m)) : [prepared, ...list];
+    this.setItem(STORAGE_KEYS.EXAM_IMAGES, updated);
+    await this.syncToFirestore(schoolId, 'exam_images', prepared).catch(() => {});
+    return prepared;
+  }
+
+  getExamImagesByExam(ujianId: string): ExamImageMeta[] {
+    const list = this.getItem<ExamImageMeta[]>(STORAGE_KEYS.EXAM_IMAGES, []);
+    return list.filter((m) => m.ujianId === ujianId);
+  }
+
+  async deleteExamImageMeta(schoolId: string, imageId: string): Promise<void> {
+    if (!imageId) return;
+    const targetSchool = schoolId || this.getActiveSchoolId();
+    const list = this.getItem<ExamImageMeta[]>(STORAGE_KEYS.EXAM_IMAGES, []);
+    const updated = list.filter((m) => m.id !== imageId);
+    this.setItem(STORAGE_KEYS.EXAM_IMAGES, updated);
+    await this.deleteFromFirestore(targetSchool, 'exam_images', imageId).catch(() => {});
+  }
+
+  async saveUjian(ujian: UjianOnline): Promise<UjianOnline> {
+    const list = this.getUjianList();
+    const activeSchoolId = this.getActiveSchoolId();
+    const prepared: UjianOnline = {
+      ...ujian,
+      schoolId: ujian.schoolId || activeSchoolId,
+      updatedAt: new Date().toISOString(),
+      createdAt: ujian.createdAt || new Date().toISOString(),
+    };
+
+    const idx = list.findIndex((u) => u.id === ujian.id);
     let updated: UjianOnline[];
-    const now = new Date().toISOString();
-    const activeSchoolId = this.getActiveSchoolId();
-    const preparedItem: UjianOnline = {
-      ...item,
-      schoolId: item.schoolId || activeSchoolId,
-      updatedAt: now,
-      createdAt: item.createdAt || now,
-    };
-
-    if (existingIndex >= 0) {
+    if (idx >= 0) {
       updated = [...list];
-      updated[existingIndex] = preparedItem;
-    } else {
-      updated = [preparedItem, ...list];
-    }
-
-    this.setItem(STORAGE_KEYS.UJIAN_ONLINE, updated);
-
-    // Guaranteed direct Firestore save
-    const targetSchoolId = preparedItem.schoolId || activeSchoolId;
-    await this.syncToFirestore(targetSchoolId, 'ujian_online', preparedItem);
-
-    window.dispatchEvent(new CustomEvent('ujian_online_updated', { detail: updated }));
-    return preparedItem;
-  }
-
-  async deleteUjianOnline(id: string): Promise<void> {
-    const list = this.getUjianOnlineList();
-    const targetItem = list.find((u) => u.id === id);
-    const updated = list.filter((u) => u.id !== id);
-    this.setItem(STORAGE_KEYS.UJIAN_ONLINE, updated);
-
-    const activeSchoolId = this.getActiveSchoolId();
-    const schoolId = targetItem?.schoolId || activeSchoolId;
-    await this.deleteFromFirestore(schoolId, 'ujian_online', id);
-
-    // Also remove any submitted student answers for this exam
-    const allAnswers = this.getItem<JawabanSiswaUjian[]>(STORAGE_KEYS.JAWABAN_UJIAN, []);
-    const examAnswers = allAnswers.filter((j) => j.ujianId === id);
-    if (examAnswers.length > 0) {
-      const remainingAnswers = allAnswers.filter((j) => j.ujianId !== id);
-      this.setItem(STORAGE_KEYS.JAWABAN_UJIAN, remainingAnswers);
-      examAnswers.forEach((ans) => {
-        this.deleteFromFirestore(schoolId, 'jawaban_ujian', ans.id).catch(() => {});
-      });
-      window.dispatchEvent(new CustomEvent('jawaban_ujian_updated', { detail: remainingAnswers }));
-    }
-
-    window.dispatchEvent(new CustomEvent('ujian_online_updated', { detail: updated }));
-  }
-
-  async duplicateUjianOnline(id: string): Promise<UjianOnline | undefined> {
-    const source = this.getUjianOnlineById(id);
-    if (!source) return undefined;
-    const now = new Date().toISOString();
-    const duplicated: UjianOnline = {
-      ...source,
-      id: `cbt-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      judul: `${source.judul} (Salinan)`,
-      status: 'draf',
-      createdAt: now,
-      updatedAt: now,
-      riwayatPerubahanKunci: [],
-    };
-    return await this.saveUjianOnline(duplicated);
-  }
-
-  async archiveUjianOnline(id: string, diarsipkan: boolean = true): Promise<void> {
-    const exam = this.getUjianOnlineById(id);
-    if (!exam) return;
-    await this.saveUjianOnline({
-      ...exam,
-      status: diarsipkan ? 'diarsipkan' : 'draf',
-    });
-  }
-
-  // Student Answers (Jawaban Siswa)
-  getJawabanUjianList(ujianId?: string): JawabanSiswaUjian[] {
-    const list = this.getItem<JawabanSiswaUjian[]>(STORAGE_KEYS.JAWABAN_UJIAN, []);
-    if (ujianId) {
-      return list.filter((j) => j.ujianId === ujianId);
-    }
-    return list;
-  }
-
-  getJawabanSiswaByUjian(ujianId: string, siswaId: string): JawabanSiswaUjian | undefined {
-    const list = this.getJawabanUjianList(ujianId);
-    return list.find((j) => j.siswaId === siswaId);
-  }
-
-  saveJawabanSiswaUjian(jawaban: JawabanSiswaUjian): JawabanSiswaUjian {
-    const list = this.getItem<JawabanSiswaUjian[]>(STORAGE_KEYS.JAWABAN_UJIAN, []);
-    const existingIndex = list.findIndex(
-      (j) => j.id === jawaban.id || (j.ujianId === jawaban.ujianId && j.siswaId === jawaban.siswaId)
-    );
-    const now = new Date().toISOString();
-    const prepared: JawabanSiswaUjian = {
-      ...jawaban,
-      updatedAt: now,
-      createdAt: jawaban.createdAt || now,
-    };
-
-    let updated: JawabanSiswaUjian[];
-    if (existingIndex >= 0) {
-      updated = [...list];
-      updated[existingIndex] = prepared;
+      updated[idx] = prepared;
     } else {
       updated = [prepared, ...list];
     }
 
-    this.setItem(STORAGE_KEYS.JAWABAN_UJIAN, updated);
-
-    // Guaranteed Firestore sync
-    const schoolId = prepared.schoolId || this.getActiveSchoolId() || 'sch-1';
-    this.syncToFirestore(schoolId, 'jawaban_ujian', prepared).catch((e) => {
-      console.warn('Sync jawaban_ujian to firestore error:', e);
-    });
-
-    window.dispatchEvent(new CustomEvent('jawaban_ujian_updated', { detail: updated }));
+    this.setItem(STORAGE_KEYS.UJIAN_ONLINE, updated);
+    await this.syncToFirestore(prepared.schoolId || activeSchoolId, "exams", prepared).catch(() => {});
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent("ujian_online_updated", { detail: updated }));
+    }
     return prepared;
   }
 
-  deleteJawabanSiswaUjian(id: string): void {
-    const list = this.getItem<JawabanSiswaUjian[]>(STORAGE_KEYS.JAWABAN_UJIAN, []);
-    const updated = list.filter((j) => j.id !== id);
-    this.setItem(STORAGE_KEYS.JAWABAN_UJIAN, updated);
+  async deleteUjian(id: string): Promise<void> {
+    const list = this.getUjianList();
+    const target = list.find((u) => u.id === id);
+    const updated = list.filter((u) => u.id !== id);
+    this.setItem(STORAGE_KEYS.UJIAN_ONLINE, updated);
 
-    const schoolId = this.getActiveSchoolId() || 'sch-1';
-    this.deleteFromFirestore(schoolId, 'jawaban_ujian', id).catch(() => {});
-
-    window.dispatchEvent(new CustomEvent('jawaban_ujian_updated', { detail: updated }));
-  }
-
-  // ==================== METODE PENGAWASAN UJIAN (PROCTORING) ====================
-
-  catatPelanggaranSiswa(
-    ujianId: string,
-    siswaId: string,
-    pelanggaran: Omit<LogPelanggaranUjian, 'id' | 'waktu'> & { waktu?: string },
-    maxViolations: number = 3
-  ): JawabanSiswaUjian {
-    const existing = this.getJawabanSiswaByUjian(ujianId, siswaId);
-    const now = new Date().toISOString();
-    const newLogItem: LogPelanggaranUjian = {
-      id: `viol-${Date.now()}-${Math.random().toString(36).substring(2, 6)}`,
-      waktu: pelanggaran.waktu || now,
-      jenis: pelanggaran.jenis,
-      deskripsi: pelanggaran.deskripsi,
-      durasiKeluarDetik: pelanggaran.durasiKeluarDetik,
-    };
-
-    let updatedSession: JawabanSiswaUjian;
-    if (existing) {
-      const logs = [...(existing.logPelanggaran || []), newLogItem];
-      const count = logs.length;
-      const shouldLock = count >= maxViolations;
-      updatedSession = {
-        ...existing,
-        jumlahPelanggaran: count,
-        logPelanggaran: logs,
-        terakhirAktif: now,
-        status: shouldLock ? 'terkunci' : existing.status,
-        terkunciOlehSistem: shouldLock ? true : existing.terkunciOlehSistem,
-        alasanTerkunci: shouldLock ? `Melebihi batas toleransi pelanggaran (${count}/${maxViolations})` : existing.alasanTerkunci,
-        waktuTerkunci: shouldLock ? now : existing.waktuTerkunci,
-      };
-    } else {
-      updatedSession = {
-        id: `ans-${ujianId}-${siswaId}`,
-        ujianId,
-        siswaId,
-        namaSiswa: '',
-        kelas: '',
-        jawaban: {},
-        waktuMulai: now,
-        status: 1 >= maxViolations ? 'terkunci' : 'sedang_mengerjakan',
-        jumlahPelanggaran: 1,
-        logPelanggaran: [newLogItem],
-        terkunciOlehSistem: 1 >= maxViolations,
-        alasanTerkunci: 1 >= maxViolations ? 'Melebihi batas toleransi pelanggaran' : undefined,
-        waktuTerkunci: 1 >= maxViolations ? now : undefined,
-        terakhirAktif: now,
-        createdAt: now,
-        updatedAt: now,
-      };
+    const schoolId = target?.schoolId || this.getActiveSchoolId();
+    await this.deleteFromFirestore(schoolId, "exams", id).catch(() => {});
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent("ujian_online_updated", { detail: updated }));
     }
 
-    return this.saveJawabanSiswaUjian(updatedSession);
-  }
-
-  bukaKunciSesiSiswa(
-    ujianId: string,
-    siswaId: string,
-    guruNama?: string,
-    catatan?: string
-  ): JawabanSiswaUjian | undefined {
-    const existing = this.getJawabanSiswaByUjian(ujianId, siswaId);
-    if (!existing) return undefined;
-    const now = new Date().toISOString();
-    const updated: JawabanSiswaUjian = {
-      ...existing,
-      status: 'sedang_mengerjakan',
-      terkunciOlehSistem: false,
-      dibukaOlehGuru: true,
-      alasanTerkunci: undefined,
-      waktuTerkunci: undefined,
-      waktuAktivitasMencurigakan: undefined,
-      terakhirAktif: now,
-      updatedAt: now,
-    };
-
-    // Notify backend server to release lock on server store
-    fetch('/api/ujian/session/unlock', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ujianId,
-        siswaId,
-        guruNama: guruNama || 'Guru Pengawas',
-        catatan: catatan || 'Kunci ujian dibuka oleh guru pengawas.',
-      }),
-    }).catch((err) => {
-      console.warn('Gagal sinkronisasi buka kunci ke server:', err);
+    // Delete corresponding sessions (both local & Firestore)
+    const allSessions = this.getSesiUjianList();
+    const targetSessions = allSessions.filter((s) => s.ujianId === id);
+    const remainingSessions = allSessions.filter((s) => s.ujianId !== id);
+    this.setItem(STORAGE_KEYS.SESI_UJIAN, remainingSessions);
+    targetSessions.forEach((sess) => {
+      this.deleteFromFirestore(schoolId, 'exam_sessions', sess.id).catch(() => {});
     });
-
-    return this.saveJawabanSiswaUjian(updated);
-  }
-
-  resetSesiSiswa(ujianId: string, siswaId: string, guruNama?: string): void {
-    const list = this.getItem<JawabanSiswaUjian[]>(STORAGE_KEYS.JAWABAN_UJIAN, []);
-    const updated = list.filter((j) => !(j.ujianId === ujianId && j.siswaId === siswaId));
-    this.setItem(STORAGE_KEYS.JAWABAN_UJIAN, updated);
-    window.dispatchEvent(new CustomEvent('jawaban_ujian_updated', { detail: updated }));
-    try {
-      localStorage.removeItem(`draft_ujian_${ujianId}_${siswaId}`);
-      localStorage.removeItem(`portal_exam_token_${ujianId}_${siswaId}`);
-    } catch {}
-
-    // Reset on server
-    fetch('/api/ujian/session/reset', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        ujianId,
-        siswaId,
-        guruNama: guruNama || 'Guru Pengawas',
-      }),
-    }).catch(() => {});
-  }
-
-  async getProctoringAuditLogsAsync(ujianId?: string): Promise<{ logs: any[]; sessions: any[] }> {
-    try {
-      const url = ujianId
-        ? `/api/ujian/session/audit-logs?ujianId=${encodeURIComponent(ujianId)}`
-        : '/api/ujian/session/audit-logs';
-      const res = await fetch(url);
-      if (res.ok) {
-        const data = await res.json();
-        return { logs: data.logs || [], sessions: data.sessions || [] };
-      }
-    } catch (e) {
-      console.warn('Gagal memuat audit log dari server:', e);
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent("sesi_ujian_updated", { detail: remainingSessions }));
     }
-    return { logs: [], sessions: [] };
+
+    // Delete corresponding exam_images metadata records
+    const allImages = this.getItem<ExamImageMeta[]>(STORAGE_KEYS.EXAM_IMAGES, []);
+    const targetImages = allImages.filter((m) => m.ujianId === id);
+    if (targetImages.length > 0) {
+      const remainingImages = allImages.filter((m) => m.ujianId !== id);
+      this.setItem(STORAGE_KEYS.EXAM_IMAGES, remainingImages);
+      targetImages.forEach((imgMeta) => {
+        this.deleteFromFirestore(schoolId, 'exam_images', imgMeta.id).catch(() => {});
+      });
+    }
   }
 
-  gradeJawabanSiswa(
+  getSesiUjianList(ujianId?: string): SesiUjianSiswa[] {
+    const list = this.getItem<SesiUjianSiswa[]>(STORAGE_KEYS.SESI_UJIAN, []);
+    if (ujianId) {
+      return list.filter((s) => s.ujianId === ujianId);
+    }
+    return list;
+  }
+
+  getSesiById(id: string): SesiUjianSiswa | undefined {
+    return this.getSesiUjianList().find((s) => s.id === id);
+  }
+
+  getSesiByToken(token: string): SesiUjianSiswa | undefined {
+    if (!token) return undefined;
+    return this.getSesiUjianList().find((s) => s.sessionToken === token);
+  }
+
+  getSesiByPassCode(ujianId: string, passCode: string): SesiUjianSiswa | undefined {
+    if (!passCode) return undefined;
+    const clean = passCode.replace(/\s+/g, "").toUpperCase();
+    return this.getSesiUjianList(ujianId).find(
+      (s) => s.passCode.toUpperCase() === clean
+    );
+  }
+
+  getSesiBySiswaAndUjian(ujianId: string, siswaId: string): SesiUjianSiswa | undefined {
+    return this.getSesiUjianList(ujianId).find((s) => s.siswaId === siswaId);
+  }
+
+  async saveSesiUjian(sesi: SesiUjianSiswa): Promise<SesiUjianSiswa> {
+    const list = this.getSesiUjianList();
+    const activeSchoolId = this.getActiveSchoolId();
+    const prepared: SesiUjianSiswa = {
+      ...sesi,
+      schoolId: sesi.schoolId || activeSchoolId,
+      updatedAt: new Date().toISOString(),
+      terakhirAktif: new Date().toISOString(),
+    };
+
+    const idx = list.findIndex((s) => s.id === sesi.id);
+    let updated: SesiUjianSiswa[];
+    if (idx >= 0) {
+      updated = [...list];
+      updated[idx] = prepared;
+    } else {
+      updated = [prepared, ...list];
+    }
+
+    this.setItem(STORAGE_KEYS.SESI_UJIAN, updated);
+    this.syncToFirestore(prepared.schoolId || activeSchoolId, "exam_sessions", prepared).catch(() => {});
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent("sesi_ujian_updated", { detail: updated }));
+    }
+    return prepared;
+  }
+
+  hitungNilaiSesi(
     ujian: UjianOnline,
-    jawabanMap: { [soalId: string]: { jawabanDipilih: string; nilaiEsai?: number } }
-  ): {
-    nilaiAkhir: number;
-    jumlahBenar: number;
-    jumlahSalah: number;
-    jumlahKosong: number;
-    lulusKkm: boolean;
-    adaEsaiBelumDinilai: boolean;
-    detailWithScores: { [soalId: string]: any };
-  } {
-    let totalPoinDiperoleh = 0;
-    let totalBobotMaksimal = 0;
-    let jumlahBenar = 0;
-    let jumlahSalah = 0;
-    let jumlahKosong = 0;
-    let adaEsaiBelumDinilai = false;
-    const detailWithScores: { [soalId: string]: any } = {};
+    jawabanMap: { [soalId: string]: DetailJawabanSiswa }
+  ): { nilaiPg: number; nilaiUraian: number; nilaiAkhir: number; lulusKkm: boolean; adaUraianBelumDinilai: boolean } {
+    let skorPgDidapat = 0;
+    let bobotPgMaks = 0;
+    let skorUraianDidapat = 0;
+    let bobotUraianMaks = 0;
+    let adaUraianBelumDinilai = false;
 
     ujian.soalList.forEach((soal) => {
-      const bobot = Number(soal.bobot) > 0 ? Number(soal.bobot) : 1;
-      totalBobotMaksimal += bobot;
-      const resp = jawabanMap[soal.id];
-      const jawabanUser = resp?.jawabanDipilih ? String(resp.jawabanDipilih).trim() : '';
+      const bobot = Number(soal.bobot) || 1;
+      const ans = jawabanMap[soal.id];
 
-      if (!jawabanUser) {
-        jumlahKosong++;
-        detailWithScores[soal.id] = {
-          jawabanDipilih: '',
-          isBenar: false,
-          skorDidapat: 0,
-        };
-        return;
-      }
-
-      if (soal.tipe === 'pilihan_ganda' || soal.tipe === 'benar_salah') {
-        const rawKunci = String(soal.kunciJawaban || '').trim();
-        let isMatch = false;
-
-        if (soal.tipe === 'benar_salah') {
-          const norm = (str: string) => {
-            const u = str.toUpperCase().trim();
-            if (['BENAR', 'B', 'TRUE', 'T', '1', 'YA'].includes(u)) return 'BENAR';
-            if (['SALAH', 'S', 'FALSE', 'F', '0', 'TIDAK'].includes(u)) return 'SALAH';
-            return u;
-          };
-          isMatch = norm(jawabanUser) === norm(rawKunci);
-        } else {
-          // Pilihan Ganda: handle A/B/C/D key, "A. Text", or matching full option text
-          const userKey = jawabanUser.toUpperCase();
-          const expectedKey = rawKunci.toUpperCase();
-
-          isMatch =
-            userKey === expectedKey ||
-            expectedKey.startsWith(userKey + '.') ||
-            expectedKey.startsWith(userKey + ')') ||
-            expectedKey.startsWith(userKey + ' ');
-
-          // If still not matched, check if key is full text and matches chosen option's text
-          if (!isMatch && soal.pilihan) {
-            const chosenOptionText = String(soal.pilihan[userKey] || '').trim().toLowerCase();
-            const expectedText = rawKunci.toLowerCase();
-            if (chosenOptionText && chosenOptionText === expectedText) {
-              isMatch = true;
-            }
+      if (soal.tipe === "pilihan_ganda") {
+        bobotPgMaks += bobot;
+        if (ans && ans.jawabanDipilih && ans.jawabanDipilih.trim().toUpperCase() === (soal.kunciJawaban || "").trim().toUpperCase()) {
+          skorPgDidapat += bobot;
+        }
+      } else {
+        // Uraian
+        bobotUraianMaks += bobot;
+        if (ans) {
+          if (typeof ans.nilaiManual === "number") {
+            skorUraianDidapat += ans.nilaiManual;
+          } else if (ans.jawabanDipilih && ans.jawabanDipilih.trim()) {
+            adaUraianBelumDinilai = true;
           }
-        }
-
-        if (isMatch) {
-          jumlahBenar++;
-          totalPoinDiperoleh += bobot;
-          detailWithScores[soal.id] = {
-            jawabanDipilih: jawabanUser,
-            isBenar: true,
-            skorDidapat: bobot,
-          };
-        } else {
-          jumlahSalah++;
-          detailWithScores[soal.id] = {
-            jawabanDipilih: jawabanUser,
-            isBenar: false,
-            skorDidapat: 0,
-          };
-        }
-      } else if (soal.tipe === 'pilihan_ganda_kompleks') {
-        // Multiple choice complex (checkboxes)
-        const userPicks = (
-          (resp as any)?.jawabanKompleks && Array.isArray((resp as any).jawabanKompleks)
-            ? (resp as any).jawabanKompleks
-            : jawabanUser.split(/[,;\s]+/)
-        )
-          .map((s: string) => s.trim().toUpperCase())
-          .filter(Boolean);
-
-        const expectedPicks = (
-          soal.kunciPilihanKompleks && Array.isArray(soal.kunciPilihanKompleks)
-            ? soal.kunciPilihanKompleks
-            : String(soal.kunciJawaban || '').split(/[,;\s]+/)
-        )
-          .map((s: string) => s.trim().toUpperCase())
-          .filter(Boolean);
-
-        const correctUserPicks = userPicks.filter((p: string) => expectedPicks.includes(p));
-        const wrongUserPicks = userPicks.filter((p: string) => !expectedPicks.includes(p));
-
-        const isExactMatch =
-          correctUserPicks.length === expectedPicks.length &&
-          wrongUserPicks.length === 0 &&
-          expectedPicks.length > 0;
-
-        if (isExactMatch) {
-          jumlahBenar++;
-          totalPoinDiperoleh += bobot;
-          detailWithScores[soal.id] = {
-            jawabanDipilih: userPicks.join(', '),
-            jawabanKompleks: userPicks,
-            isBenar: true,
-            skorDidapat: bobot,
-          };
-        } else if (correctUserPicks.length > 0 && wrongUserPicks.length === 0) {
-          const partialScore =
-            Math.round((correctUserPicks.length / Math.max(1, expectedPicks.length)) * bobot * 10) /
-            10;
-          totalPoinDiperoleh += partialScore;
-          if (partialScore >= bobot * 0.5) jumlahBenar++;
-          else jumlahSalah++;
-          detailWithScores[soal.id] = {
-            jawabanDipilih: userPicks.join(', '),
-            jawabanKompleks: userPicks,
-            isBenar: false,
-            skorDidapat: partialScore,
-          };
-        } else {
-          jumlahSalah++;
-          detailWithScores[soal.id] = {
-            jawabanDipilih: userPicks.join(', '),
-            jawabanKompleks: userPicks,
-            isBenar: false,
-            skorDidapat: 0,
-          };
-        }
-      } else if (soal.tipe === 'menjodohkan') {
-        // Matching pairs
-        let userPairs: Record<string, string> = {};
-        if ((resp as any)?.jawabanMenjodohkan && typeof (resp as any).jawabanMenjodohkan === 'object') {
-          userPairs = (resp as any).jawabanMenjodohkan;
-        } else {
-          try {
-            userPairs = JSON.parse(jawabanUser);
-          } catch {
-            userPairs = {};
-          }
-        }
-
-        const expectedPairs: Record<string, string> =
-          soal.kunciMenjodohkan ||
-          (soal.pasanganMenjodohkan || []).reduce((acc: any, p) => {
-            acc[p.id || p.kiri] = p.kanan;
-            return acc;
-          }, {});
-
-        const totalExpectedPairs = Object.keys(expectedPairs).length;
-        let matchedCount = 0;
-
-        for (const [kiriKey, expectedKanan] of Object.entries(expectedPairs)) {
-          const userKanan = userPairs[kiriKey];
-          if (
-            userKanan &&
-            String(userKanan).trim().toLowerCase() === String(expectedKanan).trim().toLowerCase()
-          ) {
-            matchedCount++;
-          }
-        }
-
-        if (totalExpectedPairs > 0 && matchedCount === totalExpectedPairs) {
-          jumlahBenar++;
-          totalPoinDiperoleh += bobot;
-          detailWithScores[soal.id] = {
-            jawabanDipilih: JSON.stringify(userPairs),
-            jawabanMenjodohkan: userPairs,
-            isBenar: true,
-            skorDidapat: bobot,
-          };
-        } else if (totalExpectedPairs > 0 && matchedCount > 0) {
-          const partial =
-            Math.round((matchedCount / totalExpectedPairs) * bobot * 10) / 10;
-          totalPoinDiperoleh += partial;
-          if (partial >= bobot * 0.5) jumlahBenar++;
-          else jumlahSalah++;
-          detailWithScores[soal.id] = {
-            jawabanDipilih: JSON.stringify(userPairs),
-            jawabanMenjodohkan: userPairs,
-            isBenar: false,
-            skorDidapat: partial,
-          };
-        } else {
-          jumlahSalah++;
-          detailWithScores[soal.id] = {
-            jawabanDipilih: JSON.stringify(userPairs),
-            jawabanMenjodohkan: userPairs,
-            isBenar: false,
-            skorDidapat: 0,
-          };
-        }
-      } else if (soal.tipe === 'isian') {
-        const cleanedUser = jawabanUser.toLowerCase().replace(/\s+/g, ' ');
-        const cleanedKunci = String(soal.kunciJawaban || '').toLowerCase().replace(/\s+/g, ' ');
-        // Allow flexible keyword checking or multiple variants separated by comma or semicolon
-        const validVariants = cleanedKunci.split(/[,;/|]/).map((k) => k.trim()).filter(Boolean);
-        const isMatch = validVariants.some((v) => cleanedUser === v || cleanedUser.includes(v));
-
-        if (isMatch) {
-          jumlahBenar++;
-          totalPoinDiperoleh += bobot;
-          detailWithScores[soal.id] = {
-            jawabanDipilih: jawabanUser,
-            isBenar: true,
-            skorDidapat: bobot,
-          };
-        } else {
-          jumlahSalah++;
-          detailWithScores[soal.id] = {
-            jawabanDipilih: jawabanUser,
-            isBenar: false,
-            skorDidapat: 0,
-          };
-        }
-      } else if (soal.tipe === 'esai') {
-        // Essay questions: check if teacher has manually assigned a score
-        const skorEsai = typeof resp.nilaiEsai === 'number' ? resp.nilaiEsai : undefined;
-        if (skorEsai !== undefined) {
-          totalPoinDiperoleh += skorEsai;
-          if (skorEsai >= bobot / 2) {
-            jumlahBenar++;
-          } else {
-            jumlahSalah++;
-          }
-          detailWithScores[soal.id] = {
-            jawabanDipilih: jawabanUser,
-            nilaiEsai: skorEsai,
-            dinilaiOlehGuru: true,
-            skorDidapat: skorEsai,
-          };
-        } else {
-          adaEsaiBelumDinilai = true;
-          detailWithScores[soal.id] = {
-            jawabanDipilih: jawabanUser,
-            dinilaiOlehGuru: false,
-            skorDidapat: 0,
-          };
         }
       }
     });
 
-    const nilaiAkhir =
-      totalBobotMaksimal > 0
-        ? Math.round((totalPoinDiperoleh / totalBobotMaksimal) * 100)
-        : 0;
+    const nilaiPg = bobotPgMaks > 0 ? Math.round((skorPgDidapat / bobotPgMaks) * 100) : 0;
+    const nilaiUraian = bobotUraianMaks > 0 ? Math.round((skorUraianDidapat / bobotUraianMaks) * 100) : 0;
+
+    let nilaiAkhir = 0;
+    if (bobotPgMaks > 0 && bobotUraianMaks > 0) {
+      // 70% PG + 30% Uraian
+      nilaiAkhir = Math.round(nilaiPg * 0.7 + nilaiUraian * 0.3);
+    } else if (bobotPgMaks > 0) {
+      nilaiAkhir = nilaiPg;
+    } else if (bobotUraianMaks > 0) {
+      nilaiAkhir = nilaiUraian;
+    }
 
     const kkm = Number(ujian.kkm) || 75;
     const lulusKkm = nilaiAkhir >= kkm;
 
     return {
+      nilaiPg,
+      nilaiUraian,
       nilaiAkhir,
-      jumlahBenar,
-      jumlahSalah,
-      jumlahKosong,
       lulusKkm,
-      adaEsaiBelumDinilai,
-      detailWithScores,
+      adaUraianBelumDinilai,
     };
   }
 
-  // Recalculates student scores transparently if teacher edits an answer key post-exam
-  updateKunciJawabanUjian(
-    ujianId: string,
-    nomorSoal: number,
-    kunciBaru: string,
-    diubahOleh: string,
+  async createOrGetSesiUjian(ujianInput: UjianOnline | string, siswa: Siswa): Promise<SesiUjianSiswa> {
+    const ujian = typeof ujianInput === 'string' ? this.getUjianById(ujianInput) : ujianInput;
+    if (!ujian) {
+      throw new Error('Naskah ujian tidak ditemukan dalam sistem.');
+    }
+    const existing = this.getSesiBySiswaAndUjian(ujian.id, siswa.id);
+    if (existing) {
+      return existing;
+    }
+
+    // Generate unique 6-digit access code (e.g. 749215)
+    const passCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const token = `cbt_${ujian.id}_${siswa.id}_${Date.now()}`;
+
+    const newSession: SesiUjianSiswa = {
+      id: `sesi_${ujian.id}_${siswa.id}`,
+      schoolId: ujian.schoolId || this.getActiveSchoolId(),
+      ujianId: ujian.id,
+      siswaId: siswa.id,
+      namaSiswa: siswa.namaLengkap,
+      nisn: siswa.nisn || "",
+      kelas: siswa.kelas || "",
+      sessionToken: token,
+      passCode,
+      status: "terverifikasi",
+      jawaban: {},
+      nilaiPg: 0,
+      nilaiUraian: 0,
+      nilaiAkhir: 0,
+      lulusKkm: false,
+      adaUraianBelumDinilai: false,
+      jumlahPelanggaran: 0,
+      logPelanggaran: [],
+      terakhirAktif: new Date().toISOString(),
+      createdAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+    };
+
+    return await this.saveSesiUjian(newSession);
+  }
+
+  async saveJawabanSiswa(
+    sessionId: string,
+    soalId: string,
+    detail: DetailJawabanSiswa
+  ): Promise<SesiUjianSiswa | undefined> {
+    const sesi = this.getSesiById(sessionId);
+    if (!sesi) return undefined;
+    if (sesi.status === "selesai" || sesi.status === "terkunci") return sesi;
+
+    const ujian = this.getUjianById(sesi.ujianId);
+    const updatedJawaban = {
+      ...sesi.jawaban,
+      [soalId]: {
+        ...detail,
+        waktuJawab: new Date().toISOString(),
+      },
+    };
+
+    const calculated = ujian ? this.hitungNilaiSesi(ujian, updatedJawaban) : {
+      nilaiPg: sesi.nilaiPg,
+      nilaiUraian: sesi.nilaiUraian,
+      nilaiAkhir: sesi.nilaiAkhir,
+      lulusKkm: sesi.lulusKkm,
+      adaUraianBelumDinilai: sesi.adaUraianBelumDinilai,
+    };
+
+    const updatedSesi: SesiUjianSiswa = {
+      ...sesi,
+      status: sesi.status === "terverifikasi" ? "sedang_mengerjakan" : sesi.status,
+      waktuMulai: sesi.waktuMulai || new Date().toISOString(),
+      jawaban: updatedJawaban,
+      ...calculated,
+      terakhirAktif: new Date().toISOString(),
+    };
+
+    return await this.saveSesiUjian(updatedSesi);
+  }
+
+  async selesaikanUjianSiswa(sessionId: string): Promise<SesiUjianSiswa | undefined> {
+    const sesi = this.getSesiById(sessionId);
+    if (!sesi) return undefined;
+
+    const ujian = this.getUjianById(sesi.ujianId);
+    const calculated = ujian ? this.hitungNilaiSesi(ujian, sesi.jawaban) : {
+      nilaiPg: sesi.nilaiPg,
+      nilaiUraian: sesi.nilaiUraian,
+      nilaiAkhir: sesi.nilaiAkhir,
+      lulusKkm: sesi.lulusKkm,
+      adaUraianBelumDinilai: sesi.adaUraianBelumDinilai,
+    };
+
+    const now = new Date();
+    let durasiDetik = 0;
+    if (sesi.waktuMulai) {
+      const start = new Date(sesi.waktuMulai).getTime();
+      durasiDetik = Math.max(1, Math.round((now.getTime() - start) / 1000));
+    }
+
+    const updated: SesiUjianSiswa = {
+      ...sesi,
+      status: "selesai",
+      waktuSelesai: now.toISOString(),
+      durasiDetik,
+      ...calculated,
+    };
+
+    return await this.saveSesiUjian(updated);
+  }
+
+  async koreksiNilaiUraian(
+    sessionId: string,
+    soalId: string,
+    nilaiManual: number,
+    catatanGuru?: string
+  ): Promise<SesiUjianSiswa | undefined> {
+    const sesi = this.getSesiById(sessionId);
+    if (!sesi) return undefined;
+
+    const currentDetail = sesi.jawaban[soalId] || { jawabanDipilih: "" };
+    const updatedJawaban = {
+      ...sesi.jawaban,
+      [soalId]: {
+        ...currentDetail,
+        nilaiManual,
+        catatanGuru: catatanGuru || currentDetail.catatanGuru,
+      },
+    };
+
+    const ujian = this.getUjianById(sesi.ujianId);
+    const calculated = ujian ? this.hitungNilaiSesi(ujian, updatedJawaban) : {
+      nilaiPg: sesi.nilaiPg,
+      nilaiUraian: sesi.nilaiUraian,
+      nilaiAkhir: sesi.nilaiAkhir,
+      lulusKkm: sesi.lulusKkm,
+      adaUraianBelumDinilai: false,
+    };
+
+    const updated: SesiUjianSiswa = {
+      ...sesi,
+      jawaban: updatedJawaban,
+      ...calculated,
+    };
+
+    return await this.saveSesiUjian(updated);
+  }
+
+  async catatPelanggaranSiswa(
+    sessionId: string,
+    jenis: LogPelanggaranSesi["jenis"],
     keterangan: string
-  ): UjianOnline | undefined {
-    const exam = this.getUjianOnlineById(ujianId);
-    if (!exam) return undefined;
+  ): Promise<SesiUjianSiswa | undefined> {
+    const sesi = this.getSesiById(sessionId);
+    if (!sesi) return undefined;
 
-    const soalIndex = exam.soalList.findIndex((s) => s.nomor === nomorSoal);
-    if (soalIndex === -1) return undefined;
-
-    const kunciLama = exam.soalList[soalIndex].kunciJawaban;
-    if (kunciLama === kunciBaru) return exam;
-
-    const updatedSoalList = [...exam.soalList];
-    updatedSoalList[soalIndex] = {
-      ...updatedSoalList[soalIndex],
-      kunciJawaban: kunciBaru,
+    const newLog: LogPelanggaranSesi = {
+      waktu: new Date().toISOString(),
+      jenis,
+      keterangan,
     };
 
-    const riwayatLog: RiwayatPerubahanKunci = {
-      id: `rev-${Date.now()}`,
-      tanggal: new Date().toISOString(),
-      diubahOleh,
-      keterangan: keterangan || 'Koreksi kunci jawaban setelah evaluasi',
-      nomorSoal,
-      kunciLama,
-      kunciBaru,
+    const ujian = this.getUjianById(sesi.ujianId);
+    const maxViolations = Math.max(1, Number(ujian?.batasPelanggaran) || 3);
+    const count = (sesi.jumlahPelanggaran || 0) + 1;
+    const shouldLock = count >= maxViolations;
+
+    const updated: SesiUjianSiswa = {
+      ...sesi,
+      jumlahPelanggaran: count,
+      logPelanggaran: [newLog, ...(sesi.logPelanggaran || [])].slice(0, 50),
+      status: shouldLock ? "terkunci" : sesi.status,
     };
 
-    const updatedExam: UjianOnline = {
-      ...exam,
-      soalList: updatedSoalList,
-      riwayatPerubahanKunci: [riwayatLog, ...(exam.riwayatPerubahanKunci || [])],
-      updatedAt: new Date().toISOString(),
-    };
-
-    this.saveUjianOnline(updatedExam);
-
-    // Audit and recalculate all existing submissions for this exam!
-    const submissions = this.getJawabanUjianList(ujianId);
-    submissions.forEach((sub) => {
-      if (sub.status === 'selesai' || sub.status === 'waktu_habis') {
-        const regraded = this.gradeJawabanSiswa(updatedExam, sub.jawaban);
-        const mergedJawaban: { [soalId: string]: any } = {};
-        Object.keys(sub.jawaban).forEach((soalId) => {
-          mergedJawaban[soalId] = {
-            ...sub.jawaban[soalId],
-            ...regraded.detailWithScores[soalId],
-          };
-        });
-
-        this.saveJawabanSiswaUjian({
-          ...sub,
-          nilaiAkhir: regraded.nilaiAkhir,
-          jumlahBenar: regraded.jumlahBenar,
-          jumlahSalah: regraded.jumlahSalah,
-          jumlahKosong: regraded.jumlahKosong,
-          lulusKkm: regraded.lulusKkm,
-          adaEsaiBelumDinilai: regraded.adaEsaiBelumDinilai,
-          jawaban: mergedJawaban,
-          catatanGuru: `${sub.catatanGuru ? sub.catatanGuru + ' | ' : ''}Nilai dikalkulasi ulang pada ${new Date().toLocaleDateString('id-ID')} karena revisi kunci soal #${nomorSoal}`,
-        });
-      }
-    });
-
-    return updatedExam;
+    return await this.saveSesiUjian(updated);
   }
-}
-
-// Initial Sample Exam Data generator
-function getInitialUjianOnlineList(): UjianOnline[] {
-  const now = new Date();
-  const startTime = new Date(now.getTime() - 2 * 60 * 60 * 1000).toISOString().slice(0, 16);
-  const endTime = new Date(now.getTime() + 72 * 60 * 60 * 1000).toISOString().slice(0, 16);
-
-  return [
-    {
-      id: 'cbt-ipas-01',
-      judul: 'Penilaian Akhir Semester (PAS) - Ilmu Pengetahuan Alam dan Sosial (IPAS)',
-      deskripsi: 'Ujian Asesmen Sumatif Akhir Semester IPAS Kelas 5. Jawablah soal dengan jujur, teliti, dan seksama.',
-      mataPelajaran: 'Ilmu Pengetahuan Alam dan Sosial (IPAS)',
-      mapelId: 'mp-ipas',
-      guruId: 'tch-2',
-      guruNama: 'Budi Santoso, S.Pd.',
-      kelasTarget: ['Kelas 5'],
-      semester: 'Genap',
-      tahunAjaran: '2024/2025',
-      jenisUjian: 'Penilaian Akhir Semester (PAS/SAS)',
-      status: 'aktif',
-      tanggalMulai: startTime,
-      tanggalSelesai: endTime,
-      durasiMenit: 60,
-      jumlahPercobaan: 1,
-      acakSoal: true,
-      acakPilihan: true,
-      tampilkanNilaiLangsung: true,
-      tampilkanPembahasan: 'setelah_ujian',
-      kodeUjian: 'PAS5',
-      kkm: 75,
-      modeTampilan: 'terstruktur',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      soalList: [
-        {
-          id: 's-1',
-          nomor: 1,
-          tipe: 'pilihan_ganda',
-          pertanyaan: 'Perhatikan gambar rantai makanan ekosistem sawah berikut. Organisme manakah yang berperan sebagai produsen utama?',
-          gambar: 'https://images.unsplash.com/photo-1500382017468-9049fed747ef?auto=format&fit=crop&w=800&q=80',
-          gambarCaption: 'Gambar 1: Hamparan ekosistem sawah tempat interaksi biotik dan abiotik',
-          pilihan: {
-            A: 'Padi',
-            B: 'Belalang',
-            C: 'Katak sawah',
-            D: 'Ular sawah',
-          },
-          kunciJawaban: 'A',
-          pembahasan: 'Padi berperan sebagai produsen karena mampu menghasilkan makanan sendiri melalui proses fotosintesis dengan bantuan sinar matahari.',
-          bobot: 1,
-        },
-        {
-          id: 's-2',
-          nomor: 2,
-          tipe: 'pilihan_ganda',
-          pertanyaan: 'Bagian mata yang berfungsi mengatur jumlah cahaya yang masuk ke dalam bola mata adalah...',
-          pilihan: {
-            A: 'Kornea',
-            B: 'Pupil dan Iris',
-            C: 'Retina',
-            D: 'Lensa mata',
-          },
-          kunciJawaban: 'B',
-          pembahasan: 'Iris memberi warna pada mata dan mengontrol ukuran pupil untuk mengatur intensitas cahaya yang masuk ke mata.',
-          bobot: 1,
-        },
-        {
-          id: 's-3',
-          nomor: 3,
-          tipe: 'benar_salah',
-          pertanyaan: 'Cahaya merambat lurus dan dapat dipantulkan apabila mengenai permukaan benda yang mengilap seperti cermin.',
-          pilihan: {
-            Benar: 'Benar',
-            Salah: 'Salah',
-          },
-          kunciJawaban: 'Benar',
-          pembahasan: 'Sifat dasar cahaya antara lain merambat lurus, menembus benda bening, serta dapat dipantulkan dan dibiaskan.',
-          bobot: 1,
-        },
-        {
-          id: 's-4',
-          nomor: 4,
-          tipe: 'isian',
-          pertanyaan: 'Peristiwa perpindahan panas matahari sampai ke bumi melalui ruang hampa tanpa perantara zat cair maupun gas disebut perpindahan secara...',
-          kunciJawaban: 'radiasi',
-          pembahasan: 'Radiasi adalah perpindahan panas melalui pancaran gelombang elektromagnetik tanpa memerlukan zat perantara.',
-          bobot: 1,
-        },
-        {
-          id: 's-5',
-          nomor: 5,
-          tipe: 'esai',
-          pertanyaan: 'Jelaskan 3 (tiga) upaya nyata yang dapat dilakukan oleh siswa di lingkungan sekolah untuk menjaga kelestarian lingkungan dan mencegah pencemaran sampah plastik!',
-          kunciJawaban: '1. Membawa tempat makan dan botol minum (tumbler) sendiri dari rumah. 2. Memilah sampah organik dan anorganik pada tempat sampah yang sesuai. 3. Melakukan aksi pungut sampah dan daur ulang limbah plastik menjadi kreasi kerajinan tangan.',
-          pembahasan: 'Jawaban dinilai berdasarkan kelogisan, relevansi dengan lingkungan sekolah, dan kesadaran lingkungan siswa.',
-          bobot: 2,
-        },
-      ],
-    },
-    {
-      id: 'cbt-mat-02',
-      judul: 'Ulangan Harian Matematika - Pecahan & Pengukuran',
-      deskripsi: 'Ulangan Harian Matematika Materi Operasi Hitung Pecahan Biasa dan Campuran.',
-      mataPelajaran: 'Matematika',
-      guruId: 'tch-2',
-      guruNama: 'Budi Santoso, S.Pd.',
-      kelasTarget: ['Kelas 5', 'Kelas 6'],
-      semester: 'Genap',
-      tahunAjaran: '2024/2025',
-      jenisUjian: 'Ulangan Harian',
-      status: 'terjadwal',
-      tanggalMulai: new Date(now.getTime() + 24 * 60 * 60 * 1000).toISOString().slice(0, 16),
-      tanggalSelesai: new Date(now.getTime() + 96 * 60 * 60 * 1000).toISOString().slice(0, 16),
-      durasiMenit: 45,
-      jumlahPercobaan: 1,
-      acakSoal: true,
-      acakPilihan: true,
-      tampilkanNilaiLangsung: true,
-      tampilkanPembahasan: 'setelah_jadwal_selesai',
-      kodeUjian: 'MTK56',
-      kkm: 75,
-      modeTampilan: 'terstruktur',
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-      soalList: [
-        {
-          id: 'm-1',
-          nomor: 1,
-          tipe: 'pilihan_ganda',
-          pertanyaan: 'Hasil dari 3/4 + 1/2 adalah...',
-          pilihan: {
-            A: '4/6',
-            B: '5/4 atau 1 1/4',
-            C: '3/8',
-            D: '2/4',
-          },
-          kunciJawaban: 'B',
-          bobot: 1,
-        },
-        {
-          id: 'm-2',
-          nomor: 2,
-          tipe: 'pilihan_ganda',
-          pertanyaan: 'Sebuah kolam berbentuk persegi panjang dengan panjang 12 meter dan lebar 8 meter. Keliling kolam tersebut adalah...',
-          pilihan: {
-            A: '20 meter',
-            B: '40 meter',
-            C: '96 meter',
-            D: '48 meter',
-          },
-          kunciJawaban: 'B',
-          bobot: 1,
-        },
-      ],
-    },
-  ];
 }
 
 export const db = new DatabaseService();

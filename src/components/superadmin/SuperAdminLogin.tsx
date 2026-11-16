@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { db } from '../../services/database';
 import { SuperAdminUser } from '../../types';
-import { ShieldCheck, Lock, User as UserIcon, Eye, EyeOff, ArrowRight, ArrowLeft, KeyRound, AlertTriangle } from 'lucide-react';
+import { ShieldCheck, Lock, User as UserIcon, Eye, EyeOff, ArrowRight, ArrowLeft, AlertTriangle } from 'lucide-react';
 
 interface SuperAdminLoginProps {
   onLoginSuccess: (user: SuperAdminUser) => void;
@@ -18,12 +18,9 @@ export const SuperAdminLogin: React.FC<SuperAdminLoginProps> = ({
   const [error, setError] = useState('');
   const [isLoading, setIsLoading] = useState(false);
 
-  const [successNotice, setSuccessNotice] = useState('');
-
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
     setError('');
-    setSuccessNotice('');
     setIsLoading(true);
 
     setTimeout(() => {
@@ -35,22 +32,6 @@ export const SuperAdminLogin: React.FC<SuperAdminLoginProps> = ({
         setIsLoading(false);
       }
     }, 200);
-  };
-
-  const handleFillDemo = () => {
-    const sa = db.getSuperAdminUser();
-    setUsername(sa.username);
-    setPassword(sa.password);
-    setError('');
-  };
-
-  const handleResetDefault = () => {
-    db.resetSuperAdminDefault();
-    setUsername('superadmin');
-    setPassword('superadmin123');
-    setError('');
-    setSuccessNotice('Kredensial berhasil dikembalikan ke: superadmin / superadmin123');
-    setTimeout(() => setSuccessNotice(''), 4000);
   };
 
   return (
@@ -95,14 +76,6 @@ export const SuperAdminLogin: React.FC<SuperAdminLoginProps> = ({
               Hanya diperuntukkan bagi Administrator Pusat. Guru dan Operator sekolah silakan masuk melalui portal login sekolah.
             </div>
           </div>
-
-          {/* Success Notice */}
-          {successNotice && (
-            <div className="mb-6 p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-medium flex items-center gap-2">
-              <div className="w-2 h-2 rounded-full bg-emerald-400" />
-              <span>{successNotice}</span>
-            </div>
-          )}
 
           {/* Error Message */}
           {error && (
@@ -178,26 +151,6 @@ export const SuperAdminLogin: React.FC<SuperAdminLoginProps> = ({
             </button>
           </form>
 
-          {/* Quick Demo Fill */}
-          <div className="mt-6 pt-5 border-t border-slate-800/80 flex flex-col items-center gap-2">
-            <button
-              id="btn-sa-quick-fill"
-              type="button"
-              onClick={handleFillDemo}
-              className="inline-flex items-center gap-1.5 text-xs text-indigo-400 hover:text-indigo-300 font-medium py-1 px-2.5 rounded-lg hover:bg-indigo-950/50 transition-colors cursor-pointer"
-            >
-              <KeyRound className="w-3.5 h-3.5" />
-              <span>Gunakan Kredensial Default (superadmin / superadmin123)</span>
-            </button>
-            <button
-              id="btn-sa-reset-default"
-              type="button"
-              onClick={handleResetDefault}
-              className="inline-flex items-center gap-1.5 text-[11px] text-slate-400 hover:text-amber-400 font-medium py-1 px-2.5 rounded-lg hover:bg-slate-800/50 transition-colors cursor-pointer"
-            >
-              <span>Reset Kredensial Super Admin ke Bawaan</span>
-            </button>
-          </div>
         </div>
 
         {/* Footer Note */}

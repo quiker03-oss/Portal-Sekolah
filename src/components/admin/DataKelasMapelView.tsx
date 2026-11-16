@@ -216,7 +216,13 @@ export const DataKelasMapelView: React.FC = () => {
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {kelasList.map((k) => {
-              const studentsInClass = db.getSiswaList().filter((s) => s.kelas === k.nama).length;
+              const kNorm = k.nama.toLowerCase().replace(/[^a-z0-9]/g, '');
+              const studentsInClass = db.getSiswaList().filter((s) => {
+                if (!s.kelas) return false;
+                if (s.kelas === k.nama || s.kelas === k.id) return true;
+                const sNorm = s.kelas.toLowerCase().replace(/[^a-z0-9]/g, '');
+                return sNorm === kNorm || sNorm === `kelas${kNorm}` || `kelas${sNorm}` === kNorm;
+              }).length;
               return (
                 <div
                   key={k.id}
@@ -229,14 +235,20 @@ export const DataKelasMapelView: React.FC = () => {
                       </span>
                       <div className="flex items-center gap-1">
                         <button
+                          type="button"
                           onClick={() => openEditKelas(k)}
-                          className="p-1 rounded-lg text-blue-700 hover:bg-blue-50"
+                          title="Edit Kelas"
+                          aria-label={`Edit kelas ${k.nama}`}
+                          className="p-1 rounded-lg text-blue-700 hover:bg-blue-50 cursor-pointer"
                         >
                           <Edit2 className="w-3.5 h-3.5" />
                         </button>
                         <button
+                          type="button"
                           onClick={() => handleDeleteKelas(k)}
-                          className="p-1 rounded-lg text-rose-600 hover:bg-rose-50"
+                          title="Hapus Kelas"
+                          aria-label={`Hapus kelas ${k.nama}`}
+                          className="p-1 rounded-lg text-rose-600 hover:bg-rose-50 cursor-pointer"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -279,7 +291,8 @@ export const DataKelasMapelView: React.FC = () => {
           </div>
 
           <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
-            <table className="w-full text-left text-xs">
+            <div className="overflow-x-auto">
+              <table className="w-full text-left text-xs min-w-[600px]">
               <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 uppercase font-semibold text-[11px]">
                 <tr>
                   <th className="px-4 py-3 text-center w-12">No</th>
@@ -305,14 +318,20 @@ export const DataKelasMapelView: React.FC = () => {
                     <td className="px-4 py-3 text-center">
                       <div className="flex items-center justify-center gap-1.5">
                         <button
+                          type="button"
                           onClick={() => openEditMapel(m)}
-                          className="p-1 rounded-lg text-blue-700 hover:bg-blue-50"
+                          title="Edit Mata Pelajaran"
+                          aria-label={`Edit mapel ${m.nama}`}
+                          className="p-1 rounded-lg text-blue-700 hover:bg-blue-50 cursor-pointer"
                         >
                           <Edit2 className="w-3.5 h-3.5" />
                         </button>
                         <button
+                          type="button"
                           onClick={() => handleDeleteMapel(m)}
-                          className="p-1 rounded-lg text-rose-600 hover:bg-rose-50"
+                          title="Hapus Mata Pelajaran"
+                          aria-label={`Hapus mapel ${m.nama}`}
+                          className="p-1 rounded-lg text-rose-600 hover:bg-rose-50 cursor-pointer"
                         >
                           <Trash2 className="w-3.5 h-3.5" />
                         </button>
@@ -322,6 +341,7 @@ export const DataKelasMapelView: React.FC = () => {
                 ))}
               </tbody>
             </table>
+            </div>
           </div>
         </div>
       )}

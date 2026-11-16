@@ -1,1897 +1,1749 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
+import jsQR from 'jsqr';
+import confetti from 'canvas-confetti';
 import { db } from '../../services/database';
-import { UjianOnline, SoalUjian, JawabanSiswaUjian, Siswa, LogPelanggaranUjian } from '../../types';
+import { sound } from '../../services/audio';
+import { toast } from '../../utils/toast';
+import { UjianOnline, SesiUjianSiswa, SoalUjian, DetailJawabanSiswa, Siswa, Settings } from '../../types';
+import { ImageLightboxModal } from './ImageLightboxModal';
 import {
   Clock,
-  CheckCircle2,
-  AlertCircle,
+  CheckCircle,
+  AlertTriangle,
   ChevronLeft,
   ChevronRight,
-  Flag,
+  ShieldAlert,
+  LogOut,
   Send,
   HelpCircle,
-  ZoomIn,
-  X,
-  User,
   Sparkles,
-  Lock,
-  ArrowLeft,
   BookOpen,
-  Award,
-  Check,
-  ShieldAlert,
-  Maximize2,
-  Layers,
-  AlertTriangle,
+  User,
+  GraduationCap,
+  KeyRound,
+  FileCheck,
+  CheckCircle2,
   RefreshCw,
-  Eye,
+  Camera,
+  CameraOff,
+  QrCode,
+  School,
+  Lock,
+  Unlock,
+  UploadCloud,
   FileText,
+  ZoomIn,
+  Image as ImageIcon,
 } from 'lucide-react';
 
-export function getOrCreateDeviceId(): string {
-  if (typeof window === 'undefined') return 'server-dev';
-  try {
-    let id = localStorage.getItem('portal_sekolah_device_id');
-    if (!id) {
-      id =
-        'dev-' +
-        (typeof crypto !== 'undefined' && crypto.randomUUID
-          ? crypto.randomUUID()
-          : Math.random().toString(36).substring(2, 10) + Date.now().toString(36));
-      localStorage.setItem('portal_sekolah_device_id', id);
-    }
-    return id;
-  } catch {
-    return 'temp-dev-' + Date.now();
-  }
-}
-
-export function collectDeviceInfo() {
-  const deviceId = getOrCreateDeviceId();
-  const ua = typeof navigator !== 'undefined' ? navigator.userAgent || '' : '';
-  let browser = 'Browser Web';
-  if (ua.includes('Edg/')) browser = 'Microsoft Edge';
-  else if (ua.includes('Chrome/')) browser = 'Google Chrome';
-  else if (ua.includes('Safari/') && !ua.includes('Chrome')) browser = 'Apple Safari';
-  else if (ua.includes('Firefox/')) browser = 'Mozilla Firefox';
-
-  let os = 'Perangkat';
-  if (ua.includes('Windows')) os = 'Windows';
-  else if (ua.includes('Android')) os = 'Android';
-  else if (ua.includes('iPhone') || ua.includes('iPad')) os = 'iOS';
-  else if (ua.includes('Mac OS')) os = 'macOS';
-  else if (ua.includes('Linux')) os = 'Linux';
-
-  const screenRes =
-    typeof window !== 'undefined' ? `${window.screen.width}x${window.screen.height}` : 'Standar';
-
-  return {
-    deviceId,
-    userAgent: ua,
-    platform: typeof navigator !== 'undefined' ? navigator.platform || os : os,
-    screenResolution: screenRes,
-    language: typeof navigator !== 'undefined' ? navigator.language || 'id-ID' : 'id-ID',
-    browserSummary: `${browser} (${os}, ${screenRes})`,
-    loginAt: new Date().toISOString(),
-  };
-}
-
 interface UjianSiswaViewProps {
-  ujianId: string;
-  schoolId?: string;
-  onExit?: () => void;
+  initialUjianId?: string;
+  initialSessionToken?: string;
+  onExit: () => void;
 }
 
-export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({ ujianId, schoolId, onExit }) => {
+export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
+  initialUjianId,
+  initialSessionToken,
+  onExit,
+}) => {
+  const [settings, setSettings] = useState<Settings>(() => db.getSettings());
+
+  // Exam Selection & Info
+  const [selectedExamId, setSelectedExamId] = useState<string>(initialUjianId || '');
   const [ujian, setUjian] = useState<UjianOnline | null>(null);
-  const [allStudents, setAllStudents] = useState<Siswa[]>(() => db.getSiswa());
-  const [loading, setLoading] = useState<boolean>(true);
-  const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [availableExams, setAvailableExams] = useState<UjianOnline[]>([]);
+  const [isLoadingExam, setIsLoadingExam] = useState<boolean>(true);
+  const [logoError, setLogoError] = useState<boolean>(false);
 
-  // Student Identity verification state
-  const [selectedSiswa, setSelectedSiswa] = useState<Siswa | null>(null);
-  const [searchQuery, setSearchQuery] = useState<string>('');
-  const [tokenInput, setTokenInput] = useState<string>('');
-  const [tokenError, setTokenError] = useState<string | null>(null);
-  const [hasStarted, setHasStarted] = useState<boolean>(false);
+  // Verification & Pairing State (Tahap 2 & Tahap 3)
+  const [verifyMode, setVerifyMode] = useState<'camera' | 'passcode' | 'nisn'>('camera');
+  const [passCodeInput, setPassCodeInput] = useState('');
+  const [nisnInput, setNisnInput] = useState('');
+  const [verificationError, setVerificationError] = useState<string | null>(null);
+  const [isVerifying, setIsVerifying] = useState(false);
+  const [verifiedSiswa, setVerifiedSiswa] = useState<Siswa | null>(null);
 
-  // Exam taking state
-  const [activeQuestionIndex, setActiveQuestionIndex] = useState<number>(0);
-  const [answers, setAnswers] = useState<{ [soalId: string]: { jawabanDipilih: string; raguRagu?: boolean } }>({});
+  // Student Camera Scanner (always-mounted <video> + ref-based loop for reliability)
+  const [isCameraActive, setIsCameraActive] = useState(false);
+  const [cameraLoading, setCameraLoading] = useState(false);
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const canvasRef = useRef<HTMLCanvasElement | null>(null);
+  const streamRef = useRef<MediaStream | null>(null);
+  const isScanningRef = useRef<boolean>(false);
+  const lastScanTimeRef = useRef<number>(0);
+  const animFrameIdRef = useRef<number | null>(null);
+  const qrFileInputRef = useRef<HTMLInputElement | null>(null);
+  const lastViolationAtRef = useRef<number>(0);
+
+  // Active Session & Exam Taking (Tahap 4)
+  const [sesi, setSesi] = useState<SesiUjianSiswa | null>(null);
+  const [currentIndex, setCurrentIndex] = useState(0);
+  const [jawabanState, setJawabanState] = useState<{ [soalId: string]: DetailJawabanSiswa }>({});
   const [timeLeftSeconds, setTimeLeftSeconds] = useState<number>(0);
-  const [isSubmitting, setIsSubmitting] = useState<boolean>(false);
-  const [isSubmitted, setIsSubmitted] = useState<boolean>(false);
-  const [submissionResult, setSubmissionResult] = useState<JawabanSiswaUjian | null>(null);
-  const [showConfirmModal, setShowConfirmModal] = useState<boolean>(false);
-  const [zoomImage, setZoomImage] = useState<string | null>(null);
-  const [saveStatus, setSaveStatus] = useState<'tersimpan' | 'menyimpan' | 'offline'>('tersimpan');
+  const [isSubmitting, setIsSubmitting] = useState(false);
+  const [showSubmitModal, setShowSubmitModal] = useState(false);
+  const [isCompleted, setIsCompleted] = useState(false);
+  const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'offline'>('saved');
 
-  // Mobile Question Navigation Drawer
-  const [showMobileNav, setShowMobileNav] = useState<boolean>(false);
+  // Anti-cheat Proctoring Warning Modal
+  const [cheatWarning, setCheatWarning] = useState<string | null>(null);
 
-  // Dual mode view (if document preview available)
-  const [viewMode, setViewMode] = useState<'soal' | 'dokumen'>('soal');
+  // Fullscreen Image Lightbox Modal State
+  const [lightboxData, setLightboxData] = useState<{
+    isOpen: boolean;
+    imageUrl: string;
+    title?: string;
+    caption?: string;
+  }>({ isOpen: false, imageUrl: '' });
 
-  // Proctoring & Anti-Curang State
-  const [violationsCount, setViolationsCount] = useState<number>(0);
-  const [showViolationModal, setShowViolationModal] = useState<boolean>(false);
-  const [latestViolationMsg, setLatestViolationMsg] = useState<string>('');
-  const [isSessionLocked, setIsSessionLocked] = useState<boolean>(false);
-  const [lockReason, setLockReason] = useState<string>('');
-  const [isFullscreen, setIsFullscreen] = useState<boolean>(false);
-  const blurTimeRef = useRef<number | null>(null);
-  const maxAllowedViolations = ujian?.maksimalPelanggaran || 3;
+  // Track broken/failed image loads so student gets a clear retry button
+  const [imageLoadErrors, setImageLoadErrors] = useState<Record<string, boolean>>({});
+  const [imageRetryNonce, setImageRetryNonce] = useState<number>(0);
 
-  // Load exam and check eligibility asynchronously with cloud fallback
+  // Online / Offline State
+  const [isOnline, setIsOnline] = useState<boolean>(typeof navigator !== 'undefined' ? navigator.onLine : true);
+
   useEffect(() => {
-    let isMounted = true;
+    const handleOnline = () => {
+      setIsOnline(true);
+      setSaveStatus('saved');
+      if (sesi && ujian) {
+        db.saveSesiUjian({ ...sesi, jawaban: jawabanState }).catch(() => {});
+      }
+    };
+    const handleOffline = () => {
+      setIsOnline(false);
+      setSaveStatus('offline');
+    };
 
-    const loadExamAsync = async () => {
-      setLoading(true);
-      setErrorMsg(null);
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [sesi, ujian, jawabanState]);
 
-      try {
-        // Extract schoolId from props, or window.location search/hash
-        let effectiveSchoolId = schoolId;
-        if (!effectiveSchoolId && typeof window !== 'undefined') {
-          const sp = new URLSearchParams(window.location.search);
-          effectiveSchoolId = sp.get('school') || sp.get('schoolId') || undefined;
-          if (!effectiveSchoolId && window.location.hash.includes('?')) {
-            const hashQ = window.location.hash.split('?')[1];
-            const hp = new URLSearchParams(hashQ);
-            effectiveSchoolId = hp.get('school') || hp.get('schoolId') || undefined;
-          }
+  // --------------------------------------------------------------------------
+  // 1. URL ROUTING & CROSS-DEVICE FIRESTORE RESOLUTION
+  // --------------------------------------------------------------------------
+  useEffect(() => {
+    let isCancelled = false;
+
+    const bootstrapExamRoute = async () => {
+      setIsLoadingExam(true);
+      let targetExamId = initialUjianId || '';
+      let targetToken = initialSessionToken || '';
+      let targetSchoolId = '';
+
+      if (typeof window !== 'undefined') {
+        const searchParams = new URLSearchParams(window.location.search);
+        const hash = window.location.hash || '';
+
+        targetExamId = targetExamId || searchParams.get('ujian') || searchParams.get('id') || searchParams.get('examId') || '';
+        targetToken = targetToken || searchParams.get('session') || searchParams.get('token') || '';
+        targetSchoolId = searchParams.get('school') || searchParams.get('schoolId') || '';
+
+        if (hash.includes('?')) {
+          const hashQuery = hash.split('?')[1];
+          const hashParams = new URLSearchParams(hashQuery);
+          if (!targetExamId) targetExamId = hashParams.get('id') || hashParams.get('ujian') || hashParams.get('examId') || '';
+          if (!targetToken) targetToken = hashParams.get('session') || hashParams.get('token') || '';
+          if (!targetSchoolId) targetSchoolId = hashParams.get('school') || hashParams.get('schoolId') || '';
         }
+      }
 
-        const exam = await db.getUjianOnlineByIdAsync(ujianId, effectiveSchoolId);
-        if (!isMounted) return;
+      if (targetSchoolId) {
+        db.setActiveSchoolId(targetSchoolId);
+      }
 
-        if (!exam) {
-          setErrorMsg('Akses Ujian Belum Tersedia. Ujian tidak ditemukan atau tautan ujian sudah tidak aktif.');
-          setLoading(false);
+      if (!isCancelled) {
+        setSettings(db.getSettings());
+        setAvailableExams(db.getUjianList());
+      }
+
+      if (targetToken) {
+        const resolvedSession = await db.resolveSessionFromFirestore({
+          token: targetToken,
+          schoolId: targetSchoolId || undefined,
+        });
+        if (!isCancelled && resolvedSession) {
+          initSession(resolvedSession);
+          setIsLoadingExam(false);
           return;
         }
+      }
 
-        setUjian(exam);
+      if (targetExamId) {
+        setSelectedExamId(targetExamId);
+        const resolvedExam = await db.resolveExamFromFirestore(targetExamId, targetSchoolId || undefined);
+        if (!isCancelled) {
+          if (resolvedExam) {
+            setUjian(resolvedExam);
+            setSettings(db.getSettings());
+          } else {
+            setVerificationError('Tautan ujian tidak ditemukan atau sekolah belum menerbitkan ujian tersebut.');
+          }
+          setAvailableExams(db.getUjianList());
+        }
+      } else {
+        const list = db.getUjianList();
+        if (!isCancelled && list.length > 0) {
+          const activeOne = list.find((u) => u.status === 'aktif' || u.status === 'terbit') || list[0];
+          setSelectedExamId(activeOne.id);
+          const sanitized = db.getUjianForStudent(activeOne.id);
+          if (sanitized) setUjian(sanitized);
+        }
+      }
 
-        // Fetch student roster for this exam's school
-        const roster = await db.getSiswaForUjianAsync(exam);
-        if (isMounted && roster && roster.length > 0) {
-          setAllStudents(roster);
-        }
-
-        // Check date bounds
-        const now = new Date();
-        if (exam.tanggalMulai && new Date(exam.tanggalMulai) > now) {
-          setErrorMsg(
-            `Ujian belum dimulai. Jadwal pelaksanaan ujian: ${new Date(exam.tanggalMulai).toLocaleString('id-ID', {
-              dateStyle: 'full',
-              timeStyle: 'short',
-            })}.`
-          );
-        } else if (exam.tanggalSelesai && new Date(exam.tanggalSelesai) < now) {
-          setErrorMsg(
-            `Masa pengerjaan ujian telah berakhir pada ${new Date(exam.tanggalSelesai).toLocaleString('id-ID', {
-              dateStyle: 'full',
-              timeStyle: 'short',
-            })}.`
-          );
-        } else if (exam.status === 'diarsipkan' || exam.status === 'draf') {
-          setErrorMsg('Ujian ini saat ini belum dibuka untuk peserta didik.');
-        }
-      } catch (err) {
-        console.error('Error loading exam async:', err);
-        if (isMounted) {
-          setErrorMsg('Gagal memuat naskah ujian. Silakan periksa koneksi internet Anda dan muat ulang halaman.');
-        }
-      } finally {
-        if (isMounted) {
-          setLoading(false);
-        }
+      if (!isCancelled) {
+        setIsLoadingExam(false);
       }
     };
 
-    loadExamAsync();
+    bootstrapExamRoute();
 
     return () => {
-      isMounted = false;
+      isCancelled = true;
     };
-  }, [ujianId, schoolId]);
+  }, [initialUjianId, initialSessionToken]);
 
-  // Filter students matching the exam's target classes
-  const eligibleSiswaList = useMemo(() => {
-    if (!ujian) return [];
-    const targets = ujian.kelasTarget || [];
-    if (targets.length === 0 || targets.includes('Semua Siswa')) {
-      return allStudents;
-    }
-    return allStudents.filter((s) =>
-      targets.some((t) => s.kelas.toLowerCase().includes(t.toLowerCase()) || t.toLowerCase().includes(s.kelas.toLowerCase()))
-    );
-  }, [ujian, allStudents]);
-
-  const filteredStudents = useMemo(() => {
-    if (!searchQuery.trim()) return eligibleSiswaList;
-    const q = searchQuery.toLowerCase();
-    return eligibleSiswaList.filter(
-      (s) =>
-        (s.namaLengkap || (s as any).nama || '').toLowerCase().includes(q) ||
-        (s.nisn && s.nisn.includes(q)) ||
-        (s.nomorInduk && s.nomorInduk.includes(q))
-    );
-  }, [eligibleSiswaList, searchQuery]);
-
-  // Prepared questions list
-  const preparedQuestions = useMemo(() => {
-    if (!ujian) return [];
-    return [...ujian.soalList];
-  }, [ujian]);
-
-  // Countdown timer
+  // Real-time synchronization listener (settings, exams, proctor unlock)
   useEffect(() => {
-    if (!hasStarted || isSubmitted || timeLeftSeconds <= 0 || isSessionLocked) return;
+    const handleLiveSync = () => {
+      setSettings(db.getSettings());
+      setLogoError(false);
+      const latestExams = db.getUjianList();
+      setAvailableExams(latestExams);
 
-    const interval = setInterval(() => {
-      setTimeLeftSeconds((prev) => {
-        if (prev <= 1) {
-          clearInterval(interval);
-          handleAutoSubmit('Waktu ujian telah berakhir.');
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-
-    return () => clearInterval(interval);
-  }, [hasStarted, isSubmitted, timeLeftSeconds, isSessionLocked]);
-
-  // Realtime session polling & unlock listener
-  useEffect(() => {
-    if (!hasStarted || !ujian || !selectedSiswa || isSubmitted) return;
-
-    const checkTeacherUnlock = async () => {
-      const currentSession = db.getJawabanSiswaByUjian(ujian.id, selectedSiswa.id);
-      if (currentSession) {
-        if (currentSession.status === 'terkunci') {
-          setIsSessionLocked(true);
-          setLockReason(
-            currentSession.alasanTerkunci ||
-              'Ujian dikunci sementara karena terdeteksi akses dari perangkat atau sesi lain. Silakan hubungi guru pengawas.'
-          );
-        } else if (currentSession.status === 'sedang_mengerjakan' && isSessionLocked) {
-          // Teacher unlocked the session!
-          setIsSessionLocked(false);
-          setLockReason('');
-          setShowViolationModal(false);
-        }
-
-        if (currentSession.jumlahPelanggaran !== undefined) {
-          setViolationsCount(currentSession.jumlahPelanggaran);
-        }
+      if (selectedExamId && !sesi) {
+        const refreshedExam = db.getUjianForStudent(selectedExamId);
+        if (refreshedExam) setUjian(refreshedExam);
       }
 
-      // Query server heartbeat for multi-device detection & remote locks
-      try {
-        const storedToken = localStorage.getItem(`portal_exam_token_${ujian.id}_${selectedSiswa.id}`);
-        const res = await fetch('/api/ujian/session/heartbeat', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            ujianId: ujian.id,
-            siswaId: selectedSiswa.id,
-            sessionToken: storedToken || undefined,
-            deviceId: getOrCreateDeviceId(),
-          }),
-        });
-        if (res.ok) {
-          const data = await res.json();
-          if (data.isLocked || data.status === 'terkunci') {
-            setIsSessionLocked(true);
-            setLockReason(
-              data.alasanTerkunci ||
-                'Ujian dikunci sementara karena terdeteksi akses dari perangkat atau sesi lain. Silakan hubungi guru pengawas.'
-            );
-          } else if (data.status === 'sedang_mengerjakan' && isSessionLocked) {
-            setIsSessionLocked(false);
-            setLockReason('');
-            setShowViolationModal(false);
+      if (sesi) {
+        const latestSesi = db.getSesiById(sesi.id);
+        if (latestSesi) {
+          // Automatically unlock student screen when teacher clicks "Buka Kunci" in Pengawasan
+          if (sesi.status === 'terkunci' && latestSesi.status !== 'terkunci') {
+            setSesi(latestSesi);
+            toast.success('Sesi ujian Anda telah dibuka kembali oleh Guru Pengawas.');
+          } else if (latestSesi.status === 'terkunci' && sesi.status !== 'terkunci') {
+            setSesi(latestSesi);
           }
         }
-      } catch {
-        // network resilience
       }
     };
 
-    const interval = setInterval(checkTeacherUnlock, 3000);
-    window.addEventListener('jawaban_ujian_updated', checkTeacherUnlock);
+    window.addEventListener('ujian_online_updated', handleLiveSync);
+    window.addEventListener('sesi_ujian_updated', handleLiveSync);
+    window.addEventListener('settings_updated', handleLiveSync);
+    window.addEventListener('sekolah_updated', handleLiveSync);
+    window.addEventListener('school_changed', handleLiveSync);
 
     return () => {
-      clearInterval(interval);
-      window.removeEventListener('jawaban_ujian_updated', checkTeacherUnlock);
+      window.removeEventListener('ujian_online_updated', handleLiveSync);
+      window.removeEventListener('sesi_ujian_updated', handleLiveSync);
+      window.removeEventListener('settings_updated', handleLiveSync);
+      window.removeEventListener('sekolah_updated', handleLiveSync);
+      window.removeEventListener('school_changed', handleLiveSync);
     };
-  }, [hasStarted, ujian, selectedSiswa, isSubmitted, isSessionLocked]);
+  }, [selectedExamId, sesi]);
 
-  // Proctoring: Tab Switching, Blur, and Fullscreen Tracking
+  // When selected exam changes
+  const handleSelectExam = (examId: string) => {
+    setSelectedExamId(examId);
+    setVerificationError(null);
+    const found = db.getUjianForStudent(examId);
+    if (found) {
+      setUjian(found);
+    }
+  };
+
+  // --------------------------------------------------------------------------
+  // 2. CAMERA SCANNER FOR STUDENT QR ABSENSI (Tahap 3)
+  // --------------------------------------------------------------------------
+  const startCamera = async () => {
+    setVerificationError(null);
+    setCameraLoading(true);
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        throw new Error('Kamera tidak didukung pada browser perangkat ini.');
+      }
+
+      const stream = await navigator.mediaDevices.getUserMedia({
+        video: { facingMode: 'environment', width: { ideal: 640 }, height: { ideal: 480 } },
+      });
+
+      streamRef.current = stream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = stream;
+        videoRef.current.setAttribute('playsinline', 'true');
+        await videoRef.current.play();
+      }
+
+      isScanningRef.current = true;
+      setIsCameraActive(true);
+      setCameraLoading(false);
+      scanQrCodeLoop();
+    } catch (err: any) {
+      console.warn('Gagal menyalakan kamera siswa:', err);
+      isScanningRef.current = false;
+      setIsCameraActive(false);
+      setCameraLoading(false);
+      setVerificationError(
+        'Tidak dapat mengakses kamera perangkat. Silakan izinkan akses kamera pada browser, atau gunakan metode Upload Foto QR / Kode Guru / Input NISN di bawah.'
+      );
+    }
+  };
+
+  const stopCamera = () => {
+    if (animFrameIdRef.current) {
+      cancelAnimationFrame(animFrameIdRef.current);
+      animFrameIdRef.current = null;
+    }
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+    isScanningRef.current = false;
+    setIsCameraActive(false);
+    setCameraLoading(false);
+  };
+
   useEffect(() => {
-    if (!hasStarted || isSubmitted || !ujian || !selectedSiswa) return;
-    if (ujian.pengawasanAktif === false) return;
+    return () => {
+      stopCamera();
+    };
+  }, []);
 
-    // Track tab switch via visibilitychange
+  const scanQrCodeLoop = () => {
+    if (!isScanningRef.current || !videoRef.current || !canvasRef.current) return;
+
+    const now = performance.now();
+    if (now - lastScanTimeRef.current >= 120) {
+      lastScanTimeRef.current = now;
+      const video = videoRef.current;
+      const canvas = canvasRef.current;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+
+      if (video.readyState === video.HAVE_ENOUGH_DATA && ctx) {
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = jsQR(imageData.data, imageData.width, imageData.height, {
+          inversionAttempts: 'dontInvert',
+        });
+
+        if (code && code.data) {
+          try {
+            sound.playSuccess();
+          } catch {}
+          stopCamera();
+          handleVerifyQrData(code.data);
+          return;
+        }
+      }
+    }
+
+    animFrameIdRef.current = requestAnimationFrame(scanQrCodeLoop);
+  };
+
+  // Upload Photo of QR Card
+  const handleUploadQrFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const img = new Image();
+      img.onload = () => {
+        const canvas = document.createElement('canvas');
+        canvas.width = img.width;
+        canvas.height = img.height;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        ctx.drawImage(img, 0, 0);
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const code = jsQR(imageData.data, imageData.width, imageData.height);
+        if (code && code.data) {
+          try {
+            sound.playSuccess();
+          } catch {}
+          handleVerifyQrData(code.data);
+        } else {
+          setVerificationError(
+            'QR Code tidak terdeteksi pada gambar yang diunggah. Pastikan foto kartu QR Absensi terlihat terang dan jelas.'
+          );
+        }
+      };
+      img.src = event.target?.result as string;
+    };
+    reader.readAsDataURL(file);
+    e.target.value = '';
+  };
+
+  // --------------------------------------------------------------------------
+  // 3. VERIFY STUDENT IDENTITY & AUTHORIZATION (Strict Validation)
+  // --------------------------------------------------------------------------
+  const handleVerifyQrData = async (qrString: string) => {
+    setVerificationError(null);
+    setIsVerifying(true);
+
+    try {
+      if (!ujian) {
+        throw new Error('Naskah ujian belum dipilih atau tautan tidak valid.');
+      }
+
+      // Check exam status
+      if (ujian.status === 'draf') {
+        throw new Error('Ujian ini masih berstatus DRAF dan belum resmi diterbitkan oleh Guru.');
+      }
+      if (ujian.status === 'selesai' || ujian.status === 'ditutup') {
+        throw new Error('Ujian ini sudah ditutup dan masa pengerjaan telah berakhir.');
+      }
+
+      // 1. Look up student identity from database (with Firestore fallback on fresh devices)
+      const cleanQr = qrString.trim();
+      const siswa = await db.resolveSiswaForVerification(cleanQr, ujian.schoolId);
+
+      if (!siswa) {
+        throw new Error(
+          `Kartu QR Absensi "${cleanQr}" tidak terdaftar dalam database siswa sekolah ini. Pastikan Anda memindai Kartu QR Absensi resmi.`
+        );
+      }
+
+      // 2. Validate student class matches exam target classes
+      const examClasses = ujian.kelasTarget || [];
+      if (examClasses.length > 0) {
+        const studentClass = siswa.kelas || '';
+        const normStudentClass = studentClass.toLowerCase().replace(/[^a-z0-9]/g, '');
+        const isMatched = examClasses.some((c) => {
+          const normC = c.toLowerCase().replace(/[^a-z0-9]/g, '');
+          return (
+            normC === normStudentClass ||
+            normC === `kelas${normStudentClass}` ||
+            `kelas${normC}` === normStudentClass
+          );
+        });
+
+        if (!isMatched) {
+          throw new Error(
+            `Kartu QR terdaftar atas nama ${siswa.namaLengkap} (Kelas ${siswa.kelas || '-'}). Namun ujian ini dikhususkan untuk ${examClasses.join(', ')}. Anda tidak memiliki hak akses untuk mengerjakan ujian ini.`
+          );
+        }
+      }
+
+      setVerifiedSiswa(siswa);
+
+      // 3. Create or get existing exam session
+      const session = await db.createOrGetSesiUjian(ujian.id, siswa);
+
+      // Check if session is already completed
+      if (session.status === 'selesai' || session.status === 'waktu_habis') {
+        initSession(session);
+        setIsCompleted(true);
+        return;
+      }
+
+      // Check if locked
+      if (session.status === 'terkunci') {
+        setSesi(session);
+        return;
+      }
+
+      // Direct entry to exam!
+      initSession(session);
+    } catch (err: any) {
+      setVerificationError(err?.message || 'Verifikasi gagal.');
+    } finally {
+      setIsVerifying(false);
+    }
+  };
+
+  // Verify by manual NISN / Nomor Induk
+  const handleVerifyManualNisn = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!nisnInput.trim()) {
+      setVerificationError('Silakan masukkan NISN atau Nomor Induk Siswa.');
+      return;
+    }
+    handleVerifyQrData(nisnInput.trim());
+  };
+
+  // Verify by 6-digit passcode provided by teacher
+  const handleVerifyPasscode = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setVerificationError(null);
+    setIsVerifying(true);
+
+    try {
+      const code = passCodeInput.trim();
+      if (!code) {
+        throw new Error('Silakan masukkan Kode Akses 6-Digit dari Guru.');
+      }
+
+      const match = await db.resolveSessionFromFirestore({
+        passCode: code,
+        schoolId: ujian?.schoolId || undefined,
+      });
+
+      if (!match) {
+        throw new Error(
+          'Kode Akses tidak ditemukan. Pastikan Anda sudah menunjukkan QR Absensi kepada Guru Pengawas.'
+        );
+      }
+
+      initSession(match);
+    } catch (err: any) {
+      setVerificationError(err?.message || 'Kode akses tidak cocok.');
+    } finally {
+      setIsVerifying(false);
+    }
+  };
+
+  // --------------------------------------------------------------------------
+  // 4. ACTIVE SESSION INITIALIZATION
+  // --------------------------------------------------------------------------
+  const initSession = (session: SesiUjianSiswa) => {
+    // Strictly load sanitized exam without answer keys for the student!
+    const exam = db.getUjianForStudent(session.ujianId);
+    if (!exam) {
+      setVerificationError('Data naskah ujian tidak ditemukan.');
+      return;
+    }
+
+    setSesi(session);
+    setUjian(exam);
+    setJawabanState(session.jawaban || {});
+
+    // Duration calculation
+    const durasiTotalSec = (exam.durasiMenit || 60) * 60;
+    if (session.waktuMulai) {
+      const startMs = new Date(session.waktuMulai).getTime();
+      const elapsedSec = Math.floor((Date.now() - startMs) / 1000);
+      const remain = Math.max(0, durasiTotalSec - elapsedSec);
+      setTimeLeftSeconds(remain);
+    } else {
+      setTimeLeftSeconds(durasiTotalSec);
+    }
+
+    if (session.status === 'selesai' || session.status === 'waktu_habis') {
+      setIsCompleted(true);
+    }
+  };
+
+  // --------------------------------------------------------------------------
+  // 5. COUNTDOWN TIMER (Wall-clock synchronized so background throttling won't drift)
+  // --------------------------------------------------------------------------
+  useEffect(() => {
+    if (!sesi || !ujian || isCompleted || sesi.status === 'terkunci') return;
+
+    const durasiTotalMs = (ujian.durasiMenit || 60) * 60 * 1000;
+    const startMs = sesi.waktuMulai ? new Date(sesi.waktuMulai).getTime() : Date.now();
+    const targetEndMs = startMs + durasiTotalMs;
+
+    const tick = () => {
+      const remainingSec = Math.max(0, Math.ceil((targetEndMs - Date.now()) / 1000));
+      setTimeLeftSeconds(remainingSec);
+      if (remainingSec <= 0) {
+        clearInterval(timer);
+        handleTimeExpired();
+      }
+    };
+
+    tick();
+    const timer = setInterval(tick, 1000);
+
+    return () => clearInterval(timer);
+  }, [sesi?.id, sesi?.status, sesi?.waktuMulai, ujian?.id, ujian?.durasiMenit, isCompleted]);
+
+  const handleTimeExpired = async () => {
+    if (!sesi) return;
+    setIsSubmitting(true);
+    await db.selesaikanUjianSiswa(sesi.id);
+    setIsCompleted(true);
+    setIsSubmitting(false);
+  };
+
+  // --------------------------------------------------------------------------
+  // 6. PROCTORING & ANTI-CHEAT
+  // --------------------------------------------------------------------------
+  useEffect(() => {
+    if (!sesi || isCompleted || sesi.status === 'terkunci') return;
+
     const handleVisibilityChange = () => {
       if (document.hidden) {
-        blurTimeRef.current = Date.now();
-      } else {
-        if (blurTimeRef.current) {
-          const durationSecs = Math.round((Date.now() - blurTimeRef.current) / 1000);
-          blurTimeRef.current = null;
-          recordViolation(
-            'pindah_tab',
-            `Berpindah tab atau membuka aplikasi lain selama ${durationSecs} detik`,
-            durationSecs
-          );
-        }
-      }
-    };
-
-    // Track window blur
-    const handleWindowBlur = () => {
-      if (!blurTimeRef.current) {
-        blurTimeRef.current = Date.now();
-      }
-    };
-
-    const handleWindowFocus = () => {
-      if (blurTimeRef.current) {
-        const durationSecs = Math.round((Date.now() - blurTimeRef.current) / 1000);
-        blurTimeRef.current = null;
-        if (durationSecs >= 1) {
-          recordViolation(
-            'jendela_blur',
-            `Meninggalkan jendela ujian atau membuka jendela lain selama ${durationSecs} detik`,
-            durationSecs
-          );
-        }
-      }
-    };
-
-    // Track Fullscreen exit
-    const handleFullscreenChange = () => {
-      const isCurrentlyFullscreen = !!document.fullscreenElement;
-      setIsFullscreen(isCurrentlyFullscreen);
-      if (ujian.wajibFullscreen !== false && !isCurrentlyFullscreen && !isSessionLocked) {
-        recordViolation(
-          'keluar_fullscreen',
-          'Keluar dari mode layar penuh (fullscreen) saat ujian berlangsung',
-          0
+        triggerViolation(
+          'pindah_tab',
+          'Terdeteksi meninggalkan layar ujian atau membuka tab/aplikasi lain.'
         );
       }
     };
 
-    // Block Copy-Paste & Right Click
-    const handleCopy = (e: ClipboardEvent) => {
-      if (ujian.blokirCopyPaste !== false) {
-        e.preventDefault();
-        recordViolation('copy_paste', 'Percobaan menyalin (copy) teks soal ujian', 0);
-      }
+    const handleWindowBlur = () => {
+      triggerViolation('jendela_blur', 'Jendela ujian kehilangan fokus aktif.');
     };
 
-    const handleCut = (e: ClipboardEvent) => {
-      if (ujian.blokirCopyPaste !== false) {
-        e.preventDefault();
-      }
-    };
-
-    const handlePaste = (e: ClipboardEvent) => {
-      if (ujian.blokirCopyPaste !== false) {
-        e.preventDefault();
-        recordViolation('copy_paste', 'Percobaan menempelkan (paste) teks dari luar', 0);
-      }
-    };
-
-    const handleContextMenu = (e: MouseEvent) => {
-      if (ujian.blokirCopyPaste !== false) {
-        e.preventDefault();
-      }
+    const handleCopyPaste = (e: ClipboardEvent) => {
+      e.preventDefault();
+      triggerViolation('copy_paste', 'Tindakan menyalin atau menempel teks dinonaktifkan selama ujian.');
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('blur', handleWindowBlur);
-    window.addEventListener('focus', handleWindowFocus);
-    document.addEventListener('fullscreenchange', handleFullscreenChange);
-    document.addEventListener('copy', handleCopy);
-    document.addEventListener('cut', handleCut);
-    document.addEventListener('paste', handlePaste);
-    document.addEventListener('contextmenu', handleContextMenu);
+    document.addEventListener('copy', handleCopyPaste);
+    document.addEventListener('paste', handleCopyPaste);
 
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('blur', handleWindowBlur);
-      window.removeEventListener('focus', handleWindowFocus);
-      document.removeEventListener('fullscreenchange', handleFullscreenChange);
-      document.removeEventListener('copy', handleCopy);
-      document.removeEventListener('cut', handleCut);
-      document.removeEventListener('paste', handlePaste);
-      document.removeEventListener('contextmenu', handleContextMenu);
+      document.removeEventListener('copy', handleCopyPaste);
+      document.removeEventListener('paste', handleCopyPaste);
     };
-  }, [hasStarted, isSubmitted, ujian, selectedSiswa, isSessionLocked]);
+  }, [sesi, isCompleted]);
 
-  // Record proctoring violation and trigger lock if needed
-  const recordViolation = (
-    jenis: LogPelanggaranUjian['jenis'],
-    deskripsi: string,
-    durasiKeluarDetik: number = 0
-  ) => {
-    if (!ujian || !selectedSiswa || isSubmitted || isSessionLocked) return;
+  const triggerViolation = (jenis: any, keterangan: string) => {
+    if (!sesi || isCompleted || sesi.status === 'terkunci') return;
 
-    try {
-      const updated = db.catatPelanggaranSiswa(
-        ujian.id,
-        selectedSiswa.id,
-        {
-          jenis,
-          deskripsi,
-          durasiKeluarDetik,
-        },
-        ujian.maksimalPelanggaran || 3
-      );
-
-      const count = updated.jumlahPelanggaran || 0;
-      setViolationsCount(count);
-      setLatestViolationMsg(deskripsi);
-
-      if (updated.status === 'terkunci') {
-        setIsSessionLocked(true);
-        setLockReason(updated.alasanTerkunci || 'Melebihi batas toleransi pelanggaran');
-        setShowViolationModal(false);
-      } else {
-        setShowViolationModal(true);
-      }
-    } catch (e) {
-      console.error('Gagal mencatat pelanggaran:', e);
-    }
-  };
-
-  // Auto-save changes locally and sync with server
-  const saveTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const handleAnswerSelect = (soalId: string, value: string) => {
-    if (isSessionLocked) return;
-    setSaveStatus('menyimpan');
-    setAnswers((prev) => {
-      const updated = {
-        ...prev,
-        [soalId]: {
-          ...prev[soalId],
-          jawabanDipilih: value,
-        },
-      };
-
-      if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
-      saveTimeoutRef.current = setTimeout(() => {
-        try {
-          if (ujian && selectedSiswa) {
-            localStorage.setItem(`draft_ujian_${ujian.id}_${selectedSiswa.id}`, JSON.stringify(updated));
-            // Update session active timestamp locally
-            const currentSession = db.getJawabanSiswaByUjian(ujian.id, selectedSiswa.id);
-            if (currentSession && currentSession.status === 'sedang_mengerjakan') {
-              db.saveJawabanSiswaUjian({
-                ...currentSession,
-                terakhirAktif: new Date().toISOString(),
-              });
-            }
-
-            // Sync answer with server endpoint (strictly rejected if locked on server)
-            const token = localStorage.getItem(`portal_exam_token_${ujian.id}_${selectedSiswa.id}`) || undefined;
-            fetch('/api/ujian/session/save-answer', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                ujianId: ujian.id,
-                siswaId: selectedSiswa.id,
-                sessionToken: token,
-                deviceId: getOrCreateDeviceId(),
-                soalId,
-                jawaban: { jawabanDipilih: value },
-                allAnswers: updated,
-              }),
-            })
-              .then(async (res) => {
-                if (res.status === 403) {
-                  const data = await res.json();
-                  if (data.locked) {
-                    setIsSessionLocked(true);
-                    setLockReason(
-                      data.message ||
-                        'Ujian dikunci sementara karena terdeteksi akses dari perangkat atau sesi lain. Silakan hubungi guru pengawas.'
-                    );
-                  }
-                }
-              })
-              .catch(() => {});
-          }
-          setSaveStatus('tersimpan');
-        } catch {
-          setSaveStatus('offline');
-        }
-      }, 400);
-
-      return updated;
-    });
-  };
-
-  const handleToggleRagu = (soalId: string) => {
-    if (isSessionLocked) return;
-    setAnswers((prev) => ({
-      ...prev,
-      [soalId]: {
-        ...prev[soalId],
-        jawabanDipilih: prev[soalId]?.jawabanDipilih || '',
-        raguRagu: !prev[soalId]?.raguRagu,
-      },
-    }));
-  };
-
-  const requestFullscreen = () => {
-    try {
-      if (document.documentElement.requestFullscreen) {
-        document.documentElement.requestFullscreen().catch(() => {});
-      }
-    } catch {}
-  };
-
-  const handleStartExam = async () => {
-    if (!ujian || !selectedSiswa) return;
-
-    // Check token if required
-    if (ujian.kodeUjian && ujian.kodeUjian.trim()) {
-      if (!tokenInput || tokenInput.trim().toUpperCase() !== ujian.kodeUjian.trim().toUpperCase()) {
-        setTokenError('Kode ujian (PIN) yang Anda masukkan tidak cocok.');
-        return;
-      }
-    }
-
-    // Check if student has already completed the exam
-    const existing = db.getJawabanSiswaByUjian(ujian.id, selectedSiswa.id);
-    if (existing && (existing.status === 'selesai' || existing.status === 'waktu_habis')) {
-      if ((ujian.jumlahPercobaan || 1) <= 1) {
-        setSubmissionResult(existing);
-        setIsSubmitted(true);
-        setHasStarted(true);
-        return;
-      }
-    }
-
-    // Check if locked locally
-    if (existing && existing.status === 'terkunci') {
-      setIsSessionLocked(true);
-      setLockReason(
-        existing.alasanTerkunci ||
-          'Ujian dikunci sementara karena terdeteksi akses dari perangkat atau sesi lain. Silakan hubungi guru pengawas.'
-      );
-      setViolationsCount(existing.jumlahPelanggaran || 0);
-      setHasStarted(true);
+    // Cooldown debounce (2500ms) so simultaneous visibilitychange + blur only counts once
+    const now = Date.now();
+    if (jenis !== 'copy_paste' && now - lastViolationAtRef.current < 2500) {
       return;
     }
+    lastViolationAtRef.current = now;
 
-    // Recover draft if previously started locally
+    const maxViolations = Math.max(1, Number(ujian?.batasPelanggaran) || 3);
+    const optimisticCount = (sesi.jumlahPelanggaran || 0) + 1;
+    setCheatWarning(`${keterangan} (Peringatan ke-${optimisticCount} dari batas ${maxViolations} kali)`);
+
     try {
-      const savedDraft = localStorage.getItem(`draft_ujian_${ujian.id}_${selectedSiswa.id}`);
-      if (savedDraft) {
-        setAnswers(JSON.parse(savedDraft));
-      }
+      sound.playError();
     } catch {}
 
-    // SERVER-AUTHORITATIVE SESSION VERIFICATION & MULTI-DEVICE DETECTION
-    const device = collectDeviceInfo();
-    const storedToken = localStorage.getItem(`portal_exam_token_${ujian.id}_${selectedSiswa.id}`) || undefined;
+    db.catatPelanggaranSiswa(sesi.id, jenis, keterangan)
+      .then((updatedSesi) => {
+        if (updatedSesi) {
+          setSesi(updatedSesi);
+        } else if (optimisticCount >= maxViolations) {
+          setSesi((prev) => (prev ? { ...prev, status: 'terkunci', jumlahPelanggaran: optimisticCount } : null));
+        }
+      })
+      .catch(() => {});
+  };
+
+  // --------------------------------------------------------------------------
+  // 7. ANSWER SUBMISSION & AUTOSAVE
+  // --------------------------------------------------------------------------
+  const handleSelectAnswer = async (soalId: string, answer: string) => {
+    if (!sesi || isCompleted || sesi.status === 'terkunci') return;
+
+    setSaveStatus('saving');
+    const existing = jawabanState[soalId] || { jawabanDipilih: '' };
+    const updatedDetail: DetailJawabanSiswa = {
+      ...existing,
+      jawabanDipilih: answer,
+      waktuJawab: new Date().toISOString(),
+    };
+
+    const newJawabanState = {
+      ...jawabanState,
+      [soalId]: updatedDetail,
+    };
+    setJawabanState(newJawabanState);
 
     try {
-      const res = await fetch('/api/ujian/session/start', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          ujianId: ujian.id,
-          siswaId: selectedSiswa.id,
-          namaSiswa: selectedSiswa.namaLengkap || (selectedSiswa as any).nama || '',
-          nisn: selectedSiswa.nisn,
-          nomorInduk: selectedSiswa.nomorInduk || (selectedSiswa as any).nis || '',
-          kelas: selectedSiswa.kelas,
-          schoolId: ujian.schoolId,
-          device,
-          sessionToken: storedToken,
-        }),
-      });
-
-      const serverData = await res.json();
-
-      // Case: Server detected multi-device access or previous lock!
-      if (serverData.locked || res.status === 403) {
-        setIsSessionLocked(true);
-        setLockReason(
-          serverData.message ||
-            serverData.alasanTerkunci ||
-            'Ujian dikunci sementara karena terdeteksi akses dari perangkat atau sesi lain. Silakan hubungi guru pengawas.'
-        );
-        if (serverData.answers && Object.keys(serverData.answers).length > 0) {
-          setAnswers(serverData.answers);
-        }
-        setHasStarted(true);
-        return;
-      }
-
-      if (serverData.finished) {
-        setIsSubmitted(true);
-        setHasStarted(true);
-        return;
-      }
-
-      if (serverData.success && serverData.sessionToken) {
-        localStorage.setItem(`portal_exam_token_${ujian.id}_${selectedSiswa.id}`, serverData.sessionToken);
-        if (serverData.answers && Object.keys(serverData.answers).length > 0) {
-          setAnswers((prev) => ({ ...prev, ...serverData.answers }));
-        }
-      }
-    } catch (err) {
-      console.warn('Verifikasi server session offline/transient:', err);
-    }
-
-    // Register active session in local database & sync
-    const now = new Date().toISOString();
-    const initSession: JawabanSiswaUjian = existing
-      ? {
-          ...existing,
-          status: 'sedang_mengerjakan',
-          deviceInfo: device,
-          terakhirAktif: now,
-          updatedAt: now,
-        }
-      : {
-          id: `ans-${ujian.id}-${selectedSiswa.id}`,
-          schoolId: ujian.schoolId,
-          ujianId: ujian.id,
-          siswaId: selectedSiswa.id,
-          namaSiswa: selectedSiswa.namaLengkap || (selectedSiswa as any).nama || '',
-          nisn: selectedSiswa.nisn,
-          nomorInduk: selectedSiswa.nomorInduk || (selectedSiswa as any).nis || '',
-          kelas: selectedSiswa.kelas,
-          jawaban: {},
-          waktuMulai: now,
-          status: 'sedang_mengerjakan',
-          deviceInfo: device,
-          jumlahPelanggaran: 0,
-          logPelanggaran: [],
-          terakhirAktif: now,
-          createdAt: now,
-          updatedAt: now,
-        };
-    db.saveJawabanSiswaUjian(initSession);
-
-    const totalDurationSeconds = (ujian.durasiMenit || 60) * 60;
-    setTimeLeftSeconds(totalDurationSeconds);
-    setHasStarted(true);
-    setTokenError(null);
-
-    // Request fullscreen if configured
-    if (ujian.wajibFullscreen !== false) {
-      requestFullscreen();
+      await db.saveJawabanSiswa(sesi.id, soalId, updatedDetail);
+      setSaveStatus('saved');
+    } catch {
+      setSaveStatus('offline');
     }
   };
 
-  const handleAutoSubmit = (reason?: string) => {
-    handleSubmitExam(true, reason);
+  const handleToggleRagu = async (soalId: string) => {
+    if (!sesi || isCompleted) return;
+
+    const existing = jawabanState[soalId] || { jawabanDipilih: '' };
+    const updatedDetail: DetailJawabanSiswa = {
+      ...existing,
+      raguRagu: !existing.raguRagu,
+    };
+
+    const newJawabanState = {
+      ...jawabanState,
+      [soalId]: updatedDetail,
+    };
+    setJawabanState(newJawabanState);
+    await db.saveJawabanSiswa(sesi.id, soalId, updatedDetail);
   };
 
-  const handleSubmitExam = (isTimeOut = false, note?: string) => {
-    if (!ujian || !selectedSiswa || isSubmitting) return;
-
+  const handleSubmitExam = async () => {
+    if (!sesi || !ujian) return;
     setIsSubmitting(true);
-    setShowConfirmModal(false);
-
     try {
-      // Calculate scores
-      const grading = db.gradeJawabanSiswa(ujian, answers);
-
-      const existing = db.getJawabanSiswaByUjian(ujian.id, selectedSiswa.id);
-      const now = new Date().toISOString();
-      const jawabanSiswaRecord: JawabanSiswaUjian = {
-        id: existing?.id || `ans-${ujian.id}-${selectedSiswa.id}`,
-        schoolId: ujian.schoolId,
-        ujianId: ujian.id,
-        siswaId: selectedSiswa.id,
-        namaSiswa: selectedSiswa.namaLengkap || (selectedSiswa as any).nama || '',
-        nisn: selectedSiswa.nisn,
-        nomorInduk: selectedSiswa.nomorInduk || (selectedSiswa as any).nis || '',
-        kelas: selectedSiswa.kelas,
-        jawaban: grading.detailWithScores,
-        waktuMulai: existing?.waktuMulai || now,
-        waktuSelesai: now,
-        durasiDetik: (ujian.durasiMenit || 60) * 60 - timeLeftSeconds,
-        status: isTimeOut ? 'waktu_habis' : 'selesai',
-        nilaiAkhir: grading.nilaiAkhir,
-        jumlahBenar: grading.jumlahBenar,
-        jumlahSalah: grading.jumlahSalah,
-        jumlahKosong: grading.jumlahKosong,
-        lulusKkm: grading.lulusKkm,
-        adaEsaiBelumDinilai: grading.adaEsaiBelumDinilai,
-        jumlahPelanggaran: violationsCount,
-        logPelanggaran: existing?.logPelanggaran || [],
-        terkunciOlehSistem: false,
-        catatanGuru: note || undefined,
-        createdAt: existing?.createdAt || now,
-        updatedAt: now,
-      };
-
-      const saved = db.saveJawabanSiswaUjian(jawabanSiswaRecord);
-      setSubmissionResult(saved);
-      setIsSubmitted(true);
-
-      // Clean local storage draft
-      localStorage.removeItem(`draft_ujian_${ujian.id}_${selectedSiswa.id}`);
-
-      // Exit fullscreen if active
-      if (document.fullscreenElement) {
-        document.exitFullscreen().catch(() => {});
+      const finalSesi = await db.selesaikanUjianSiswa(sesi.id);
+      if (finalSesi) {
+        setSesi(finalSesi);
       }
+      setIsCompleted(true);
+      setShowSubmitModal(false);
+      try {
+        confetti({
+          particleCount: 90,
+          spread: 75,
+          origin: { y: 0.6 },
+        });
+      } catch {}
     } catch (err: any) {
-      alert('Terjadi kendala saat menyimpan jawaban: ' + (err?.message || 'Silakan coba lagi'));
+      toast.error(`Gagal mengumpulkan lembar jawaban: ${err?.message || 'Periksa koneksi internet Anda.'}`);
     } finally {
       setIsSubmitting(false);
     }
   };
 
-  // Helper formatting timer MM:SS
-  const formatTime = (secs: number) => {
-    const m = Math.floor(secs / 60);
-    const s = secs % 60;
-    return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+  const formatTimer = (sec: number) => {
+    const hours = Math.floor(sec / 3600);
+    const minutes = Math.floor((sec % 3600) / 60);
+    const seconds = sec % 60;
+    if (hours > 0) {
+      return `${hours.toString().padStart(2, '0')}:${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
+    }
+    return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
   };
 
-  // Stats on questions
-  const answeredCount = useMemo(() => {
-    return Object.values(answers).filter((a) => a?.jawabanDipilih && a.jawabanDipilih.trim() !== '').length;
-  }, [answers]);
+  // Deterministic question order per student session when acakSoal is active
+  const orderedSoalList = useMemo<SoalUjian[]>(() => {
+    const rawList = ujian?.soalList || [];
+    if (!ujian?.acakSoal || !sesi?.id || rawList.length <= 1) {
+      return rawList;
+    }
+    const hashScore = (str: string): number => {
+      let h = 2166136261;
+      for (let i = 0; i < str.length; i++) {
+        h ^= str.charCodeAt(i);
+        h = Math.imul(h, 16777619);
+      }
+      return h >>> 0;
+    };
+    return [...rawList].sort((a, b) => hashScore(`${sesi.id}:${a.id}`) - hashScore(`${sesi.id}:${b.id}`));
+  }, [ujian, sesi?.id]);
 
-  const flaggedCount = useMemo(() => {
-    return Object.values(answers).filter((a) => a?.raguRagu).length;
-  }, [answers]);
-
-  // Loading Screen
-  if (loading) {
+  // --------------------------------------------------------------------------
+  // SCREEN 1: VERIFIKASI QR ABSENSI & IDENTITAS SISWA (URUTAN WAJIB TAHAP 2 & 3)
+  // SISWA BELUM BISA MELIHAT ATAU MENGERJAKAN SOAL SEBELUM TERVERIFIKASI
+  // --------------------------------------------------------------------------
+  if (!sesi) {
     return (
-      <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
-        <div className="bg-slate-800 border border-slate-700 rounded-3xl p-8 max-w-md w-full text-center shadow-2xl">
-          <div className="w-12 h-12 border-4 border-blue-500 border-t-transparent rounded-full animate-spin mx-auto mb-4" />
-          <h2 className="text-xl font-bold text-white mb-2">Memuat Naskah Ujian...</h2>
-          <p className="text-slate-400 text-sm">Menyiapkan butir soal dan data peserta ujian sekolah.</p>
-        </div>
-      </div>
-    );
-  }
-
-  // Error Screen
-  if (errorMsg || !ujian) {
-    return (
-      <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
-        <div className="bg-slate-800 border border-red-500/30 rounded-3xl p-8 max-w-md w-full text-center shadow-2xl">
-          <div className="w-14 h-14 bg-red-500/10 border border-red-500/20 text-red-400 rounded-2xl flex items-center justify-center mx-auto mb-4">
-            <AlertCircle className="w-8 h-8" />
-          </div>
-          <h2 className="text-xl font-bold text-white mb-2">Akses Ujian Belum Tersedia</h2>
-          <p className="text-slate-300 text-sm mb-6 leading-relaxed">{errorMsg}</p>
-          {onExit && (
-            <button
-              onClick={onExit}
-              className="w-full bg-slate-700 hover:bg-slate-600 text-white font-semibold py-3 px-6 rounded-xl transition cursor-pointer"
-            >
-              Kembali ke Portal Sekolah
-            </button>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  // 1. Identity Selection & Token Entry Screen (Before starting)
-  if (!hasStarted) {
-    return (
-      <div className="min-h-screen bg-gradient-to-br from-slate-950 via-slate-900 to-blue-950 text-slate-100 flex flex-col justify-between p-3.5 sm:p-6 md:p-8">
-        <header className="max-w-3xl mx-auto w-full flex items-center justify-between py-2 border-b border-slate-800">
+      <div className="min-h-screen bg-slate-900 flex flex-col justify-between p-4 font-sans selection:bg-blue-600 selection:text-white">
+        {/* Top Header */}
+        <header className="max-w-4xl w-full mx-auto py-4 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-10 h-10 rounded-xl bg-blue-600 flex items-center justify-center font-bold text-white shadow-lg shadow-blue-500/20 shrink-0">
-              <BookOpen className="w-5 h-5" />
-            </div>
+            {!logoError && settings.logoUrl ? (
+              <img
+                src={settings.logoUrl}
+                alt="Logo Sekolah"
+                onError={() => setLogoError(true)}
+                className="w-10 h-10 object-contain rounded-xl bg-white/10 p-1 border border-white/20"
+              />
+            ) : (
+              <div className="w-10 h-10 rounded-xl bg-white/10 border border-white/20 flex items-center justify-center text-white">
+                <School className="w-5 h-5" />
+              </div>
+            )}
             <div>
-              <span className="text-[10px] sm:text-xs uppercase tracking-wider text-blue-400 font-semibold">
-                Portal CBT Satuan Pendidikan
-              </span>
-              <h1 className="text-sm sm:text-base font-bold text-white leading-tight">Ujian Online Siswa</h1>
+              <h1 className="text-base font-extrabold text-white tracking-tight leading-tight">
+                {settings.namaSekolah}
+              </h1>
+              <p className="text-xs text-blue-200">Portal Ujian Online (CBT)</p>
             </div>
           </div>
-          {onExit && (
-            <button
-              onClick={onExit}
-              className="text-slate-400 hover:text-white p-2 rounded-xl hover:bg-slate-800 transition text-xs sm:text-sm flex items-center gap-1.5 cursor-pointer"
-            >
-              <ArrowLeft className="w-4 h-4" />
-              <span className="hidden sm:inline">Kembali</span>
-            </button>
-          )}
+
+          <button
+            onClick={onExit}
+            className="px-3 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 text-white text-xs font-semibold transition-colors flex items-center gap-1.5 cursor-pointer"
+          >
+            <LogOut className="w-3.5 h-3.5" />
+            <span>Keluar</span>
+          </button>
         </header>
 
-        <main className="max-w-3xl mx-auto w-full my-6">
-          <div className="bg-slate-900/90 backdrop-blur-md border border-slate-800 rounded-3xl p-5 sm:p-8 shadow-2xl relative overflow-hidden">
-            {/* Top decorative badge */}
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-blue-500/10 border border-blue-500/30 text-blue-400 text-xs font-semibold mb-3">
-              <Sparkles className="w-3.5 h-3.5" />
-              <span>{ujian.jenisUjian}</span>
-            </div>
+        {/* Main Card */}
+        <main className="max-w-xl w-full mx-auto my-6 bg-white rounded-3xl shadow-2xl overflow-hidden border border-slate-200/80">
+          {/* Exam Header Banner */}
+          <div className="p-6 sm:p-8 bg-gradient-to-r from-blue-900 via-blue-800 to-indigo-900 text-white relative">
+            <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-white/15 text-blue-200 text-[11px] font-bold uppercase tracking-wider backdrop-blur-xs">
+              <Sparkles className="w-3 h-3 text-amber-300" />
+              Verifikasi Masuk Ujian
+            </span>
 
-            <h2 className="text-xl sm:text-2xl md:text-3xl font-extrabold text-white tracking-tight mb-2">
-              {ujian.judul}
+            <h2 className="text-xl sm:text-2xl font-extrabold text-white mt-2 tracking-tight">
+              {ujian ? ujian.judul : 'Pilih Ujian yang Tersedia'}
             </h2>
-            {ujian.deskripsi && (
-              <p className="text-slate-300 text-xs sm:text-sm mb-5 leading-relaxed bg-slate-800/40 p-3 rounded-xl border border-slate-800">
-                {ujian.deskripsi}
-              </p>
-            )}
 
-            {/* Exam Details Badges */}
-            <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 mb-6">
-              <div className="bg-slate-800/60 p-3 rounded-xl border border-slate-800 text-center">
-                <span className="text-[10px] sm:text-[11px] text-slate-400 block font-medium">Mata Pelajaran</span>
-                <span className="text-xs sm:text-sm font-bold text-white truncate block">{ujian.mataPelajaran}</span>
+            {isLoadingExam ? (
+              <div className="mt-3 flex items-center gap-2 text-xs text-blue-200">
+                <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                <span>Menghubungkan ke naskah ujian sekolah...</span>
               </div>
-              <div className="bg-slate-800/60 p-3 rounded-xl border border-slate-800 text-center">
-                <span className="text-[10px] sm:text-[11px] text-slate-400 block font-medium">Kelas Sasaran</span>
-                <span className="text-xs sm:text-sm font-bold text-white truncate block">
-                  {ujian.kelasTarget.join(', ')}
-                </span>
-              </div>
-              <div className="bg-slate-800/60 p-3 rounded-xl border border-slate-800 text-center">
-                <span className="text-[10px] sm:text-[11px] text-slate-400 block font-medium">Jumlah Soal</span>
-                <span className="text-xs sm:text-sm font-bold text-white block">{ujian.soalList.length} Butir</span>
-              </div>
-              <div className="bg-slate-800/60 p-3 rounded-xl border border-slate-800 text-center">
-                <span className="text-[10px] sm:text-[11px] text-slate-400 block font-medium">Durasi Ujian</span>
-                <span className="text-xs sm:text-sm font-bold text-amber-400 block">{ujian.durasiMenit} Menit</span>
-              </div>
-            </div>
-
-            {/* Step 1: Select Student Identity from School Database */}
-            <div className="mb-6">
-              <label className="block text-xs sm:text-sm font-semibold text-slate-200 mb-2 flex items-center justify-between">
-                <span>Pilih Identitas Siswa Anda:</span>
-                <span className="text-[11px] text-blue-400 font-normal">Data Dapodik Sekolah</span>
-              </label>
-
-              {eligibleSiswaList.length === 0 ? (
-                <div className="p-4 bg-amber-500/10 border border-amber-500/20 text-amber-300 rounded-xl text-xs">
-                  Peringatan: Belum ada data siswa yang terdaftar di kelas sasaran ({ujian.kelasTarget.join(', ')}). Silakan hubungi guru atau administrator sekolah.
-                </div>
-              ) : (
-                <div className="space-y-2">
-                  <input
-                    type="text"
-                    value={searchQuery}
-                    onChange={(e) => setSearchQuery(e.target.value)}
-                    placeholder="🔍 Ketik nama siswa atau NISN untuk mencari..."
-                    className="w-full bg-slate-800/80 border border-slate-700 text-white px-3.5 py-2.5 rounded-xl text-xs sm:text-sm focus:outline-hidden focus:ring-2 focus:ring-blue-500 placeholder-slate-500"
-                  />
-
-                  <div className="max-h-48 overflow-y-auto space-y-1.5 p-1 bg-slate-950/50 rounded-xl border border-slate-800/80">
-                    {filteredStudents.length === 0 ? (
-                      <div className="p-4 text-center text-xs text-slate-500">
-                        Tidak ada siswa yang cocok dengan pencarian "{searchQuery}".
-                      </div>
-                    ) : (
-                      filteredStudents.map((siswa) => {
-                        const isSelected = selectedSiswa?.id === siswa.id;
-                        return (
-                          <button
-                            key={siswa.id}
-                            type="button"
-                            onClick={() => {
-                              setSelectedSiswa(siswa);
-                              setTokenError(null);
-                            }}
-                            className={`w-full text-left p-3 rounded-xl border transition flex items-center justify-between cursor-pointer ${
-                              isSelected
-                                ? 'bg-blue-600/20 border-blue-500 text-white shadow-xs'
-                                : 'bg-slate-800/40 border-slate-800 hover:bg-slate-800/80 text-slate-300'
-                            }`}
-                          >
-                            <div className="flex items-center gap-3 truncate">
-                              <div
-                                className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold text-xs shrink-0 ${
-                                  isSelected ? 'bg-blue-600 text-white' : 'bg-slate-700 text-slate-300'
-                                }`}
-                              >
-                                {(siswa.namaLengkap || (siswa as any).nama || 'S').charAt(0)}
-                              </div>
-                              <div className="truncate">
-                                <div className="font-semibold text-xs sm:text-sm truncate text-white">
-                                  {siswa.namaLengkap || (siswa as any).nama}
-                                </div>
-                                <div className="text-[11px] text-slate-400">
-                                  Kelas: {siswa.kelas} {siswa.nisn ? `• NISN: ${siswa.nisn}` : ''}
-                                </div>
-                              </div>
-                            </div>
-                            {isSelected && (
-                              <div className="w-6 h-6 rounded-full bg-blue-500 text-white flex items-center justify-center shrink-0">
-                                <Check className="w-3.5 h-3.5" />
-                              </div>
-                            )}
-                          </button>
-                        );
-                      })
-                    )}
-                  </div>
-                </div>
-              )}
-            </div>
-
-            {/* Selected Student Confirmation Card */}
-            {selectedSiswa && (
-              <div className="p-3.5 sm:p-4 bg-gradient-to-r from-blue-950/40 to-indigo-950/40 border border-blue-500/30 rounded-2xl mb-6 flex items-center gap-3">
-                <div className="w-11 h-11 rounded-xl bg-blue-600 text-white flex items-center justify-center font-bold text-base shadow-md shrink-0">
-                  <User className="w-5 h-5" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <span className="text-[10px] uppercase tracking-wider text-blue-400 font-bold block">
-                    Peserta Ujian Terpilih
+            ) : ujian ? (
+              <div className="mt-3 space-y-2.5">
+                <div className="flex flex-wrap gap-2 text-xs text-blue-200">
+                  <span className="bg-white/10 px-2.5 py-1 rounded-lg">
+                    Mapel: <strong>{ujian.mataPelajaran}</strong>
                   </span>
-                  <div className="font-bold text-white text-sm sm:text-base truncate">
-                    {selectedSiswa.namaLengkap || (selectedSiswa as any).nama}
-                  </div>
-                  <div className="text-xs text-slate-300 flex items-center gap-2">
-                    <span>{selectedSiswa.kelas}</span>
-                    <span>&bull;</span>
-                    <span>NIS/NISN: {selectedSiswa.nisn || selectedSiswa.nomorInduk || '-'}</span>
-                  </div>
+                  <span className="bg-white/10 px-2.5 py-1 rounded-lg">
+                    Kelas: <strong>{ujian.kelasTarget.join(', ')}</strong>
+                  </span>
+                  <span className="bg-white/10 px-2.5 py-1 rounded-lg flex items-center gap-1">
+                    <Clock className="w-3.5 h-3.5 text-blue-300" />
+                    <strong>{ujian.durasiMenit} Menit</strong>
+                  </span>
+                  <span className="bg-white/10 px-2.5 py-1 rounded-lg">
+                    Total: <strong>{ujian.soalList.length} Soal</strong>
+                  </span>
                 </div>
-              </div>
-            )}
-
-            {/* Step 2: Exam PIN/Token if enforced */}
-            {ujian.kodeUjian && ujian.kodeUjian.trim() !== '' && (
-              <div className="mb-6">
-                <label className="block text-xs sm:text-sm font-semibold text-slate-200 mb-2 flex items-center gap-2">
-                  <Lock className="w-4 h-4 text-amber-400" />
-                  <span>Kode Token / PIN Ujian (Diberikan oleh Guru Pengawas):</span>
-                </label>
-                <input
-                  type="text"
-                  value={tokenInput}
-                  onChange={(e) => {
-                    setTokenInput(e.target.value.toUpperCase());
-                    setTokenError(null);
-                  }}
-                  placeholder="Masukkan Kode Ujian..."
-                  className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-xl text-base tracking-widest font-mono text-center font-bold uppercase focus:outline-hidden focus:ring-2 focus:ring-amber-500 placeholder-slate-600"
-                />
-                {tokenError && (
-                  <p className="text-xs text-red-400 mt-2 flex items-center gap-1">
-                    <AlertCircle className="w-3.5 h-3.5" />
-                    <span>{tokenError}</span>
+                {ujian.petunjukPengerjaan && (
+                  <p className="text-[11px] text-blue-100/90 bg-white/10 px-3 py-2 rounded-xl border border-white/10 leading-relaxed">
+                    <strong>Petunjuk:</strong> {ujian.petunjukPengerjaan}
                   </p>
                 )}
               </div>
+            ) : (
+              <p className="text-xs text-blue-200 mt-1">
+                Silakan pilih naskah ujian yang ingin Anda ikuti di bawah.
+              </p>
             )}
+          </div>
 
-            {/* Proctoring Warning Badge (For CBT exams) */}
-            {ujian.pengawasanAktif !== false && (
-              <div className="bg-amber-950/30 border border-amber-500/30 rounded-2xl p-4 mb-6 flex items-start gap-3 text-xs text-amber-200">
-                <ShieldAlert className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
-                <div className="space-y-1">
-                  <div className="font-bold text-amber-300">Pengawasan Ujian (Proctoring) Aktif:</div>
-                  <div>
-                    Sistem mendeteksi jika Anda berpindah tab, keluar jendela, atau membuka aplikasi lain. Toleransi pelanggaran maksimal{' '}
-                    <strong>{maxAllowedViolations} kali</strong>. Melebihi batas akan menyebabkan sesi ujian otomatis dikunci.
-                  </div>
+          {/* Exam Selector if multiple or not targeted */}
+          {!isLoadingExam && !ujian && availableExams.length > 0 && (
+            <div className="p-6 border-b border-slate-100 bg-slate-50">
+              <label className="block text-xs font-bold text-slate-700 uppercase tracking-wider mb-2">
+                Pilih Naskah Ujian
+              </label>
+              <select
+                value={selectedExamId}
+                onChange={(e) => handleSelectExam(e.target.value)}
+                className="w-full p-3 rounded-xl border border-slate-300 text-sm font-semibold text-slate-800 bg-white"
+              >
+                <option value="">-- Pilih Ujian --</option>
+                {availableExams.map((ex) => (
+                  <option key={ex.id} value={ex.id}>
+                    {ex.judul} ({ex.mataPelajaran} - {ex.kelasTarget.join(', ')})
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {/* Notice: Exam is locked until identity verified */}
+          <div className="p-4 bg-amber-50 border-b border-amber-200/70 text-amber-900 text-xs flex items-start gap-2.5">
+            <Lock className="w-4 h-4 text-amber-700 flex-shrink-0 mt-0.5" />
+            <div className="leading-relaxed">
+              <strong>Lembar Soal Ujian Terkunci.</strong> Sesuai protokol ujian sekolah, siswa wajib
+              menunjukkan atau memindai <strong>Kartu QR Absensi Siswa</strong> untuk memverifikasi
+              identitas sebelum lembar soal dapat dibuka.
+            </div>
+          </div>
+
+          {/* Verification Methods Tabs */}
+          <div className="p-6 sm:p-8 space-y-6">
+            <div className="flex flex-wrap sm:flex-nowrap rounded-2xl bg-slate-100 p-1 gap-1 border border-slate-200">
+              <button
+                type="button"
+                onClick={() => {
+                  setVerifyMode('camera');
+                  setVerificationError(null);
+                }}
+                className={`flex-1 py-2 text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                  verifyMode === 'camera'
+                    ? 'bg-white text-blue-800 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <Camera className="w-3.5 h-3.5" />
+                <span>Kamera QR Siswa</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  stopCamera();
+                  setVerifyMode('passcode');
+                  setVerificationError(null);
+                }}
+                className={`flex-1 py-2 text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                  verifyMode === 'passcode'
+                    ? 'bg-white text-blue-800 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <KeyRound className="w-3.5 h-3.5" />
+                <span>Kode Guru (6 Digit)</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => {
+                  stopCamera();
+                  setVerifyMode('nisn');
+                  setVerificationError(null);
+                }}
+                className={`flex-1 py-2 text-xs font-bold rounded-xl transition-all flex items-center justify-center gap-1.5 cursor-pointer ${
+                  verifyMode === 'nisn'
+                    ? 'bg-white text-blue-800 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                <User className="w-3.5 h-3.5" />
+                <span>Input NISN / NIS</span>
+              </button>
+            </div>
+
+            {/* Error Message */}
+            {verificationError && (
+              <div className="p-3.5 bg-red-50 border border-red-200 rounded-xl text-xs text-red-700 font-medium flex items-start gap-2.5 animate-in fade-in">
+                <AlertTriangle className="w-4 h-4 text-red-600 flex-shrink-0 mt-0.5" />
+                <div className="leading-relaxed">
+                  <strong className="block">Verifikasi Gagal:</strong>
+                  {verificationError}
                 </div>
               </div>
             )}
 
-            {/* Rules reminder */}
-            <div className="bg-slate-950/60 p-4 rounded-xl border border-slate-800 text-xs text-slate-400 space-y-1.5 mb-6">
-              <div className="font-semibold text-slate-300">Tata Tertib Pengerjaan:</div>
-              <div>&bull; Waktu otomatis berjalan setelah tombol Mulai ditekan.</div>
-              <div>&bull; Jawaban tersimpan otomatis dan berkala ke server sekolah.</div>
-              <div>&bull; Tombol Selesai tersedia setelah memeriksa seluruh butir pertanyaan.</div>
-            </div>
+            {/* METHOD 1: SCAN WITH STUDENT CAMERA */}
+            {verifyMode === 'camera' && (
+              <div className="space-y-4 text-center">
+                <div className="border-2 border-dashed border-slate-300 rounded-3xl p-4 bg-slate-50 relative overflow-hidden flex flex-col items-center justify-center min-h-[220px]">
+                  <div
+                    className={
+                      isCameraActive
+                        ? 'w-full relative rounded-2xl overflow-hidden bg-black aspect-video flex items-center justify-center shadow-inner'
+                        : 'hidden'
+                    }
+                  >
+                    <video ref={videoRef} playsInline muted className="w-full h-full object-cover" />
+                    <canvas ref={canvasRef} className="hidden" />
+                    {/* Aiming Frame Overlay */}
+                    <div className="absolute inset-0 border-2 border-white/30 flex items-center justify-center pointer-events-none">
+                      <div className="w-44 h-44 border-2 border-blue-400 rounded-2xl shadow-[0_0_0_9999px_rgba(0,0,0,0.5)] animate-pulse" />
+                    </div>
+                  </div>
+                  {!isCameraActive && (
+                    <div className="space-y-3 py-4">
+                      <div className="w-16 h-16 rounded-2xl bg-blue-100 text-blue-700 mx-auto flex items-center justify-center">
+                        <QrCode className="w-8 h-8" />
+                      </div>
+                      <div>
+                        <h4 className="text-sm font-bold text-slate-800">
+                          Arahkan Kartu QR Absensi Anda ke Kamera
+                        </h4>
+                        <p className="text-xs text-slate-500 mt-1 max-w-xs mx-auto">
+                          Gunakan kamera HP atau laptop Anda untuk memindai QR Code yang ada pada Kartu
+                          Absensi Siswa.
+                        </p>
+                      </div>
+                    </div>
+                  )}
+                </div>
 
-            {/* Start Button */}
-            <button
-              onClick={handleStartExam}
-              disabled={!selectedSiswa}
-              className={`w-full py-4 rounded-2xl font-black text-sm sm:text-base transition flex items-center justify-center gap-2 shadow-xl cursor-pointer ${
-                selectedSiswa
-                  ? 'bg-blue-600 hover:bg-blue-500 text-white shadow-blue-500/25'
-                  : 'bg-slate-800 text-slate-500 cursor-not-allowed border border-slate-800'
-              }`}
-            >
-              <span>Mulai Kerjakan Ujian Sekarang</span>
-              <ChevronRight className="w-5 h-5" />
-            </button>
+                <div className="flex gap-2.5">
+                  {isCameraActive ? (
+                    <button
+                      type="button"
+                      onClick={stopCamera}
+                      className="w-full py-3 bg-slate-200 hover:bg-slate-300 text-slate-800 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer"
+                    >
+                      <CameraOff className="w-4 h-4" />
+                      <span>Matikan Kamera</span>
+                    </button>
+                  ) : (
+                    <button
+                      type="button"
+                      onClick={startCamera}
+                      disabled={cameraLoading || isVerifying}
+                      className="flex-1 py-3 bg-blue-700 hover:bg-blue-600 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 shadow-md cursor-pointer"
+                    >
+                      {cameraLoading ? (
+                        <>
+                          <RefreshCw className="w-4 h-4 animate-spin" />
+                          <span>Menyiapkan Kamera...</span>
+                        </>
+                      ) : (
+                        <>
+                          <Camera className="w-4 h-4" />
+                          <span>Nyalakan Kamera Pemindai</span>
+                        </>
+                      )}
+                    </button>
+                  )}
+
+                  <input
+                    ref={qrFileInputRef}
+                    type="file"
+                    accept="image/*"
+                    onChange={handleUploadQrFile}
+                    className="hidden"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => qrFileInputRef.current?.click()}
+                    className="px-4 py-3 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 cursor-pointer border border-slate-200"
+                    title="Upload Foto Kartu QR"
+                  >
+                    <UploadCloud className="w-4 h-4 text-slate-600" />
+                    <span>Upload Foto QR</span>
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {/* METHOD 2: 6-DIGIT PASSCODE FROM TEACHER */}
+            {verifyMode === 'passcode' && (
+              <form onSubmit={handleVerifyPasscode} className="space-y-4">
+                <div className="p-3.5 bg-blue-50 border border-blue-200 rounded-2xl text-xs text-blue-900 leading-relaxed">
+                  <strong>Verifikasi Meja Guru:</strong> Tunjukkan Kartu QR Absensi Anda ke meja Guru
+                  Pengawas. Guru akan memindai kartu Anda dan memberikan <strong>Kode Akses 6-Digit</strong>.
+                </div>
+
+                <div className="space-y-1.5 text-left">
+                  <label className="text-xs font-bold text-slate-700">Kode Akses 6-Digit Siswa</label>
+                  <input
+                    type="text"
+                    maxLength={6}
+                    value={passCodeInput}
+                    onChange={(e) => setPassCodeInput(e.target.value.replace(/[^0-9]/g, ''))}
+                    placeholder="Contoh: 849201"
+                    className="w-full text-center text-2xl tracking-[0.3em] font-extrabold py-3.5 px-4 rounded-xl border-2 border-slate-200 focus:border-blue-600 focus:ring-4 focus:ring-blue-100 outline-none transition-all"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={isVerifying || passCodeInput.length < 4}
+                  className="w-full py-3.5 bg-blue-700 hover:bg-blue-600 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 shadow-md cursor-pointer"
+                >
+                  {isVerifying ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>Memverifikasi Kode...</span>
+                    </>
+                  ) : (
+                    <>
+                      <Unlock className="w-4 h-4" />
+                      <span>Verifikasi & Buka Soal Ujian</span>
+                    </>
+                  )}
+                </button>
+              </form>
+            )}
+
+            {/* METHOD 3: MANUAL NISN / NOMOR INDUK */}
+            {verifyMode === 'nisn' && (
+              <form onSubmit={handleVerifyManualNisn} className="space-y-4">
+                <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-2xl text-xs text-slate-700 leading-relaxed">
+                  Masukkan NISN atau Nomor Induk Siswa (NIS) yang tertera pada Kartu QR Absensi Anda
+                  sebagai alternatif verifikasi.
+                </div>
+
+                <div className="space-y-1.5 text-left">
+                  <label className="text-xs font-bold text-slate-700">NISN / Nomor Induk Siswa</label>
+                  <input
+                    type="text"
+                    value={nisnInput}
+                    onChange={(e) => setNisnInput(e.target.value)}
+                    placeholder="Contoh: 0081234567 atau STU-00001"
+                    className="w-full py-3 px-4 rounded-xl border border-slate-300 text-sm font-semibold focus:border-blue-600 focus:ring-4 focus:ring-blue-100 outline-none transition-all"
+                  />
+                </div>
+
+                <button
+                  type="submit"
+                  disabled={isVerifying || !nisnInput.trim()}
+                  className="w-full py-3.5 bg-blue-700 hover:bg-blue-600 disabled:opacity-50 text-white rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 shadow-md cursor-pointer"
+                >
+                  {isVerifying ? (
+                    <>
+                      <RefreshCw className="w-4 h-4 animate-spin" />
+                      <span>Memverifikasi Identitas Siswa...</span>
+                    </>
+                  ) : (
+                    <>
+                      <CheckCircle2 className="w-4 h-4" />
+                      <span>Verifikasi Identitas & Buka Soal</span>
+                    </>
+                  )}
+                </button>
+              </form>
+            )}
           </div>
         </main>
 
-        <footer className="text-center text-xs text-slate-500 py-3">
-          Sistem Ujian Online Terintegrasi &bull; Portal Satuan Pendidikan Digital
+        <footer className="max-w-4xl w-full mx-auto py-3 text-center text-xs text-slate-400">
+          Sistem Ujian Online CBT &bull; {settings.namaSekolah} &copy; 2026
         </footer>
       </div>
     );
   }
 
-  // 2. Exam Completed / Score Display Screen (For official CBT exams)
-  if (isSubmitted) {
-    const isLulus = submissionResult?.lulusKkm;
-    const canViewScore = ujian.tampilkanNilaiLangsung;
-    const canViewExplanation =
-      ujian.tampilkanPembahasan === 'setelah_ujian' ||
-      (ujian.tampilkanPembahasan === 'setelah_jadwal_selesai' &&
-        ujian.tanggalSelesai &&
-        new Date(ujian.tanggalSelesai) < new Date());
-
+  // --------------------------------------------------------------------------
+  // SCREEN 2: LOCKED BY PROCTOR (Terkunci karena pelanggaran berulang)
+  // --------------------------------------------------------------------------
+  if (sesi.status === 'terkunci') {
     return (
-      <div className="min-h-screen bg-slate-950 text-slate-100 flex items-center justify-center p-3.5 sm:p-6">
-        <div className="bg-slate-900 border border-slate-800 rounded-3xl p-5 sm:p-8 max-w-xl w-full shadow-2xl text-center">
-          <div className="w-16 h-16 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-2xl flex items-center justify-center mx-auto mb-4">
-            <CheckCircle2 className="w-10 h-10" />
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
+        <div className="max-w-md w-full bg-white rounded-3xl p-8 text-center space-y-5 shadow-2xl">
+          <div className="w-16 h-16 rounded-2xl bg-red-100 text-red-600 mx-auto flex items-center justify-center">
+            <ShieldAlert className="w-8 h-8" />
           </div>
-
-          <h2 className="text-xl sm:text-2xl md:text-3xl font-extrabold text-white mb-1">
-            Ujian Berhasil Diselesaikan!
-          </h2>
-          <p className="text-slate-400 text-xs sm:text-sm mb-6">
-            Seluruh jawaban lembar ujian Anda telah tersimpan secara permanen di server sekolah.
-          </p>
-
-          {/* Student Identity Card */}
-          <div className="bg-slate-800/60 p-4 rounded-2xl border border-slate-800 text-left mb-6">
-            <div className="text-[11px] text-slate-400">Identitas Peserta Ujian:</div>
-            <div className="font-bold text-white text-base">
-              {selectedSiswa?.namaLengkap || (selectedSiswa as any)?.nama}
-            </div>
-            <div className="text-xs text-slate-400">
-              {selectedSiswa?.kelas} &bull; NISN: {selectedSiswa?.nisn || '-'}
-            </div>
-            <div className="text-xs text-slate-400 mt-2 pt-2 border-t border-slate-700/60 flex items-center justify-between">
-              <span>Waktu Selesai:</span>
-              <span className="font-semibold text-slate-200">
-                {new Date().toLocaleTimeString('id-ID', { hour: '2-digit', minute: '2-digit' })} WIB
-              </span>
-            </div>
-            {submissionResult?.jumlahPelanggaran && submissionResult.jumlahPelanggaran > 0 ? (
-              <div className="text-xs text-amber-300 mt-1 flex items-center gap-1.5">
-                <AlertTriangle className="w-3.5 h-3.5 text-amber-400" />
-                <span>Tercatat {submissionResult.jumlahPelanggaran} kali berpindah tab selama ujian</span>
-              </div>
-            ) : null}
+          <div>
+            <h2 className="text-xl font-bold text-slate-900">Lembar Ujian Terkunci</h2>
+            <p className="text-xs text-slate-600 mt-2 leading-relaxed">
+              Sesi ujian Anda dikunci oleh sistem pengawasan karena terdeteksi pelanggaran berulang kali
+              (berpindah tab / keluar layar ujian). Silakan melapor kepada Guru Pengawas di ruangan untuk
+              membuka kembali kunci ujian Anda.
+            </p>
           </div>
-
-          {/* Score Card if teacher allowed immediate score */}
-          {canViewScore && submissionResult ? (
-            <div
-              className={`p-5 sm:p-6 rounded-2xl border mb-6 text-center ${
-                isLulus
-                  ? 'bg-emerald-950/30 border-emerald-500/40'
-                  : 'bg-amber-950/30 border-amber-500/40'
-              }`}
-            >
-              <span className="text-[10px] sm:text-xs uppercase tracking-widest font-semibold text-slate-300 block mb-1">
-                Nilai Akhir Ujian Anda
-              </span>
-              <div
-                className={`text-5xl sm:text-6xl font-black mb-2 ${
-                  isLulus ? 'text-emerald-400' : 'text-amber-400'
-                }`}
-              >
-                {submissionResult.nilaiAkhir ?? 0}
-              </div>
-
-              <div className="flex items-center justify-center gap-2 mb-4">
-                <span
-                  className={`px-3 py-1 rounded-full text-xs font-bold ${
-                    isLulus
-                      ? 'bg-emerald-500/20 text-emerald-300 border border-emerald-500/30'
-                      : 'bg-amber-500/20 text-amber-300 border border-amber-500/30'
-                  }`}
-                >
-                  {isLulus ? '🎉 TUNTAS (Mencapai KKM)' : '⚠️ BELUM TUNTAS'}
-                </span>
-                <span className="text-xs text-slate-400">Batas KKM: {ujian.kkm || 75}</span>
-              </div>
-
-              {/* Breakdown stats */}
-              <div className="grid grid-cols-3 gap-2 pt-4 border-t border-slate-800 text-xs">
-                <div className="bg-slate-900/60 p-2.5 rounded-xl border border-slate-800">
-                  <span className="text-emerald-400 font-bold text-lg block">{submissionResult.jumlahBenar || 0}</span>
-                  <span className="text-slate-400 text-[10px] sm:text-[11px]">Jawaban Benar</span>
-                </div>
-                <div className="bg-slate-900/60 p-2.5 rounded-xl border border-slate-800">
-                  <span className="text-red-400 font-bold text-lg block">{submissionResult.jumlahSalah || 0}</span>
-                  <span className="text-slate-400 text-[10px] sm:text-[11px]">Jawaban Salah</span>
-                </div>
-                <div className="bg-slate-900/60 p-2.5 rounded-xl border border-slate-800">
-                  <span className="text-slate-400 font-bold text-lg block">{submissionResult.jumlahKosong || 0}</span>
-                  <span className="text-slate-400 text-[10px] sm:text-[11px]">Kosong / Lewat</span>
-                </div>
-              </div>
-
-              {submissionResult.adaEsaiBelumDinilai && (
-                <p className="text-xs text-blue-300 mt-3 bg-blue-950/40 p-2.5 rounded-lg border border-blue-500/20">
-                  * Terdapat butir soal esai yang menunggu penilaian koreksi dari guru. Nilai akhir di atas adalah nilai sementara.
-                </p>
-              )}
-            </div>
-          ) : (
-            <div className="p-6 bg-slate-800/40 border border-slate-800 rounded-2xl mb-6">
-              <Award className="w-10 h-10 text-blue-400 mx-auto mb-2" />
-              <div className="font-semibold text-white text-sm mb-1">Nilai Disimpan Secara Aman</div>
-              <p className="text-xs text-slate-400">
-                Sesuai pengaturan guru pengampu, rekapitulasi nilai ujian akan diumumkan secara serentak setelah masa ujian berakhir.
-              </p>
-            </div>
-          )}
-
-          {/* Review Question Explanations if allowed */}
-          {canViewExplanation && (
-            <div className="mb-6 text-left">
-              <h3 className="font-bold text-white text-sm mb-3 flex items-center gap-2">
-                <HelpCircle className="w-4 h-4 text-blue-400" />
-                <span>Pembahasan Butir Soal</span>
-              </h3>
-              <div className="max-h-60 overflow-y-auto space-y-3 pr-1">
-                {ujian.soalList.map((soal) => {
-                  const studentAns = submissionResult?.jawaban[soal.id]?.jawabanDipilih || '-';
-                  const isBenar = submissionResult?.jawaban[soal.id]?.isBenar;
-                  return (
-                    <div key={soal.id} className="p-3 bg-slate-800/60 rounded-xl border border-slate-800 text-xs">
-                      <div className="flex items-center justify-between mb-1">
-                        <span className="font-bold text-slate-300">Soal #{soal.nomor}</span>
-                        <span
-                          className={`font-semibold px-2 py-0.5 rounded-md text-[10px] ${
-                            isBenar ? 'bg-emerald-500/20 text-emerald-300' : 'bg-red-500/20 text-red-300'
-                          }`}
-                        >
-                          {isBenar ? 'Benar' : 'Salah'}
-                        </span>
-                      </div>
-                      <p className="text-slate-200 mb-2">{soal.pertanyaan}</p>
-                      <div className="text-[11px] text-slate-400 space-y-0.5">
-                        <div>
-                          Jawaban Anda: <strong className="text-white">{studentAns}</strong>
-                        </div>
-                        <div>
-                          Kunci Jawaban: <strong className="text-emerald-400">{soal.kunciJawaban}</strong>
-                        </div>
-                        {soal.pembahasan && (
-                          <div className="mt-1 pt-1 border-t border-slate-700/60 text-slate-300 italic">
-                            Pembahasan: {soal.pembahasan}
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          <div className="space-y-3">
-            {onExit ? (
-              <button
-                onClick={onExit}
-                className="w-full bg-blue-600 hover:bg-blue-500 text-white font-bold py-3.5 px-6 rounded-2xl transition shadow-lg shadow-blue-500/20 cursor-pointer"
-              >
-                Kembali ke Halaman Utama
-              </button>
-            ) : (
-              <button
-                onClick={() => window.location.reload()}
-                className="w-full bg-slate-800 hover:bg-slate-700 text-white font-bold py-3 px-6 rounded-2xl transition cursor-pointer"
-              >
-                Tutup Halaman Ujian
-              </button>
-            )}
-          </div>
+          <button
+            onClick={onExit}
+            className="w-full py-3 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-bold transition-all cursor-pointer"
+          >
+            Kembali ke Portal
+          </button>
         </div>
       </div>
     );
   }
 
-  // 3. Active Exam View
-  const currentQuestion: SoalUjian | undefined = preparedQuestions[activeQuestionIndex];
-  const currentAnswer = currentQuestion ? answers[currentQuestion.id] : undefined;
+  // --------------------------------------------------------------------------
+  // SCREEN 3: EXAM COMPLETED SCREEN (Hasil / Bukti Pengiriman)
+  // --------------------------------------------------------------------------
+  if (isCompleted) {
+    const totalSoal = ujian ? ujian.soalList.length : 0;
+    const dijawabCount = Object.keys(jawabanState).filter(
+      (k) => jawabanState[k] && jawabanState[k].jawabanDipilih
+    ).length;
+
+    return (
+      <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
+        <div className="max-w-md w-full bg-white rounded-3xl p-8 text-center space-y-6 shadow-2xl">
+          <div className="w-16 h-16 rounded-2xl bg-emerald-100 text-emerald-600 mx-auto flex items-center justify-center">
+            <CheckCircle2 className="w-8 h-8" />
+          </div>
+
+          <div>
+            <h2 className="text-2xl font-extrabold text-slate-900">Ujian Telah Selesai</h2>
+            <p className="text-xs text-slate-500 mt-1">
+              Lembar jawaban Anda telah berhasil disimpan dan diserahkan kepada Guru Pengawas.
+            </p>
+          </div>
+
+          <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 space-y-2.5 text-left text-xs">
+            <div className="flex justify-between">
+              <span className="text-slate-500">Nama Siswa:</span>
+              <strong className="text-slate-800">{sesi.namaSiswa}</strong>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-500">Mata Pelajaran:</span>
+              <strong className="text-slate-800">{ujian?.mataPelajaran}</strong>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-500">Total Soal Terjawab:</span>
+              <strong className="text-slate-800">
+                {dijawabCount} / {totalSoal} Soal
+              </strong>
+            </div>
+
+            {ujian?.tampilkanNilaiLangsung && (
+              <div className="pt-2 border-t border-slate-200 flex justify-between items-center">
+                <span className="font-bold text-slate-700">Nilai Akhir:</span>
+                <span
+                  className={`text-xl font-extrabold px-3 py-0.5 rounded-lg ${
+                    sesi.lulusKkm ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
+                  }`}
+                >
+                  {sesi.nilaiAkhir}
+                </span>
+              </div>
+            )}
+          </div>
+
+          <button
+            onClick={onExit}
+            className="w-full py-3 bg-blue-700 hover:bg-blue-600 text-white rounded-xl text-xs font-bold transition-all shadow-md cursor-pointer"
+          >
+            Kembali ke Portal Sekolah
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // SCREEN 4: ACTIVE EXAM TAKING VIEW (Lembar Pengerjaan Soal Siswa)
+  // --------------------------------------------------------------------------
+  const soalList = orderedSoalList;
+  const currentSoal = soalList[currentIndex] || soalList[0];
+  const currentDetail = currentSoal
+    ? jawabanState[currentSoal.id] || { jawabanDipilih: '' }
+    : { jawabanDipilih: '' };
+  const totalSoal = soalList.length;
+
+  const answeredCount = Object.keys(jawabanState).filter(
+    (k) => jawabanState[k] && jawabanState[k].jawabanDipilih
+  ).length;
+
+  const isLastQuestion = currentIndex === totalSoal - 1;
+  const isTimeCritical = timeLeftSeconds < 300;
 
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col antialiased relative">
-      {/* Sticky Header (Responsive across 320px to 4K) */}
-      <header className="sticky top-0 z-30 bg-slate-900/95 backdrop-blur-md border-b border-slate-800 px-3 sm:px-6 py-2.5 flex items-center justify-between shadow-md">
-        <div className="flex items-center gap-2.5 min-w-0">
-          <div className="w-8 h-8 rounded-lg bg-blue-600 flex items-center justify-center font-bold text-white text-xs shrink-0 shadow-sm">
-            CBT
+    <div className="min-h-screen bg-slate-100 flex flex-col font-sans selection:bg-blue-600 selection:text-white">
+      {/* Top Bar Navigation */}
+      <header className="sticky top-0 z-40 bg-white border-b border-slate-200 shadow-xs px-4 sm:px-6 h-16 flex items-center justify-between">
+        <div className="flex items-center gap-3">
+          <div className="w-9 h-9 rounded-xl bg-blue-700 text-white flex items-center justify-center font-bold text-sm shadow-xs">
+            <BookOpen className="w-5 h-5" />
           </div>
-          <div className="min-w-0">
-            <h1 className="text-xs sm:text-sm font-bold text-white truncate max-w-[140px] sm:max-w-xs md:max-w-md">
-              {ujian.judul}
+          <div>
+            <h1 className="text-xs sm:text-sm font-extrabold text-slate-900 leading-tight">
+              {ujian?.judul}
             </h1>
-            <div className="text-[10px] sm:text-[11px] text-slate-400 flex items-center gap-1.5 truncate">
-              <span className="truncate">{selectedSiswa?.namaLengkap || (selectedSiswa as any)?.nama}</span>
+            <div className="flex items-center gap-2 text-[11px] text-slate-500 mt-0.5">
+              <span>{ujian?.mataPelajaran}</span>
               <span>&bull;</span>
-              <span className="shrink-0">{selectedSiswa?.kelas}</span>
+              <span>
+                {sesi.namaSiswa} ({sesi.kelas})
+              </span>
             </div>
           </div>
         </div>
 
-        {/* Center / Right controls */}
-        <div className="flex items-center gap-2 sm:gap-3">
-          {/* Dual Mode Switch if document available */}
-          {ujian.dokumenAsliUrl && (
-            <div className="hidden sm:flex items-center bg-slate-800 p-0.5 rounded-lg border border-slate-700 text-xs">
-              <button
-                onClick={() => setViewMode('soal')}
-                className={`px-2.5 py-1 rounded-md font-medium transition cursor-pointer ${
-                  viewMode === 'soal' ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                Soal
-              </button>
-              <button
-                onClick={() => setViewMode('dokumen')}
-                className={`px-2.5 py-1 rounded-md font-medium transition cursor-pointer ${
-                  viewMode === 'dokumen' ? 'bg-blue-600 text-white shadow-xs' : 'text-slate-400 hover:text-white'
-                }`}
-              >
-                Dokumen
-              </button>
-            </div>
-          )}
-
-          {/* Fullscreen Button */}
-          {ujian.wajibFullscreen !== false && !isFullscreen && (
-            <button
-              onClick={requestFullscreen}
-              title="Masuk Mode Layar Penuh"
-              className="hidden md:flex items-center gap-1 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs px-2.5 py-1.5 rounded-xl border border-slate-700 cursor-pointer"
-            >
-              <Maximize2 className="w-3.5 h-3.5" />
-              <span>Fullscreen</span>
-            </button>
-          )}
-
-          {/* Save Status Badge (desktop) */}
-          <div className="hidden lg:flex items-center gap-1.5 text-[11px] text-slate-400">
-            {saveStatus === 'tersimpan' && (
-              <>
-                <Check className="w-3.5 h-3.5 text-emerald-400" />
-                <span className="text-emerald-400">Tersimpan</span>
-              </>
-            )}
-            {saveStatus === 'menyimpan' && (
-              <>
-                <div className="w-2.5 h-2.5 rounded-full border border-blue-400 border-t-transparent animate-spin" />
-                <span className="text-blue-400">Menyimpan...</span>
-              </>
-            )}
-            {saveStatus === 'offline' && <span className="text-amber-400">Draft Lokal</span>}
-          </div>
-
-          {/* Countdown Clock */}
+        {/* Timer & Cloud Save Indicator */}
+        <div className="flex items-center gap-3 sm:gap-4">
           <div
-            className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl font-mono text-xs sm:text-sm font-bold border transition shrink-0 ${
-              timeLeftSeconds < 300
-                ? 'bg-red-500/20 text-red-400 border-red-500/40 animate-pulse'
-                : 'bg-slate-800 text-amber-300 border-slate-700'
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold shadow-xs transition-colors ${
+              isTimeCritical
+                ? 'bg-red-50 text-red-700 border border-red-200 animate-pulse'
+                : 'bg-blue-50 text-blue-900 border border-blue-200'
             }`}
           >
-            <Clock className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
-            <span>{formatTime(timeLeftSeconds)}</span>
+            <Clock className="w-4 h-4" />
+            <span>{formatTimer(timeLeftSeconds)}</span>
           </div>
 
-          {/* Mobile Question Navigator Toggle Button */}
-          <button
-            onClick={() => setShowMobileNav(true)}
-            className="lg:hidden bg-slate-800 hover:bg-slate-700 text-white text-xs px-2.5 py-1.5 rounded-xl border border-slate-700 flex items-center gap-1.5 cursor-pointer shrink-0"
-          >
-            <Layers className="w-3.5 h-3.5 text-blue-400" />
-            <span>
-              {answeredCount}/{preparedQuestions.length}
-            </span>
-          </button>
+          <div className="hidden sm:flex items-center gap-1.5 text-[11px] text-slate-500">
+            {saveStatus === 'saved' ? (
+              <>
+                <CheckCircle className="w-3.5 h-3.5 text-emerald-600" />
+                <span className="text-emerald-700 font-semibold">Tersimpan</span>
+              </>
+            ) : saveStatus === 'saving' ? (
+              <>
+                <RefreshCw className="w-3.5 h-3.5 text-blue-600 animate-spin" />
+                <span>Menyimpan...</span>
+              </>
+            ) : (
+              <>
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
+                <span className="text-amber-700 font-semibold">Mode Offline</span>
+              </>
+            )}
+          </div>
 
-          {/* Submit button */}
           <button
-            onClick={() => setShowConfirmModal(true)}
-            className="bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs sm:text-sm px-3 py-1.5 sm:py-2 rounded-xl transition shadow-lg shadow-emerald-600/20 flex items-center gap-1 cursor-pointer shrink-0"
+            onClick={() => setShowSubmitModal(true)}
+            className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold shadow-xs flex items-center gap-1.5 transition-colors cursor-pointer"
           >
             <Send className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Kirim</span>
+            <span className="hidden sm:inline">Kumpulkan</span>
           </button>
         </div>
       </header>
 
-      {/* Proctoring Warning Banner if violations detected */}
-      {violationsCount > 0 && !isSessionLocked && (
-        <div className="bg-amber-500/10 border-b border-amber-500/30 px-4 py-2 text-xs text-amber-300 flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
-            <span>
-              Peringatan: Terdeteksi <strong>{violationsCount} kali</strong> berpindah tab/jendela. Batas toleransi:{' '}
-              {maxAllowedViolations} kali.
-            </span>
-          </div>
-          <span className="text-[11px] font-semibold text-amber-400">Tetap berada di halaman ujian!</span>
-        </div>
-      )}
-
-      {/* Main Body Layout */}
-      <div className="flex-1 flex flex-col lg:flex-row max-w-7xl mx-auto w-full p-3 sm:p-6 gap-5 sm:gap-6">
-        {/* Left Column: Question Content or Document View */}
-        <div className="flex-1 flex flex-col justify-between min-w-0">
-          {viewMode === 'dokumen' && ujian.dokumenAsliUrl ? (
-            <div className="bg-slate-900 border border-slate-800 rounded-3xl p-4 flex-1 flex flex-col shadow-xl">
-              <div className="flex items-center justify-between mb-3 text-xs text-slate-400">
-                <span>Tampilan Dokumen Asli ({ujian.dokumenAsliNama || 'Naskah Soal'})</span>
-                <span className="text-blue-400 font-semibold">Navigasi nomor soal tersedia di panel</span>
-              </div>
-              <div className="flex-1 bg-slate-950 rounded-2xl overflow-hidden min-h-[450px] flex items-center justify-center border border-slate-800">
-                <iframe src={ujian.dokumenAsliUrl} title="Dokumen Asli" className="w-full h-full min-h-[500px] border-0" />
-              </div>
-            </div>
-          ) : currentQuestion ? (
-            <div className="bg-slate-900 border border-slate-800 rounded-3xl p-4 sm:p-7 shadow-xl flex-1 flex flex-col justify-between min-w-0">
-              <div>
-                {/* Question Header */}
-                <div className="flex items-center justify-between pb-3 sm:pb-4 border-b border-slate-800 mb-4 sm:mb-5">
-                  <div className="flex items-center gap-2">
-                    <span className="w-7 h-7 sm:w-8 sm:h-8 rounded-xl bg-blue-600 text-white font-extrabold flex items-center justify-center text-xs sm:text-sm shadow-md">
-                      {currentQuestion.nomor}
-                    </span>
-                    <span className="text-[11px] sm:text-xs uppercase tracking-wider font-semibold text-slate-400">
-                      Soal {currentQuestion.nomor} dari {preparedQuestions.length}
-                    </span>
-                    <span className="text-[10px] sm:text-[11px] bg-slate-800 text-slate-300 px-2 py-0.5 rounded-full border border-slate-700 capitalize">
-                      {currentQuestion.tipe.replace('_', ' ')}
-                    </span>
-                  </div>
-                  <div className="text-xs text-slate-400">
-                    Bobot: <strong className="text-white">{currentQuestion.bobot || 1} Poin</strong>
-                  </div>
+      {/* Main Container: Question Card + Number Palette */}
+      <main className="flex-1 max-w-6xl w-full mx-auto p-4 sm:p-6 lg:p-8 grid grid-cols-1 lg:grid-cols-4 gap-6">
+        {/* Left Column: Question Area */}
+        <div className="lg:col-span-3 space-y-4">
+          {currentSoal ? (
+            <div className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200 shadow-xs space-y-6">
+              {/* Question Header */}
+              <div className="flex items-center justify-between pb-4 border-b border-slate-100">
+                <div className="flex items-center gap-2">
+                  <span className="w-8 h-8 rounded-lg bg-blue-100 text-blue-900 font-extrabold flex items-center justify-center text-sm">
+                    {currentIndex + 1}
+                  </span>
+                  <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
+                    {currentSoal.tipe === 'pilihan_ganda' ? 'Pilihan Ganda' : 'Uraian / Esai'}
+                  </span>
                 </div>
 
-                {/* Question Image if present */}
-                {currentQuestion.gambar && (
-                  <div className="mb-4 sm:mb-5">
-                    <div
-                      onClick={() => setZoomImage(currentQuestion.gambar || null)}
-                      className="group relative inline-block max-w-full rounded-2xl overflow-hidden border border-slate-700 bg-slate-950 cursor-zoom-in"
-                    >
-                      <img
-                        src={currentQuestion.gambar}
-                        alt={currentQuestion.gambarCaption || `Gambar Soal ${currentQuestion.nomor}`}
-                        className="max-h-60 sm:max-h-72 w-auto max-w-full object-contain rounded-xl transition duration-200 group-hover:opacity-95"
-                      />
-                      <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition text-white text-xs font-semibold gap-1.5">
-                        <ZoomIn className="w-4 h-4" />
-                        <span>Klik untuk perbesar gambar</span>
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] text-slate-400">
+                    Bobot: <strong>{currentSoal.bobot || 1}</strong>
+                  </span>
+                  <button
+                    onClick={() => handleToggleRagu(currentSoal.id)}
+                    className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition-colors flex items-center gap-1.5 cursor-pointer ${
+                      currentDetail.raguRagu
+                        ? 'bg-amber-100 border-amber-300 text-amber-800'
+                        : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
+                    }`}
+                  >
+                    <HelpCircle className="w-3.5 h-3.5" />
+                    <span>Ragu-ragu</span>
+                  </button>
+                </div>
+              </div>
+
+              {/* Question Image & Text with Accurate Positional Layout (atas / tengah / bawah) */}
+              {(() => {
+                const pos = currentSoal.gambarPosisi || 'atas';
+                const qText = (currentSoal.pertanyaan || '').trim();
+                const isPlaceholderImagePrompt = qText === '(Perhatikan gambar berikut)';
+                const paragraphs = qText
+                  ? qText.split(/\r?\n+/).map((p) => p.trim()).filter(Boolean)
+                  : [];
+                const canSplitMiddle = pos === 'tengah' && paragraphs.length >= 2;
+                const splitPoint = canSplitMiddle ? Math.ceil(paragraphs.length / 2) : paragraphs.length;
+                const topParagraphs = canSplitMiddle ? paragraphs.slice(0, splitPoint) : pos === 'tengah' || pos === 'bawah' ? paragraphs : [];
+                const bottomParagraphs = canSplitMiddle ? paragraphs.slice(splitPoint) : pos === 'atas' ? paragraphs : [];
+                const qImgKey = `${currentSoal.id}_q_${imageRetryNonce}`;
+
+                const renderQuestionImage = () => {
+                  if (!currentSoal.gambar) return null;
+                  const sizeClass =
+                    currentSoal.gambarUkuran === 'kecil'
+                      ? 'max-w-xs'
+                      : currentSoal.gambarUkuran === 'besar'
+                      ? 'max-w-2xl'
+                      : currentSoal.gambarUkuran === 'asli'
+                      ? 'max-w-full'
+                      : 'max-w-md';
+
+                  if (imageLoadErrors[qImgKey]) {
+                    return (
+                      <div className="my-3 p-4 rounded-2xl border border-amber-200 bg-amber-50 text-center space-y-2 max-w-md mx-auto">
+                        <p className="text-xs font-bold text-amber-800">
+                          Gambar soal gagal dimuat. Periksa koneksi internet Anda.
+                        </p>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setImageLoadErrors((prev) => ({ ...prev, [qImgKey]: false }));
+                            setImageRetryNonce((n) => n + 1);
+                          }}
+                          className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                        >
+                          <RefreshCw className="w-3.5 h-3.5" />
+                          <span>Muat Ulang Gambar</span>
+                        </button>
                       </div>
+                    );
+                  }
+
+                  return (
+                    <div className="space-y-1.5 my-3">
+                      <div
+                        onClick={() =>
+                          setLightboxData({
+                            isOpen: true,
+                            imageUrl: currentSoal.gambar!,
+                            title: `Gambar Soal Nomor ${currentIndex + 1}`,
+                            caption: currentSoal.gambarCaption,
+                          })
+                        }
+                        className={`relative group rounded-2xl overflow-hidden border border-slate-200 bg-slate-50 p-2 mx-auto cursor-zoom-in transition-all hover:border-blue-400 hover:shadow-md ${sizeClass}`}
+                      >
+                        <img
+                          key={qImgKey}
+                          src={currentSoal.gambar}
+                          alt={currentSoal.gambarCaption || 'Gambar Soal'}
+                          className="max-h-80 w-auto max-w-full object-contain mx-auto rounded-xl select-none"
+                          loading="lazy"
+                          onError={() =>
+                            setImageLoadErrors((prev) => ({ ...prev, [qImgKey]: true }))
+                          }
+                        />
+                        <div className="absolute inset-0 bg-blue-900/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center rounded-xl pointer-events-none">
+                          <span className="px-3 py-1.5 rounded-xl bg-white/95 text-blue-900 text-xs font-bold shadow-md flex items-center gap-1.5 backdrop-blur-xs">
+                            <ZoomIn className="w-3.5 h-3.5" />
+                            <span>Perbesar Gambar</span>
+                          </span>
+                        </div>
+                      </div>
+                      {currentSoal.gambarCaption && (
+                        <p className="text-[11px] text-center text-slate-500 font-medium italic">
+                          {currentSoal.gambarCaption}
+                        </p>
+                      )}
                     </div>
-                    {currentQuestion.gambarCaption && (
-                      <p className="text-xs text-slate-400 italic mt-1.5">{currentQuestion.gambarCaption}</p>
-                    )}
-                  </div>
-                )}
+                  );
+                };
 
-                {/* Question Text with formula & table safety */}
-                <div className="text-sm sm:text-base md:text-lg text-slate-100 font-medium leading-relaxed mb-6 whitespace-pre-wrap select-none break-words">
-                  {currentQuestion.pertanyaan}
-                </div>
+                const renderTextAndTables = (lines: string[]) => {
+                  if (lines.length === 0) return null;
+                  const nodes: React.ReactNode[] = [];
+                  let i = 0;
 
-                {/* Options / Answer Inputs */}
-                {currentQuestion.tipe === 'pilihan_ganda' && currentQuestion.pilihan && (
-                  <div className="space-y-2.5 sm:space-y-3">
-                    {Object.entries(currentQuestion.pilihan).map(([key, label]) => {
-                      const isSelected = currentAnswer?.jawabanDipilih === key;
-                      return (
-                        <button
-                          key={key}
-                          type="button"
-                          disabled={isSessionLocked}
-                          onClick={() => handleAnswerSelect(currentQuestion.id, key)}
-                          className={`w-full text-left p-3.5 sm:p-4 rounded-2xl border transition flex items-center gap-3 sm:gap-3.5 cursor-pointer min-h-[48px] ${
-                            isSelected
-                              ? 'bg-blue-600/20 border-blue-500 text-white shadow-md shadow-blue-600/10'
-                              : 'bg-slate-800/40 border-slate-800 hover:bg-slate-800/80 text-slate-200'
-                          } ${isSessionLocked ? 'opacity-50 cursor-not-allowed' : ''}`}
-                        >
-                          <div
-                            className={`w-8 h-8 sm:w-9 sm:h-9 rounded-xl flex items-center justify-center font-bold text-xs sm:text-sm transition shrink-0 ${
-                              isSelected
-                                ? 'bg-blue-600 text-white shadow-md'
-                                : 'bg-slate-700 text-slate-300'
-                            }`}
-                          >
-                            {key}
+                  while (i < lines.length) {
+                    const line = lines[i];
+                    if (line.startsWith('|') && line.endsWith('|')) {
+                      const tableLines: string[] = [];
+                      while (i < lines.length && lines[i].startsWith('|') && lines[i].endsWith('|')) {
+                        tableLines.push(lines[i]);
+                        i++;
+                      }
+                      const parsedRows = tableLines
+                        .map((row) =>
+                          row
+                            .slice(1, -1)
+                            .split('|')
+                            .map((c) => c.trim())
+                        )
+                        .filter((cells) => !cells.every((c) => /^:?-+:?$/.test(c)));
+
+                      if (parsedRows.length > 0) {
+                        const headerRow = parsedRows.length > 1 ? parsedRows[0] : null;
+                        const bodyRows = parsedRows.length > 1 ? parsedRows.slice(1) : parsedRows;
+                        nodes.push(
+                          <div key={`tbl-${i}`} className="overflow-x-auto my-2 rounded-xl border border-slate-200">
+                            <table className="w-full text-xs sm:text-sm text-left border-collapse">
+                              {headerRow && (
+                                <thead className="bg-slate-100 text-slate-800 font-bold">
+                                  <tr>
+                                    {headerRow.map((cell, ci) => (
+                                      <th key={ci} className="px-3 py-2 border-b border-r last:border-r-0 border-slate-200">
+                                        {cell}
+                                      </th>
+                                    ))}
+                                  </tr>
+                                </thead>
+                              )}
+                              <tbody className="divide-y divide-slate-200 bg-white">
+                                {bodyRows.map((row, ri) => (
+                                  <tr key={ri}>
+                                    {row.map((cell, ci) => (
+                                      <td key={ci} className="px-3 py-2 border-r last:border-r-0 border-slate-200 text-slate-700">
+                                        {cell}
+                                      </td>
+                                    ))}
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
                           </div>
-                          <div className="text-xs sm:text-sm md:text-base leading-snug break-words flex-1">
-                            {label}
-                          </div>
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
+                        );
+                      }
+                    } else {
+                      nodes.push(<p key={`p-${i}`}>{line}</p>);
+                      i++;
+                    }
+                  }
 
-                {currentQuestion.tipe === 'benar_salah' && (
-                  <div className="grid grid-cols-2 gap-3 sm:gap-4">
-                    {['Benar', 'Salah'].map((opt) => {
-                      const isSelected = currentAnswer?.jawabanDipilih === opt;
-                      return (
-                        <button
-                          key={opt}
-                          type="button"
-                          disabled={isSessionLocked}
-                          onClick={() => handleAnswerSelect(currentQuestion.id, opt)}
-                          className={`p-4 sm:p-6 rounded-2xl border font-bold text-sm sm:text-base transition text-center cursor-pointer min-h-[48px] ${
-                            isSelected
-                              ? opt === 'Benar'
-                                ? 'bg-emerald-600/20 border-emerald-500 text-emerald-300'
-                                : 'bg-red-600/20 border-red-500 text-red-300'
-                              : 'bg-slate-800/40 border-slate-800 hover:bg-slate-800/80 text-slate-300'
-                          } ${isSessionLocked ? 'opacity-50 cursor-not-allowed' : ''}`}
-                        >
-                          {opt}
-                        </button>
-                      );
-                    })}
-                  </div>
-                )}
+                  return (
+                    <div className="text-sm sm:text-base text-slate-900 leading-relaxed font-medium whitespace-pre-line space-y-2">
+                      {nodes}
+                    </div>
+                  );
+                };
 
-                {currentQuestion.tipe === 'isian' && (
-                  <div className="space-y-2">
-                    <label className="text-xs text-slate-400 font-medium">Tuliskan Jawaban Singkat Anda:</label>
-                    <input
-                      type="text"
-                      disabled={isSessionLocked}
-                      value={currentAnswer?.jawabanDipilih || ''}
-                      onChange={(e) => handleAnswerSelect(currentQuestion.id, e.target.value)}
-                      placeholder="Ketik jawaban di sini..."
-                      className="w-full bg-slate-800 border border-slate-700 text-white px-4 py-3 rounded-xl text-sm sm:text-base focus:ring-2 focus:ring-blue-500 focus:outline-hidden"
-                    />
-                  </div>
-                )}
+                return (
+                  <div className="space-y-3">
+                    {pos === 'atas' && renderQuestionImage()}
 
-                {currentQuestion.tipe === 'esai' && (
-                  <div className="space-y-2">
-                    <label className="text-xs text-slate-400 font-medium">Uraian Jawaban Esai:</label>
-                    <textarea
-                      rows={5}
-                      disabled={isSessionLocked}
-                      value={currentAnswer?.jawabanDipilih || ''}
-                      onChange={(e) => handleAnswerSelect(currentQuestion.id, e.target.value)}
-                      placeholder="Tuliskan uraian dan penjelasan lengkap Anda di sini..."
-                      className="w-full bg-slate-800 border border-slate-700 text-white p-3.5 sm:p-4 rounded-xl text-xs sm:text-sm focus:ring-2 focus:ring-blue-500 focus:outline-hidden resize-none leading-relaxed"
-                    />
-                  </div>
-                )}
-              </div>
+                    {!isPlaceholderImagePrompt && renderTextAndTables(topParagraphs)}
 
-              {/* Navigation Controls */}
-              <div className="pt-4 sm:pt-6 border-t border-slate-800 mt-5 sm:mt-6 flex items-center justify-between gap-2">
-                <button
-                  onClick={() => setActiveQuestionIndex((prev) => Math.max(0, prev - 1))}
-                  disabled={activeQuestionIndex === 0 || isSessionLocked}
-                  className={`px-3 sm:px-4 py-2.5 rounded-xl text-xs sm:text-sm font-semibold flex items-center gap-1 transition cursor-pointer min-h-[44px] ${
-                    activeQuestionIndex === 0 || isSessionLocked
-                      ? 'bg-slate-800/30 text-slate-600 cursor-not-allowed'
-                      : 'bg-slate-800 hover:bg-slate-700 text-white'
+                    {(pos === 'tengah' || pos === 'bawah') && renderQuestionImage()}
+
+                    {!isPlaceholderImagePrompt && renderTextAndTables(bottomParagraphs)}
+                  </div>
+                );
+              })()}
+
+              {/* Answer Choices Form */}
+              {currentSoal.tipe === 'pilihan_ganda' && currentSoal.pilihan ? (
+                <div
+                  className={`pt-2 ${
+                    currentSoal.pilihanGambar && Object.keys(currentSoal.pilihanGambar).length > 0
+                      ? 'grid grid-cols-1 sm:grid-cols-2 gap-3'
+                      : 'space-y-2.5'
                   }`}
+                >
+                  {Object.entries(currentSoal.pilihan).map(([key, text]) => {
+                    const isSelected = currentDetail.jawabanDipilih === key;
+                    const choiceImg = currentSoal.pilihanGambar?.[key];
+
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => handleSelectAnswer(currentSoal.id, key)}
+                        className={`w-full p-4 rounded-2xl border text-left transition-all flex flex-col justify-between gap-3 cursor-pointer ${
+                          isSelected
+                            ? 'bg-blue-50 border-blue-600 ring-2 ring-blue-600/20 text-blue-950 font-bold shadow-xs'
+                            : 'bg-white border-slate-200 hover:border-slate-300 text-slate-800'
+                        }`}
+                      >
+                        <div className="flex items-start justify-between w-full gap-2">
+                          <div className="flex items-center gap-2.5">
+                            <span
+                              className={`w-7 h-7 rounded-xl flex items-center justify-center text-xs font-extrabold flex-shrink-0 transition-colors ${
+                                isSelected ? 'bg-blue-700 text-white shadow-xs' : 'bg-slate-100 text-slate-700'
+                              }`}
+                            >
+                              {key}
+                            </span>
+                            {text && !text.startsWith('(Gambar Pilihan') && (
+                              <span className="text-sm pt-0.5 leading-snug">{text}</span>
+                            )}
+                          </div>
+
+                          {choiceImg && (
+                            <span
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setLightboxData({
+                                  isOpen: true,
+                                  imageUrl: choiceImg,
+                                  title: `Pilihan ${key} - Soal Nomor ${currentIndex + 1}`,
+                                });
+                              }}
+                              className="p-1 text-slate-400 hover:text-blue-700 hover:bg-blue-50 rounded-lg cursor-zoom-in transition-colors"
+                              title="Perbesar Gambar Pilihan"
+                            >
+                              <ZoomIn className="w-4 h-4" />
+                            </span>
+                          )}
+                        </div>
+
+                        {/* Choice Image thumbnail */}
+                        {choiceImg && (
+                          <div className="rounded-xl overflow-hidden border border-slate-200 bg-slate-50 p-2 flex items-center justify-center max-h-48 w-full">
+                            {imageLoadErrors[`${currentSoal.id}_${key}_${imageRetryNonce}`] ? (
+                              <span
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setImageLoadErrors((prev) => ({
+                                    ...prev,
+                                    [`${currentSoal.id}_${key}_${imageRetryNonce}`]: false,
+                                  }));
+                                  setImageRetryNonce((n) => n + 1);
+                                }}
+                                className="text-[11px] font-bold text-amber-700 hover:underline flex items-center gap-1 py-4"
+                              >
+                                <RefreshCw className="w-3.5 h-3.5" /> Muat ulang gambar pilihan {key}
+                              </span>
+                            ) : (
+                              <img
+                                key={`${currentSoal.id}_${key}_${imageRetryNonce}`}
+                                src={choiceImg}
+                                alt={`Pilihan ${key}`}
+                                className="max-h-40 w-auto max-w-full object-contain rounded-lg"
+                                loading="lazy"
+                                onError={() =>
+                                  setImageLoadErrors((prev) => ({
+                                    ...prev,
+                                    [`${currentSoal.id}_${key}_${imageRetryNonce}`]: true,
+                                  }))
+                                }
+                              />
+                            )}
+                          </div>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : (
+                <div className="space-y-2 pt-2">
+                  <label className="text-xs font-bold text-slate-700">Tuliskan Jawaban Uraian Anda:</label>
+                  <textarea
+                    rows={6}
+                    value={currentDetail.jawabanDipilih || ''}
+                    onChange={(e) => handleSelectAnswer(currentSoal.id, e.target.value)}
+                    placeholder="Ketik uraian jawaban secara rinci dan teliti di sini..."
+                    className="w-full p-4 rounded-2xl border border-slate-200 focus:border-blue-600 focus:ring-4 focus:ring-blue-100 outline-none text-sm transition-all resize-y"
+                  />
+                  <div className="flex justify-between text-[11px] text-slate-400">
+                    <span>Gunakan bahasa yang jelas dan santun.</span>
+                    <span>{(currentDetail.jawabanDipilih || '').length} karakter</span>
+                  </div>
+                </div>
+              )}
+
+              {/* Bottom Actions */}
+              <div className="pt-6 border-t border-slate-100 flex items-center justify-between">
+                <button
+                  onClick={() => setCurrentIndex((prev) => Math.max(0, prev - 1))}
+                  disabled={currentIndex === 0}
+                  className="px-4 py-2.5 rounded-xl border border-slate-200 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-40 disabled:pointer-events-none transition-colors flex items-center gap-1.5 cursor-pointer"
                 >
                   <ChevronLeft className="w-4 h-4" />
                   <span>Sebelumnya</span>
                 </button>
 
-                <button
-                  type="button"
-                  disabled={isSessionLocked}
-                  onClick={() => handleToggleRagu(currentQuestion.id)}
-                  className={`px-3 sm:px-4 py-2.5 rounded-xl text-xs sm:text-sm font-bold flex items-center gap-1.5 border transition cursor-pointer min-h-[44px] ${
-                    currentAnswer?.raguRagu
-                      ? 'bg-amber-500/20 text-amber-300 border-amber-500/40 shadow-xs'
-                      : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-white'
-                  }`}
-                >
-                  <Flag className="w-4 h-4" />
-                  <span className="hidden sm:inline">
-                    {currentAnswer?.raguRagu ? 'Ditandai Ragu' : 'Tandai Ragu'}
-                  </span>
-                  <span className="sm:hidden">Ragu</span>
-                </button>
-
-                {activeQuestionIndex < preparedQuestions.length - 1 ? (
+                {isLastQuestion ? (
                   <button
-                    onClick={() => setActiveQuestionIndex((prev) => Math.min(preparedQuestions.length - 1, prev + 1))}
-                    disabled={isSessionLocked}
-                    className="bg-blue-600 hover:bg-blue-500 text-white px-4 sm:px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold flex items-center gap-1.5 transition shadow-md shadow-blue-600/20 cursor-pointer min-h-[44px]"
+                    onClick={() => setShowSubmitModal(true)}
+                    className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-md transition-colors flex items-center gap-1.5 cursor-pointer"
                   >
-                    <span>Berikutnya</span>
-                    <ChevronRight className="w-4 h-4" />
+                    <span>Selesai & Kumpulkan</span>
+                    <Send className="w-4 h-4" />
                   </button>
                 ) : (
                   <button
-                    onClick={() => setShowConfirmModal(true)}
-                    disabled={isSessionLocked}
-                    className="bg-emerald-600 hover:bg-emerald-500 text-white px-4 sm:px-5 py-2.5 rounded-xl text-xs sm:text-sm font-bold flex items-center gap-1.5 transition shadow-md shadow-emerald-600/20 cursor-pointer min-h-[44px]"
+                    onClick={() => setCurrentIndex((prev) => Math.min(totalSoal - 1, prev + 1))}
+                    className="px-5 py-2.5 rounded-xl bg-blue-700 hover:bg-blue-600 text-white text-xs font-bold shadow-md transition-colors flex items-center gap-1.5 cursor-pointer"
                   >
-                    <span>Selesai</span>
-                    <Send className="w-4 h-4" />
+                    <span>Berikutnya</span>
+                    <ChevronRight className="w-4 h-4" />
                   </button>
                 )}
               </div>
             </div>
           ) : (
-            <div className="bg-slate-900 border border-slate-800 rounded-3xl p-8 text-center text-slate-400">
-              Tidak ada soal yang tersedia.
-            </div>
+            <div className="text-center py-12 text-slate-400">Soal tidak ditemukan.</div>
           )}
         </div>
 
-        {/* Right Column: Question Navigator Palette (Desktop view) */}
-        <aside className="hidden lg:flex w-80 bg-slate-900 border border-slate-800 rounded-3xl p-5 shadow-xl flex-col justify-between shrink-0">
-          <div>
-            <h3 className="text-sm font-bold text-white mb-3 flex items-center justify-between">
-              <span>Navigasi Nomor Soal</span>
-              <span className="text-xs text-slate-400 font-normal">
-                {answeredCount}/{preparedQuestions.length} Terjawab
+        {/* Right Column: Numbers Palette */}
+        <div className="space-y-4">
+          <div className="bg-white rounded-3xl p-5 border border-slate-200 shadow-xs space-y-4">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
+                Navigasi Soal
+              </h3>
+              <span className="text-[11px] font-semibold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-full">
+                {answeredCount} / {totalSoal}
               </span>
-            </h3>
-
-            {/* Status Legend */}
-            <div className="grid grid-cols-3 gap-1.5 text-[10px] mb-4 text-center">
-              <div className="bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 py-1 rounded-md font-semibold">
-                Dijawab ({answeredCount})
-              </div>
-              <div className="bg-amber-500/10 border border-amber-500/30 text-amber-400 py-1 rounded-md font-semibold">
-                Ragu ({flaggedCount})
-              </div>
-              <div className="bg-slate-800 border border-slate-700 text-slate-400 py-1 rounded-md font-semibold">
-                Belum ({preparedQuestions.length - answeredCount})
-              </div>
             </div>
 
-            {/* Question Buttons Grid */}
-            <div className="grid grid-cols-5 gap-2 max-h-80 overflow-y-auto p-1">
-              {preparedQuestions.map((q, idx) => {
-                const ans = answers[q.id];
-                const isCurrent = idx === activeQuestionIndex;
-                const isAnswered = ans?.jawabanDipilih && ans.jawabanDipilih.trim() !== '';
-                const isRagu = ans?.raguRagu;
-
-                let btnClass = 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-700';
-                if (isCurrent) {
-                  btnClass = 'ring-2 ring-blue-500 ring-offset-2 ring-offset-slate-900 font-extrabold text-white';
-                }
-                if (isRagu) {
-                  btnClass += ' bg-amber-500 text-slate-950 font-bold border-amber-400';
-                } else if (isAnswered) {
-                  btnClass += ' bg-emerald-600 text-white font-bold border-emerald-500';
-                }
+            {/* Grid numbers */}
+            <div className="grid grid-cols-5 gap-2 max-h-80 overflow-y-auto pr-1">
+              {soalList.map((q, idx) => {
+                const ans = jawabanState[q.id];
+                const hasAnswer = ans && ans.jawabanDipilih && ans.jawabanDipilih.trim().length > 0;
+                const isRagu = ans && ans.raguRagu;
+                const isCurrent = idx === currentIndex;
 
                 return (
                   <button
                     key={q.id}
-                    onClick={() => setActiveQuestionIndex(idx)}
-                    className={`h-11 rounded-xl text-xs flex items-center justify-center border transition cursor-pointer relative ${btnClass}`}
+                    onClick={() => setCurrentIndex(idx)}
+                    className={`h-10 rounded-xl text-xs font-bold transition-all flex items-center justify-center cursor-pointer ${
+                      isCurrent ? 'ring-2 ring-blue-600 ring-offset-2' : ''
+                    } ${
+                      isRagu
+                        ? 'bg-amber-400 text-slate-900'
+                        : hasAnswer
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                    }`}
                   >
-                    <span>{q.nomor}</span>
-                    {ans?.jawabanDipilih && q.tipe === 'pilihan_ganda' && (
-                      <span className="absolute bottom-1 right-1 text-[9px] font-mono opacity-80">
-                        {ans.jawabanDipilih}
-                      </span>
-                    )}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-
-          <div className="pt-4 border-t border-slate-800 mt-4 space-y-3">
-            <button
-              onClick={() => setShowConfirmModal(true)}
-              className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3 px-4 rounded-xl text-sm transition shadow-lg shadow-emerald-600/20 flex items-center justify-center gap-2 cursor-pointer"
-            >
-              <Send className="w-4 h-4" />
-              <span>Selesaikan Ujian</span>
-            </button>
-            <div className="text-[11px] text-slate-500 text-center">
-              Sinkronisasi data otomatis ke Firebase.
-            </div>
-          </div>
-        </aside>
-      </div>
-
-      {/* Mobile Drawer Navigation (Bottom-sheet modal for screen widths < 1024px) */}
-      {showMobileNav && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-xs flex flex-col justify-end lg:hidden">
-          <div className="bg-slate-900 border-t border-slate-700 rounded-t-3xl p-5 max-h-[85vh] flex flex-col shadow-2xl">
-            <div className="flex items-center justify-between pb-3 border-b border-slate-800 mb-3">
-              <div>
-                <h3 className="font-bold text-white text-sm">Daftar Nomor Soal</h3>
-                <span className="text-xs text-slate-400">
-                  {answeredCount} dari {preparedQuestions.length} Terjawab
-                </span>
-              </div>
-              <button
-                onClick={() => setShowMobileNav(false)}
-                className="w-8 h-8 rounded-full bg-slate-800 text-slate-300 flex items-center justify-center hover:bg-slate-700 cursor-pointer"
-              >
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            {/* Mobile Legend */}
-            <div className="grid grid-cols-3 gap-1.5 text-[10px] mb-3 text-center">
-              <div className="bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 py-1 rounded-md font-semibold">
-                Dijawab ({answeredCount})
-              </div>
-              <div className="bg-amber-500/10 border border-amber-500/30 text-amber-400 py-1 rounded-md font-semibold">
-                Ragu ({flaggedCount})
-              </div>
-              <div className="bg-slate-800 border border-slate-700 text-slate-400 py-1 rounded-md font-semibold">
-                Belum ({preparedQuestions.length - answeredCount})
-              </div>
-            </div>
-
-            {/* Number Grid */}
-            <div className="grid grid-cols-5 gap-2 overflow-y-auto max-h-60 p-1 mb-4">
-              {preparedQuestions.map((q, idx) => {
-                const ans = answers[q.id];
-                const isCurrent = idx === activeQuestionIndex;
-                const isAnswered = ans?.jawabanDipilih && ans.jawabanDipilih.trim() !== '';
-                const isRagu = ans?.raguRagu;
-
-                let btnClass = 'bg-slate-800 text-slate-400 border-slate-700';
-                if (isCurrent) {
-                  btnClass = 'ring-2 ring-blue-500 ring-offset-2 ring-offset-slate-900 font-extrabold text-white';
-                }
-                if (isRagu) {
-                  btnClass += ' bg-amber-500 text-slate-950 font-bold border-amber-400';
-                } else if (isAnswered) {
-                  btnClass += ' bg-emerald-600 text-white font-bold border-emerald-500';
-                }
-
-                return (
-                  <button
-                    key={q.id}
-                    onClick={() => {
-                      setActiveQuestionIndex(idx);
-                      setShowMobileNav(false);
-                    }}
-                    className={`h-11 rounded-xl text-xs flex items-center justify-center border transition relative cursor-pointer ${btnClass}`}
-                  >
-                    <span>{q.nomor}</span>
-                    {ans?.jawabanDipilih && q.tipe === 'pilihan_ganda' && (
-                      <span className="absolute bottom-1 right-1 text-[9px] font-mono opacity-80">
-                        {ans.jawabanDipilih}
-                      </span>
-                    )}
+                    {idx + 1}
                   </button>
                 );
               })}
             </div>
 
-            <button
-              onClick={() => {
-                setShowMobileNav(false);
-                setShowConfirmModal(true);
-              }}
-              className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3 rounded-xl text-sm transition shadow-lg shadow-emerald-600/20 flex items-center justify-center gap-2 cursor-pointer"
-            >
-              <Send className="w-4 h-4" />
-              <span>Selesaikan Ujian Sekarang</span>
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Proctoring Violation Warning Modal */}
-      {showViolationModal && !isSessionLocked && (
-        <div className="fixed inset-0 z-50 bg-black/85 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border-2 border-amber-500/60 rounded-3xl p-6 sm:p-7 max-w-md w-full shadow-2xl text-center animate-in fade-in zoom-in-95 duration-200">
-            <div className="w-16 h-16 bg-amber-500/20 border border-amber-500/40 text-amber-400 rounded-2xl flex items-center justify-center mx-auto mb-4 animate-bounce">
-              <AlertTriangle className="w-9 h-9" />
-            </div>
-
-            <h3 className="text-xl font-black text-amber-400 mb-2">PERINGATAN PELANGGARAN!</h3>
-            <p className="text-slate-200 text-sm mb-4 leading-relaxed">
-              Anda terdeteksi meninggalkan layar ujian: <br />
-              <strong className="text-white">"{latestViolationMsg}"</strong>
-            </p>
-
-            <div className="bg-slate-800/80 border border-slate-700 rounded-2xl p-4 mb-5 text-left text-xs space-y-1.5">
-              <div className="flex justify-between text-slate-300">
-                <span>Pelanggaran Ke:</span>
-                <span className="font-bold text-amber-400">
-                  {violationsCount} dari batas {maxAllowedViolations} kali
-                </span>
+            {/* Legend */}
+            <div className="pt-3 border-t border-slate-100 space-y-1.5 text-[11px] text-slate-500">
+              <div className="flex items-center gap-2">
+                <span className="w-3 h-3 rounded bg-emerald-600 flex-shrink-0" />
+                <span>Sudah Dijawab ({answeredCount})</span>
               </div>
-              <div className="flex justify-between text-slate-300">
-                <span>Status Toleransi:</span>
-                <span className="font-semibold text-slate-200">
-                  Sisa {Math.max(0, maxAllowedViolations - violationsCount)} kesempatan
-                </span>
+              <div className="flex items-center gap-2">
+                <span className="w-3 h-3 rounded bg-amber-400 flex-shrink-0" />
+                <span>Ragu-ragu</span>
               </div>
-              <div className="text-[11px] text-red-300 pt-1 border-t border-slate-700/60">
-                * Jika Anda berpindah tab lagi hingga melebihi batas, ujian akan otomatis dikunci oleh sistem pengawas sekolah.
+              <div className="flex items-center gap-2">
+                <span className="w-3 h-3 rounded bg-slate-100 border border-slate-200 flex-shrink-0" />
+                <span>Belum Dijawab ({totalSoal - answeredCount})</span>
               </div>
-            </div>
-
-            <button
-              type="button"
-              onClick={() => {
-                setShowViolationModal(false);
-                if (ujian.wajibFullscreen !== false) {
-                  requestFullscreen();
-                }
-              }}
-              className="w-full bg-amber-500 hover:bg-amber-400 text-slate-950 font-extrabold py-3.5 px-4 rounded-xl text-sm transition shadow-lg shadow-amber-500/20 cursor-pointer"
-            >
-              Saya Mengerti dan Kembali ke Ujian
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Proctoring Locked Screen (Fullscreen overlay when session locked) */}
-      {isSessionLocked && (
-        <div className="fixed inset-0 z-50 bg-slate-950/95 backdrop-blur-md flex items-center justify-center p-4">
-          <div className="bg-slate-900 border-2 border-red-500/70 rounded-3xl p-6 sm:p-8 max-w-xl w-full text-center shadow-2xl animate-in fade-in zoom-in-95 duration-200">
-            <div className="w-20 h-20 bg-red-500/20 border-2 border-red-500/50 text-red-400 rounded-3xl flex items-center justify-center mx-auto mb-5 shadow-lg shadow-red-500/20">
-              <ShieldAlert className="w-10 h-10 animate-pulse text-red-400" />
-            </div>
-
-            <div className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-red-500/20 border border-red-500/40 text-red-300 text-xs font-bold mb-3">
-              <Lock className="w-3.5 h-3.5" />
-              <span>PENGUNCIAN OTOMATIS SERVER AKTIF</span>
-            </div>
-
-            <h2 className="text-xl sm:text-2xl font-black text-white mb-2 tracking-tight">
-              Ujian Dikunci Sementara
-            </h2>
-
-            {/* MANDATORY VERBATIM USER MESSAGE */}
-            <div className="bg-red-950/60 border-2 border-red-500/60 rounded-2xl p-4 sm:p-5 text-left text-sm text-red-100 mb-5 shadow-md">
-              <div className="font-extrabold text-red-200 flex items-start gap-2 text-sm sm:text-base leading-snug">
-                <AlertCircle className="w-5 h-5 text-red-400 shrink-0 mt-0.5" />
-                <span>
-                  Ujian dikunci sementara karena terdeteksi akses dari perangkat atau sesi lain. Silakan hubungi guru pengawas.
-                </span>
-              </div>
-              {lockReason && (
-                <div className="mt-2.5 pt-2.5 border-t border-red-500/30 text-xs text-red-300/90">
-                  <span className="font-semibold text-red-200">Catatan Sistem: </span>
-                  {lockReason}
-                </div>
-              )}
-            </div>
-
-            {/* Answer Preservation & Anti-Bypass Clarification */}
-            <div className="bg-slate-800/80 border border-slate-700/80 rounded-2xl p-4 text-xs text-slate-300 text-left mb-6 space-y-2.5">
-              <div className="font-bold text-white text-xs sm:text-sm flex items-center gap-1.5">
-                <CheckCircle2 className="w-4 h-4 text-emerald-400" />
-                <span>Data Jawaban Anda Aman & Terlindungi:</span>
-              </div>
-              <ul className="space-y-1.5 text-[11px] sm:text-xs text-slate-300 list-disc list-inside">
-                <li>
-                  <strong className="text-emerald-300">Jawaban tersimpan utuh:</strong> Seluruh butir soal yang telah Anda isi sebelum penguncian tetap tersimpan di server sekolah tanpa ada yang hilang atau terhapus.
-                </li>
-                <li>
-                  <strong className="text-amber-300">Akses perangkat kedua ditolak:</strong> Server menolak perubahan atau pengiriman jawaban dari perangkat lain.
-                </li>
-                <li>
-                  <strong className="text-slate-200">Keamanan server:</strong> Menyegarkan halaman (refresh), login ulang, atau membuka link yang sama tidak akan membuka kunci sebelum diverifikasi oleh guru.
-                </li>
-              </ul>
-            </div>
-
-            <div className="bg-slate-950/60 border border-slate-800 rounded-2xl p-3.5 text-xs text-slate-400 text-left mb-6 flex flex-col sm:flex-row sm:items-center justify-between gap-2">
-              <div>
-                <span className="text-slate-500 block text-[10px] uppercase font-bold tracking-wider">Guru Pengawas:</span>
-                <span className="font-bold text-slate-200">{ujian.guruNama}</span>
-              </div>
-              <div className="sm:text-right">
-                <span className="text-slate-500 block text-[10px] uppercase font-bold tracking-wider">Status Peserta:</span>
-                <span className="font-semibold text-slate-300">
-                  {selectedSiswa?.namaLengkap || (selectedSiswa as any)?.nama} ({selectedSiswa?.kelas})
-                </span>
-              </div>
-            </div>
-
-            <div className="flex items-center justify-center gap-2 text-xs font-semibold text-blue-400 bg-blue-950/40 border border-blue-500/30 py-2.5 px-4 rounded-xl">
-              <RefreshCw className="w-4 h-4 animate-spin text-blue-400" />
-              <span>Memantau status pembukaan kunci dari Guru Pengawas secara real-time...</span>
             </div>
           </div>
         </div>
-      )}
-
-      {/* Zoom Image Modal */}
-      {zoomImage && (
-        <div
-          onClick={() => setZoomImage(null)}
-          className="fixed inset-0 z-50 bg-black/90 backdrop-blur-md flex items-center justify-center p-4 cursor-zoom-out"
-        >
-          <div className="relative max-w-4xl max-h-[90vh]">
-            <img
-              src={zoomImage}
-              alt="Perbesar Gambar"
-              className="max-h-[85vh] w-auto max-w-full object-contain rounded-2xl shadow-2xl"
-            />
-            <button
-              onClick={() => setZoomImage(null)}
-              className="absolute -top-3 -right-3 w-9 h-9 bg-slate-800 border border-slate-700 text-white rounded-full flex items-center justify-center hover:bg-slate-700 shadow-lg cursor-pointer"
-            >
-              <X className="w-5 h-5" />
-            </button>
-          </div>
-        </div>
-      )}
+      </main>
 
       {/* Confirmation Submit Modal */}
-      {showConfirmModal && (
-        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
-          <div className="bg-slate-900 border border-slate-800 rounded-3xl p-6 sm:p-7 max-w-md w-full shadow-2xl text-center">
-            <div className="w-14 h-14 bg-emerald-500/10 border border-emerald-500/20 text-emerald-400 rounded-2xl flex items-center justify-center mx-auto mb-4">
-              <CheckCircle2 className="w-8 h-8" />
+      {showSubmitModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="max-w-md w-full bg-white rounded-3xl p-6 sm:p-8 space-y-5 shadow-2xl">
+            <div className="w-12 h-12 rounded-2xl bg-emerald-50 text-emerald-600 flex items-center justify-center">
+              <Send className="w-6 h-6" />
             </div>
 
-            <h3 className="text-xl font-bold text-white mb-2">Konfirmasi Pengiriman Ujian</h3>
-            <p className="text-slate-300 text-xs sm:text-sm mb-5 leading-relaxed">
-              Anda telah menjawab <strong className="text-emerald-400">{answeredCount}</strong> dari{' '}
-              <strong className="text-white">{preparedQuestions.length}</strong> butir soal.
-            </p>
+            <div>
+              <h3 className="text-lg font-bold text-slate-900">Konfirmasi Kumpulkan Ujian</h3>
+              <p className="text-xs text-slate-600 mt-1.5 leading-relaxed">
+                Anda telah menjawab <strong>{answeredCount}</strong> dari total <strong>{totalSoal}</strong>{' '}
+                butir soal.
+                {totalSoal - answeredCount > 0 && (
+                  <span className="block mt-1 text-amber-700 font-semibold">
+                    Perhatian: Masih ada {totalSoal - answeredCount} butir soal yang belum Anda isi!
+                  </span>
+                )}
+                Apakah Anda yakin ingin menyelesaikan dan mengumpulkan lembar jawaban sekarang?
+              </p>
+            </div>
 
-            {answeredCount < preparedQuestions.length && (
-              <div className="bg-amber-500/10 border border-amber-500/30 rounded-xl p-3 text-xs text-amber-300 mb-4 flex items-center gap-2 text-left">
-                <AlertCircle className="w-5 h-5 shrink-0 text-amber-400" />
-                <span>
-                  Perhatian: Masih ada <strong>{preparedQuestions.length - answeredCount} butir soal</strong> yang belum
-                  dijawab. Yakin ingin mengakhiri?
-                </span>
-              </div>
-            )}
-
-            {flaggedCount > 0 && (
-              <div className="bg-blue-500/10 border border-blue-500/30 rounded-xl p-3 text-xs text-blue-300 mb-4 flex items-center gap-2 text-left">
-                <Flag className="w-5 h-5 shrink-0 text-blue-400" />
-                <span>
-                  Terdapat <strong>{flaggedCount} soal</strong> yang masih bertanda ragu-ragu.
-                </span>
-              </div>
-            )}
-
-            <div className="grid grid-cols-2 gap-3 mt-5">
+            <div className="flex gap-2.5 pt-2">
               <button
-                type="button"
-                onClick={() => setShowConfirmModal(false)}
-                className="w-full bg-slate-800 hover:bg-slate-700 text-white font-semibold py-3 px-4 rounded-xl text-xs sm:text-sm transition cursor-pointer"
+                onClick={() => setShowSubmitModal(false)}
+                className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition-colors cursor-pointer"
               >
-                Periksa Lagi
+                Periksa Kembali
               </button>
               <button
-                type="button"
+                onClick={handleSubmitExam}
                 disabled={isSubmitting}
-                onClick={() => handleSubmitExam(false)}
-                className="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-3 px-4 rounded-xl text-xs sm:text-sm transition shadow-lg shadow-emerald-600/25 flex items-center justify-center gap-1.5 cursor-pointer disabled:opacity-50"
+                className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold shadow-md transition-colors cursor-pointer flex items-center justify-center gap-1.5"
               >
-                {isSubmitting ? 'Menyimpan...' : 'Kirim Sekarang'}
+                {isSubmitting ? (
+                  <>
+                    <RefreshCw className="w-4 h-4 animate-spin" />
+                    <span>Mengirim...</span>
+                  </>
+                ) : (
+                  <span>Ya, Kumpulkan</span>
+                )}
               </button>
             </div>
           </div>
         </div>
       )}
+
+      {/* Proctoring Warning Toast */}
+      {cheatWarning && (
+        <div className="fixed bottom-6 right-6 z-50 max-w-sm bg-red-600 text-white p-4 rounded-2xl shadow-xl flex items-start gap-3 animate-in fade-in slide-in-from-bottom">
+          <ShieldAlert className="w-5 h-5 flex-shrink-0 mt-0.5 text-amber-300" />
+          <div className="flex-1 text-xs">
+            <h4 className="font-bold">Peringatan Pengawasan!</h4>
+            <p className="mt-0.5 text-red-100">{cheatWarning}</p>
+          </div>
+          <button
+            onClick={() => setCheatWarning(null)}
+            className="text-white hover:text-red-200 text-xs font-bold"
+          >
+            Tutup
+          </button>
+        </div>
+      )}
+
+      {/* Fullscreen Responsive Image Lightbox Modal */}
+      <ImageLightboxModal
+        isOpen={lightboxData.isOpen}
+        imageUrl={lightboxData.imageUrl}
+        title={lightboxData.title}
+        caption={lightboxData.caption}
+        onClose={() => setLightboxData({ isOpen: false, imageUrl: '' })}
+      />
     </div>
   );
 };

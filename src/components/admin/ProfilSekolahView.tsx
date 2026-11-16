@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { db } from '../../services/database';
 import { Settings } from '../../types';
 import { compressImage } from '../../utils/imageCompressor';
+import { toast } from '../../utils/toast';
 import {
   Building2,
   Save,
@@ -106,7 +107,7 @@ export const ProfilSekolahView: React.FC = () => {
       }
     } catch (err) {
       console.error('Foto KS upload error:', err);
-      alert('Gagal memproses foto. Silakan coba file foto lain.');
+      toast.error('Gagal memproses foto. Silakan coba file foto lain.');
     } finally {
       setIsUploadingKS(false);
       // Reset input value so re-selecting same file triggers change
@@ -132,7 +133,7 @@ export const ProfilSekolahView: React.FC = () => {
       }
     } catch (err) {
       console.error('Logo upload error:', err);
-      alert('Gagal memproses logo. Silakan coba file lain.');
+      toast.error('Gagal memproses logo. Silakan coba file lain.');
     } finally {
       setIsUploadingLogo(false);
       // Reset input value
@@ -362,6 +363,11 @@ export const ProfilSekolahView: React.FC = () => {
                 src={logoUrl || '/logo.svg'}
                 alt="Logo Sekolah"
                 className="w-full h-full object-contain"
+                onError={(e) => {
+                  if (!e.currentTarget.src.endsWith('/logo.svg')) {
+                    e.currentTarget.src = '/logo.svg';
+                  }
+                }}
               />
             </div>
 
@@ -418,6 +424,9 @@ export const ProfilSekolahView: React.FC = () => {
                     src={fotoKepalaSekolah}
                     alt="Kepala Sekolah"
                     className="w-full h-full object-cover"
+                    onError={(e) => {
+                      e.currentTarget.style.display = 'none';
+                    }}
                   />
                 ) : (
                   <div className="w-full h-full flex flex-col items-center justify-center text-slate-400 bg-slate-100">

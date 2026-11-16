@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { db } from '../../services/database';
 import { Kelas, MataPelajaran, Siswa, NilaiHarianItem } from '../../types';
+import { getWibDateStr } from '../../utils/dateHelper';
 import { ConfirmModal } from '../common/ConfirmModal';
 import {
   FileSpreadsheet,
@@ -70,7 +71,7 @@ export const NilaiHarianView: React.FC = () => {
 
   // Modal: Add New Assessment
   const [isAddModalOpen, setIsAddModalOpen] = useState<boolean>(false);
-  const [newTanggal, setNewTanggal] = useState<string>(new Date().toISOString().split('T')[0]);
+  const [newTanggal, setNewTanggal] = useState<string>(getWibDateStr());
   const [newMateri, setNewMateri] = useState<string>('');
   const [newJenis, setNewJenis] = useState<'Tugas' | 'Ulangan Harian' | 'Formatif' | 'Kuis' | 'Praktik'>('Formatif');
   const [newKeterangan, setNewKeterangan] = useState<string>('');
@@ -81,6 +82,10 @@ export const NilaiHarianView: React.FC = () => {
   const [editMateri, setEditMateri] = useState<string>('');
   const [editJenis, setEditJenis] = useState<string>('');
   const [editKeterangan, setEditKeterangan] = useState<string>('');
+
+  // Modal: Quick Fill Column
+  const [quickFillAssessment, setQuickFillAssessment] = useState<AssessmentMeta | null>(null);
+  const [quickFillScore, setQuickFillScore] = useState<string>('80');
 
   // Modal: Delete Assessment
   const [assessmentToDelete, setAssessmentToDelete] = useState<AssessmentMeta | null>(null);
@@ -199,7 +204,7 @@ export const NilaiHarianView: React.FC = () => {
       const defaultAssId = `ass_ph1_${activeKelas.id}_${activeMapel.id}`;
       const defaultAss: AssessmentMeta = {
         assessmentId: defaultAssId,
-        tanggal: new Date().toISOString().split('T')[0],
+        tanggal: getWibDateStr(),
         materi: 'Formatif 1 / Lingkup Materi 1',
         jenisPenilaian: 'Formatif',
         keterangan: 'Penilaian Harian Pertama',
@@ -245,11 +250,17 @@ export const NilaiHarianView: React.FC = () => {
     setHasUnsavedChanges(true);
   };
 
-  // Quick fill entire column with a single score
+  // Quick fill entire column with a single score (modal trigger)
   const handleQuickFillColumn = (ass: AssessmentMeta) => {
-    const val = prompt(`Masukkan nilai serentak untuk penilaian "${ass.materi}" (0 - 100):`, '80');
-    if (val === null) return;
-    const num = Math.min(100, Math.max(0, parseInt(val, 10) || 0));
+    setQuickFillScore('80');
+    setQuickFillAssessment(ass);
+  };
+
+  const applyQuickFillColumn = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!quickFillAssessment) return;
+    const parsed = parseInt(quickFillScore, 10);
+    const num = Math.min(100, Math.max(0, isNaN(parsed) ? 0 : parsed));
 
     const newColumnScores: Record<string, number> = {};
     studentsInClass.forEach((s) => {
@@ -258,12 +269,13 @@ export const NilaiHarianView: React.FC = () => {
 
     setAssessmentScores((prev) => ({
       ...prev,
-      [ass.assessmentId]: {
-        ...(prev[ass.assessmentId] || {}),
+      [quickFillAssessment.assessmentId]: {
+        ...(prev[quickFillAssessment.assessmentId] || {}),
         ...newColumnScores,
       },
     }));
     setHasUnsavedChanges(true);
+    setQuickFillAssessment(null);
   };
 
   // Add New Assessment Column
@@ -539,8 +551,8 @@ export const NilaiHarianView: React.FC = () => {
       </head>
       <body>
         <div class="title">JURNAL NILAI HARIAN PESERTA DIDIK</div>
-        <div class="sub">${settings.namaSekolah || 'SD NEGERI'} - TAHUN AJARAN ${selectedTahunAjaran} SEMESTER ${selectedSemester.toUpperCase()}</div>
-        <p><strong>Kelas:</strong> ${activeKelas.nama} | <strong>Mata Pelajaran:</strong> ${activeMapel.nama} | <strong>Standar KKM:</strong> ${kkm}</p>
+        <div class="sub">${String(settings.namaSekolah || 'SD NEGERI').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')} - TAHUN AJARAN ${String(selectedTahunAjaran).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')} SEMESTER ${String(selectedSemester.toUpperCase()).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>
+        <p><strong>Kelas:</strong> ${String(activeKelas.nama).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')} | <strong>Mata Pelajaran:</strong> ${String(activeMapel.nama).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')} | <strong>Standar KKM:</strong> ${kkm}</p>
         <table>
           <thead>
             <tr>
@@ -549,8 +561,15 @@ export const NilaiHarianView: React.FC = () => {
               <th rowspan="2">Nama Siswa</th>
     `;
 
+    const esc = (v: unknown) =>
+      String(v ?? '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;');
+
     displayedAssessments.forEach((ass) => {
-      html += `<th>${ass.tanggal}</th>`;
+      html += `<th>${esc(ass.tanggal)}</th>`;
     });
 
     html += `
@@ -561,7 +580,7 @@ export const NilaiHarianView: React.FC = () => {
     `;
 
     displayedAssessments.forEach((ass) => {
-      html += `<th>${ass.materi} (${ass.jenisPenilaian})</th>`;
+      html += `<th>${esc(ass.materi)} (${esc(ass.jenisPenilaian)})</th>`;
     });
 
     html += `</tr></thead><tbody>`;
@@ -572,8 +591,8 @@ export const NilaiHarianView: React.FC = () => {
       html += `
         <tr>
           <td class="center">${idx + 1}</td>
-          <td class="center">'${s.nomorInduk || s.nisn || '-'}</td>
-          <td class="bold">${s.namaLengkap}</td>
+          <td class="center">'${esc(s.nomorInduk || s.nisn || '-')}</td>
+          <td class="bold">${esc(s.namaLengkap)}</td>
       `;
 
       displayedAssessments.forEach((ass) => {
@@ -660,7 +679,7 @@ export const NilaiHarianView: React.FC = () => {
             id="btn-tambah-penilaian"
             type="button"
             onClick={() => {
-              setNewTanggal(new Date().toISOString().split('T')[0]);
+              setNewTanggal(getWibDateStr());
               setNewMateri('');
               setNewKeterangan('');
               setIsAddModalOpen(true);
@@ -1452,6 +1471,57 @@ export const NilaiHarianView: React.FC = () => {
                 Tutup
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL QUICK FILL KOLOM NILAI */}
+      {quickFillAssessment && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs animate-in fade-in">
+          <div className="bg-white rounded-2xl max-w-sm w-full shadow-2xl border border-slate-100 overflow-hidden">
+            <div className="px-5 py-4 bg-slate-50 border-b border-slate-200 flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Sparkles className="w-4 h-4 text-blue-700" />
+                <h3 className="text-sm font-bold text-slate-900">Isi Nilai Serentak</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setQuickFillAssessment(null)}
+                className="p-1 rounded-lg text-slate-400 hover:text-slate-600 hover:bg-slate-200/60 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <form onSubmit={applyQuickFillColumn} className="p-5 space-y-4">
+              <p className="text-xs text-slate-600">
+                Terapkan nilai serentak (0 - 100) untuk seluruh siswa pada penilaian <strong>"{quickFillAssessment.materi}"</strong>:
+              </p>
+              <input
+                type="number"
+                min={0}
+                max={100}
+                required
+                autoFocus
+                value={quickFillScore}
+                onChange={(e) => setQuickFillScore(e.target.value)}
+                className="w-full px-3.5 py-2.5 bg-slate-50 border border-slate-300 rounded-xl text-sm font-bold text-center focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-blue-600"
+              />
+              <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+                <button
+                  type="button"
+                  onClick={() => setQuickFillAssessment(null)}
+                  className="px-4 py-2 rounded-xl text-xs font-semibold text-slate-600 hover:bg-slate-100 cursor-pointer"
+                >
+                  Batal
+                </button>
+                <button
+                  type="submit"
+                  className="px-4 py-2 rounded-xl text-xs font-bold text-white bg-blue-700 hover:bg-blue-800 cursor-pointer"
+                >
+                  Terapkan Nilai
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

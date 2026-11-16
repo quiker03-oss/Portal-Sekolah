@@ -28,6 +28,7 @@ import {
 import { db } from '../../services/database';
 import { TransaksiKas, Siswa, Kelas } from '../../types';
 import { printElement, openPrintWindow } from '../../utils/exportHelper';
+import { getWibDateStr } from '../../utils/dateHelper';
 import { ConfirmModal } from '../common/ConfirmModal';
 
 type TabType = 'pembayaran' | 'buku-kas' | 'rekap' | 'pengaturan';
@@ -62,7 +63,7 @@ export const UangKasView: React.FC = () => {
   const [paySiswaId, setPaySiswaId] = useState('');
   const [payBulan, setPayBulan] = useState('');
   const [paySelectedWeeks, setPaySelectedWeeks] = useState<number[]>([1]);
-  const [payTanggal, setPayTanggal] = useState(new Date().toISOString().split('T')[0]);
+  const [payTanggal, setPayTanggal] = useState(getWibDateStr());
   const [payMetode, setPayMetode] = useState<'Tunai' | 'Transfer'>('Tunai');
   const [payCatatan, setPayCatatan] = useState('');
   const [payNominalCustom, setPayNominalCustom] = useState<number>(0);
@@ -72,7 +73,7 @@ export const UangKasView: React.FC = () => {
   const [markAllWeekTarget, setMarkAllWeekTarget] = useState<number | null>(null);
 
   // Form Transaksi Baru
-  const [tanggal, setTanggal] = useState(new Date().toISOString().split('T')[0]);
+  const [tanggal, setTanggal] = useState(getWibDateStr());
   const [jenis, setJenis] = useState<'Pemasukan' | 'Pengeluaran'>('Pengeluaran');
   const [kategori, setKategori] = useState<string>('Alat Kebersihan');
   const [keterangan, setKeterangan] = useState('');
@@ -109,7 +110,12 @@ export const UangKasView: React.FC = () => {
     setSiswaList(db.getSiswaList());
 
     if (selectedKelasId) {
-      const saved = localStorage.getItem(`kas_settings_full_${selectedKelasId}`);
+      const schoolScope = db.getActiveSchoolId() || 'sch-1';
+      const scopedFullKey = `kas_settings_full_${schoolScope}_${selectedKelasId}`;
+      const scopedNominalKey = `kas_settings_${schoolScope}_${selectedKelasId}`;
+      const saved =
+        localStorage.getItem(scopedFullKey) ||
+        localStorage.getItem(`kas_settings_full_${selectedKelasId}`);
       if (saved) {
         try {
           setSettings(JSON.parse(saved));
@@ -117,8 +123,10 @@ export const UangKasView: React.FC = () => {
           // fallback
         }
       } else {
-        // Check old key
-        const oldNominal = localStorage.getItem(`kas_settings_${selectedKelasId}`);
+        // Check legacy key
+        const oldNominal =
+          localStorage.getItem(scopedNominalKey) ||
+          localStorage.getItem(`kas_settings_${selectedKelasId}`);
         setSettings({
           nominalMingguan: oldNominal ? parseInt(oldNominal, 10) || 5000 : 5000,
           namaBendahara: 'Bendahara Kelas',
@@ -191,7 +199,7 @@ export const UangKasView: React.FC = () => {
     const sId = targetSiswaId || (filteredStudents[0]?.id ?? '');
     setPaySiswaId(sId);
     setPayBulan(selectedBulan);
-    setPayTanggal(new Date().toISOString().split('T')[0]);
+    setPayTanggal(getWibDateStr());
     setPayMetode('Tunai');
     setPayCatatan('');
     setPayNominalCustom(settings.nominalMingguan);
@@ -294,7 +302,7 @@ export const UangKasView: React.FC = () => {
     } else {
       const newKas: TransaksiKas = {
         id: `kas-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
-        tanggal: new Date().toISOString().split('T')[0],
+        tanggal: getWibDateStr(),
         jenis: 'Pemasukan',
         kategori: 'Uang Kas',
         keterangan: `Kas ${targetSiswa?.namaLengkap || 'Siswa'} - ${getBulanLabel(selectedBulan)} M${mingguKe}`,
@@ -333,7 +341,7 @@ export const UangKasView: React.FC = () => {
       if (!alreadyPaid) {
         const newKas: TransaksiKas = {
           id: `kas-${Date.now()}-${siswa.id.slice(-4)}-${Math.random().toString(36).substring(2, 7)}`,
-          tanggal: new Date().toISOString().split('T')[0],
+          tanggal: getWibDateStr(),
           jenis: 'Pemasukan',
           kategori: 'Uang Kas',
           keterangan: `Kas ${siswa.namaLengkap} - ${getBulanLabel(selectedBulan)} M${mingguKe}`,
@@ -369,7 +377,7 @@ export const UangKasView: React.FC = () => {
       id: `kas-${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
       tanggal,
       jenis,
-      kategori: jenis === 'Pemasukan' ? 'Lainnya' : 'Lainnya',
+      kategori: 'Lainnya',
       keterangan: `[${kategori}] ${keterangan.trim()}`,
       jumlah,
       kelasId: activeKelas.id,
@@ -399,11 +407,14 @@ export const UangKasView: React.FC = () => {
   const handleSaveSettings = (e: React.FormEvent) => {
     e.preventDefault();
     if (settings.nominalMingguan < 0) {
-      setSuccessMsg('Nominal kas tidak boleh kurang dari 0.');
+      setFormError('Nominal kas tidak boleh kurang dari 0.');
+      setTimeout(() => setFormError(''), 3000);
       return;
     }
-    localStorage.setItem(`kas_settings_full_${activeKelas.id}`, JSON.stringify(settings));
-    localStorage.setItem(`kas_settings_${activeKelas.id}`, settings.nominalMingguan.toString());
+    setFormError('');
+    const schoolScope = db.getActiveSchoolId() || 'sch-1';
+    localStorage.setItem(`kas_settings_full_${schoolScope}_${activeKelas.id}`, JSON.stringify(settings));
+    localStorage.setItem(`kas_settings_${schoolScope}_${activeKelas.id}`, settings.nominalMingguan.toString());
     setSuccessMsg(`Pengaturan uang kas ${activeKelas.nama} berhasil disimpan!`);
     setTimeout(() => setSuccessMsg(''), 3000);
   };
@@ -974,8 +985,8 @@ export const UangKasView: React.FC = () => {
                     const weeks = [1, 2, 3, 4, 5].map((m) =>
                       classKas.some(
                         (t) =>
-                          t.siswaId === siswa.id &&
-                          t.bulan === selectedBulan &&
+                          (t.siswaId === siswa.id || t.siswaId === siswa.qrId || t.siswaId === siswa.nomorInduk) &&
+                          (t.bulan === selectedBulan || (!t.bulan && t.tanggal?.startsWith(selectedBulan))) &&
                           t.mingguKe === m &&
                           t.kategori === 'Uang Kas'
                       )
@@ -1045,6 +1056,12 @@ export const UangKasView: React.FC = () => {
           </div>
 
           <form onSubmit={handleSaveSettings} className="space-y-4">
+            {formError && (
+              <div className="p-3 bg-rose-50 border border-rose-200 text-rose-800 text-xs rounded-xl flex items-center gap-2">
+                <AlertCircle className="w-4 h-4 text-rose-600 flex-shrink-0" />
+                <span>{formError}</span>
+              </div>
+            )}
             <div className="space-y-1">
               <label className="text-xs font-bold text-slate-700">
                 Nominal Iuran Kas per Minggu (Rp)
@@ -1304,6 +1321,7 @@ export const UangKasView: React.FC = () => {
                 <img
                   src={sekolah.logo || '/logo.svg'}
                   alt={sekolah.nama}
+                  onError={(e) => { (e.currentTarget as HTMLImageElement).src = '/logo.svg'; }}
                   className="w-16 h-16 object-contain flex-shrink-0 mx-auto sm:mx-0"
                 />
                 <div className="flex-1 text-center font-sans">
@@ -1336,7 +1354,7 @@ export const UangKasView: React.FC = () => {
               </div>
 
               {/* Ringkasan Kas Box */}
-              <div className="grid grid-cols-4 gap-2 font-sans text-xs border border-slate-300 rounded-lg p-3 bg-slate-50">
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 font-sans text-xs border border-slate-300 rounded-lg p-3 bg-slate-50">
                 <div>
                   <span className="text-slate-500 text-[10px] block">Kas Siswa:</span>
                   <span className="font-bold text-slate-900">{formatRupiah(totalPemasukanSiswa)}</span>
@@ -1376,8 +1394,8 @@ export const UangKasView: React.FC = () => {
                       const weeks = [1, 2, 3, 4, 5].map((m) =>
                         classKas.some(
                           (t) =>
-                            t.siswaId === s.id &&
-                            t.bulan === selectedBulan &&
+                            (t.siswaId === s.id || t.siswaId === s.qrId || t.siswaId === s.nomorInduk) &&
+                            (t.bulan === selectedBulan || (!t.bulan && t.tanggal?.startsWith(selectedBulan))) &&
                             t.mingguKe === m &&
                             t.kategori === 'Uang Kas'
                         )

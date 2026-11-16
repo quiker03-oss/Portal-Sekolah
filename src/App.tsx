@@ -5,51 +5,28 @@ import { PortalLogin } from './components/PortalLogin';
 import { AdminLayout } from './components/admin/AdminLayout';
 import { SuperAdminLogin } from './components/superadmin/SuperAdminLogin';
 import { SuperAdminDashboard } from './components/superadmin/SuperAdminDashboard';
-import { ErrorBoundary } from './components/common/ErrorBoundary';
 import { UjianSiswaView } from './components/ujian/UjianSiswaView';
+import { ErrorBoundary } from './components/common/ErrorBoundary';
+import { ToastHost } from './components/common/ToastHost';
 import { ShieldCheck, ArrowLeft } from 'lucide-react';
 
-interface ExamUrlInfo {
-  examId: string | null;
-  schoolId: string | null;
-}
+const isExamUrl = () => {
+  if (typeof window === 'undefined') return false;
+  const hash = (window.location.hash || '').toLowerCase();
+  const path = (window.location.pathname || '').toLowerCase();
+  const search = (window.location.search || '').toLowerCase();
 
-const getExamInfoFromUrl = (): ExamUrlInfo => {
-  if (typeof window === 'undefined') return { examId: null, schoolId: null };
-  const hash = window.location.hash || '';
-  const search = window.location.search || '';
-
-  let examId: string | null = null;
-  let schoolId: string | null = null;
-
-  // 1. Search Query Parameters
-  const searchParams = new URLSearchParams(search);
-  if (searchParams.get('ujian')) examId = searchParams.get('ujian');
-  if (searchParams.get('cbt')) examId = searchParams.get('cbt');
-  if (searchParams.get('kuis')) examId = searchParams.get('kuis');
-  if (searchParams.get('quiz')) examId = searchParams.get('quiz');
-  if (searchParams.get('game')) examId = searchParams.get('game');
-  if (searchParams.get('school')) schoolId = searchParams.get('school');
-  if (searchParams.get('schoolId')) schoolId = searchParams.get('schoolId');
-
-  // 2. Hash routing: #ujian/cbt-12345 or #kuis/kuis-12345?school=sch-1
-  if (hash) {
-    const rawHash = hash.replace(/^#/, '');
-    const [pathPart, queryPart] = rawHash.split('?');
-
-    const hashMatch = pathPart.match(/^(?:ujian|cbt|ujian-online|kuis|quiz|game)\/([^?&]+)$/i);
-    if (hashMatch && hashMatch[1]) {
-      examId = decodeURIComponent(hashMatch[1]);
-    }
-
-    if (queryPart) {
-      const hashParams = new URLSearchParams(queryPart);
-      if (!schoolId && hashParams.get('school')) schoolId = hashParams.get('school');
-      if (!schoolId && hashParams.get('schoolId')) schoolId = hashParams.get('schoolId');
-    }
-  }
-
-  return { examId, schoolId };
+  return (
+    hash === '#ujian' ||
+    hash === '#cbt' ||
+    hash.startsWith('#ujian') ||
+    hash.startsWith('#exam') ||
+    path === '/ujian' ||
+    path.startsWith('/ujian') ||
+    search.includes('session=') ||
+    search.includes('ujian=') ||
+    search.includes('passcode=')
+  );
 };
 
 const isSuperAdminUrl = () => {
@@ -74,7 +51,9 @@ const isSuperAdminUrl = () => {
 
 export default function App() {
   const [currentUser, setCurrentUser] = useState<User | null>(db.getCurrentUser());
-  const [examRoute, setExamRoute] = useState<ExamUrlInfo>(() => getExamInfoFromUrl());
+
+  // Exam view state
+  const [isExamRoute, setIsExamRoute] = useState<boolean>(() => isExamUrl());
 
   // Super Admin view & auth state
   const [isSuperAdminRoute, setIsSuperAdminRoute] = useState<boolean>(() => isSuperAdminUrl());
@@ -97,8 +76,11 @@ export default function App() {
         setIsSuperAdminRoute(true);
       }
       setIsSuperAdminAuth(hasSession);
-      const info = getExamInfoFromUrl();
-      setExamRoute(info);
+
+      const isEx = isExamUrl();
+      if (isEx) {
+        setIsExamRoute(true);
+      }
     };
 
     window.addEventListener('hashchange', handleLocationOrAuthChange);
@@ -156,19 +138,18 @@ export default function App() {
     window.location.hash = '#superadmin';
   };
 
-  // 0. Student Exam Portal View (When accessing via exam link or QR code)
-  if (examRoute.examId) {
+  // 1. Exam Student View (Direct route via URL hash, QR code, or button)
+  if (isExamRoute) {
     return (
-      <ErrorBoundary fallbackTitle="Kendala pada Halaman Ujian Siswa">
+      <ErrorBoundary fallbackTitle="Kendala pada Halaman Ujian Online">
+        <ToastHost />
         <UjianSiswaView
-          ujianId={examRoute.examId}
-          schoolId={examRoute.schoolId || undefined}
           onExit={() => {
-            setExamRoute({ examId: null, schoolId: null });
+            setIsExamRoute(false);
             if (
               window.location.hash.startsWith('#ujian') ||
-              window.location.hash.startsWith('#cbt') ||
-              window.location.search.includes('ujian=')
+              window.location.hash.startsWith('#exam') ||
+              window.location.hash.startsWith('#cbt')
             ) {
               window.history.replaceState(null, '', window.location.pathname);
             }
@@ -178,10 +159,11 @@ export default function App() {
     );
   }
 
-  // 1. Super Admin View
+  // 2. Super Admin View
   if ((isSuperAdminAuth && !isSuperAdminPreviewSchool) || (isSuperAdminRoute && isSuperAdminAuth)) {
     return (
       <ErrorBoundary fallbackTitle="Kendala pada Dasbor Super Admin">
+        <ToastHost />
         <SuperAdminDashboard
           onLogout={handleSuperAdminLogout}
           onViewSchoolWebsite={handleSuperAdminExit}
@@ -190,10 +172,11 @@ export default function App() {
     );
   }
 
-  // 2. Super Admin Login Page (Direct route when not logged in)
+  // 3. Super Admin Login Page (Direct route when not logged in)
   if (isSuperAdminRoute && !isSuperAdminAuth) {
     return (
       <ErrorBoundary fallbackTitle="Kendala pada Halaman Login Super Admin">
+        <ToastHost />
         <SuperAdminLogin
           onLoginSuccess={handleSuperAdminLoginSuccess}
           onExit={handleSuperAdminExit}
@@ -206,6 +189,7 @@ export default function App() {
   if (currentUser) {
     return (
       <ErrorBoundary fallbackTitle="Kendala pada Panel Sekolah">
+        <ToastHost />
         <div className="min-h-screen bg-slate-50 text-slate-900 font-sans selection:bg-blue-600 selection:text-white relative">
           {isSuperAdminAuth && isSuperAdminPreviewSchool && (
             <div className="bg-indigo-900 text-white px-4 py-2 text-xs flex items-center justify-between shadow-md sticky top-0 z-50">
@@ -234,6 +218,7 @@ export default function App() {
   // 4. Portal Sekolah Login View (Main unauthenticated screen)
   return (
     <ErrorBoundary fallbackTitle="Kendala pada Portal Sekolah">
+      <ToastHost />
       <div className="relative">
         {isSuperAdminAuth && isSuperAdminPreviewSchool && (
           <div className="bg-indigo-900 text-white px-4 py-2 text-xs flex items-center justify-between shadow-md sticky top-0 z-50">
@@ -256,6 +241,10 @@ export default function App() {
             setIsSuperAdminRoute(true);
             setIsSuperAdminPreviewSchool(false);
             window.location.hash = '#superadmin';
+          }}
+          onNavigateToUjian={() => {
+            setIsExamRoute(true);
+            window.location.hash = '#ujian';
           }}
         />
       </div>

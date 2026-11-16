@@ -25,25 +25,21 @@ service cloud.firestore {
         'school_accounts',
         'superadmin_user',
         'superadmin_logs',
-        'ujian_online',
-        'jawaban_ujian',
-        'log_ujian',
-        'ai_soal',
         'ai_modul',
         'ai_materi',
-        'bel_jadwal'
+        'bel_jadwal',
+        'exams',
+        'exam_sessions',
+        'exam_images'
       ];
     }
 
-    // Allow collection group queries and direct lookups for online exams and submissions
-    match /{path=**}/ujian_online/{docId} {
+    // Direct access for student exam taking & session pairing
+    match /{path=**}/exams/{docId} {
       allow read: if true;
-      allow write: if true;
     }
-    match /{path=**}/jawaban_ujian/{docId} {
-      allow read: if true;
-      allow write: if true;
+    match /{path=**}/exam_sessions/{docId} {
+      allow read, write: if true;
     }
   }
 }
-

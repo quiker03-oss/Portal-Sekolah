@@ -11,23 +11,35 @@ export function exportToExcel(data: Record<string, unknown>[], filename: string,
   }
 }
 
+function escapeHtmlText(text: string): string {
+  return String(text || '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
 export function exportToCsv(data: Record<string, unknown>[], filename: string) {
   try {
     const worksheet = XLSX.utils.json_to_sheet(data);
     const csvOutput = XLSX.utils.sheet_to_csv(worksheet);
     const blob = new Blob([csvOutput], { type: 'text/csv;charset=utf-8;' });
+    const blobUrl = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
+    link.href = blobUrl;
     link.setAttribute('download', `${filename}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
   } catch (err) {
     console.error('Export CSV error:', err);
   }
 }
 
 export function buildPrintHtml(innerHTML: string, customTitle = 'Cetak Dokumen') {
+  const safeTitle = escapeHtmlText(customTitle);
   const styles = Array.from(document.querySelectorAll('style, link[rel="stylesheet"]'))
     .map((s) => s.outerHTML)
     .join('\n');
@@ -37,7 +49,7 @@ export function buildPrintHtml(innerHTML: string, customTitle = 'Cetak Dokumen')
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>${customTitle}</title>
+    <title>${safeTitle}</title>
     ${styles}
     <style>
       @page {
@@ -98,7 +110,7 @@ export function buildPrintHtml(innerHTML: string, customTitle = 'Cetak Dokumen')
     <div class="no-print" style="position: sticky; top: 0; z-index: 9999; background: #0f172a; color: white; padding: 12px 16px; display: flex; align-items: center; justify-content: space-between; font-family: sans-serif; font-size: 13px; box-shadow: 0 4px 6px -1px rgba(0,0,0,0.1);">
       <div style="display: flex; align-items: center; gap: 8px;">
         <span style="background: #2563eb; color: white; padding: 3px 8px; border-radius: 6px; font-weight: bold; font-size: 11px;">DOKUMEN RESMI</span>
-        <span style="font-weight: 600;">${customTitle}</span>
+        <span style="font-weight: 600;">${safeTitle}</span>
       </div>
       <div style="display: flex; gap: 8px;">
         <button onclick="window.print()" style="background: #2563eb; color: white; border: none; padding: 8px 16px; border-radius: 8px; font-weight: bold; cursor: pointer; display: flex; align-items: center; gap: 6px; font-size: 12px;">
@@ -116,7 +128,7 @@ export function buildPrintHtml(innerHTML: string, customTitle = 'Cetak Dokumen')
 </html>`;
 }
 
-export function openPrintWindow(elementId: string, customTitle = 'Cetak Dokumen') {
+export function openPrintWindow(elementId: string, customTitle = 'Cetak Dokumen', allowFallback = true) {
   const elem = document.getElementById(elementId);
   if (!elem) {
     window.print();
@@ -127,21 +139,29 @@ export function openPrintWindow(elementId: string, customTitle = 'Cetak Dokumen'
   const blob = new Blob([fullHtml], { type: 'text/html;charset=utf-8' });
   const blobUrl = URL.createObjectURL(blob);
 
-  // Attempt to open in a new tab or window
-  const newWin = window.open(blobUrl, '_blank');
-  if (!newWin || newWin.closed || typeof newWin.closed === 'undefined') {
-    // If popup was blocked by browser, trigger download or link navigation
-    const link = document.createElement('a');
-    link.href = blobUrl;
-    link.target = '_blank';
-    link.download = `${customTitle.replace(/[^a-zA-Z0-9_-]/g, '_')}.html`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
+  try {
+    const newWin = window.open(blobUrl, '_blank');
+    if (!newWin || newWin.closed || typeof newWin.closed === 'undefined') {
+      URL.revokeObjectURL(blobUrl);
+      if (allowFallback) {
+        printElement(elementId, customTitle, false);
+      } else {
+        window.print();
+      }
+      return;
+    }
+    setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+  } catch {
+    URL.revokeObjectURL(blobUrl);
+    if (allowFallback) {
+      printElement(elementId, customTitle, false);
+    } else {
+      window.print();
+    }
   }
 }
 
-export function printElement(elementId: string, customTitle = 'Cetak Dokumen') {
+export function printElement(elementId: string, customTitle = 'Cetak Dokumen', allowFallback = true) {
   const elem = document.getElementById(elementId);
   if (!elem) {
     window.print();
@@ -178,8 +198,12 @@ export function printElement(elementId: string, customTitle = 'Cetak Dokumen') {
           printIframe?.contentWindow?.focus();
           printIframe?.contentWindow?.print();
         } catch (iframeErr) {
-          console.warn('Iframe print error, falling back to openPrintWindow:', iframeErr);
-          openPrintWindow(elementId, customTitle);
+          console.warn('Iframe print error, falling back:', iframeErr);
+          if (allowFallback) {
+            openPrintWindow(elementId, customTitle, false);
+          } else {
+            window.print();
+          }
         }
       }, 350);
       return;
@@ -188,6 +212,9 @@ export function printElement(elementId: string, customTitle = 'Cetak Dokumen') {
     console.warn('Error creating print iframe, falling back:', err);
   }
 
-  // Fallback to openPrintWindow
-  openPrintWindow(elementId, customTitle);
+  if (allowFallback) {
+    openPrintWindow(elementId, customTitle, false);
+  } else {
+    window.print();
+  }
 }

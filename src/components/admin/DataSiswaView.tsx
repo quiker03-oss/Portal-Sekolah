@@ -2,8 +2,10 @@ import React, { useState, useEffect, useMemo } from 'react';
 import { db } from '../../services/database';
 import { Siswa, Kelas } from '../../types';
 import { exportToExcel, exportToCsv } from '../../utils/exportHelper';
+import { getWibDateStr } from '../../utils/dateHelper';
 import { ConfirmModal } from '../common/ConfirmModal';
 import { compressImage } from '../../utils/imageCompressor';
+import { toast } from '../../utils/toast';
 import {
   Plus,
   Search,
@@ -216,7 +218,7 @@ export const DataSiswaView: React.FC<DataSiswaViewProps> = ({
         namaOrangTua,
         nomorHp,
         foto,
-        createdAt: new Date().toISOString().split('T')[0],
+        createdAt: getWibDateStr(),
       };
       db.saveSiswa(newSiswa);
       setToastMsg({
@@ -264,7 +266,7 @@ export const DataSiswaView: React.FC<DataSiswaViewProps> = ({
       Alamat: s.alamat,
       'Nomor Telepon / WA': s.nomorHp || '-',
     }));
-    exportToExcel(data, `Data_Siswa_Sekolah_${new Date().toISOString().split('T')[0]}`);
+    exportToExcel(data, `Data_Siswa_Sekolah_${getWibDateStr()}`);
   };
 
   const handleExportCsv = () => {
@@ -282,7 +284,7 @@ export const DataSiswaView: React.FC<DataSiswaViewProps> = ({
       Alamat: s.alamat,
       'Nomor Telepon / WA': s.nomorHp || '-',
     }));
-    exportToCsv(data, `Data_Siswa_Sekolah_${new Date().toISOString().split('T')[0]}`);
+    exportToCsv(data, `Data_Siswa_Sekolah_${getWibDateStr()}`);
   };
 
   return (
@@ -434,7 +436,14 @@ export const DataSiswaView: React.FC<DataSiswaViewProps> = ({
                     <div className="flex items-center gap-2.5">
                       <div className="w-8 h-8 rounded-full overflow-hidden bg-slate-100 flex-shrink-0 border border-slate-200">
                         {siswa.foto ? (
-                          <img src={siswa.foto} alt={siswa.namaLengkap} className="w-full h-full object-cover" />
+                          <img
+                            src={siswa.foto}
+                            alt={siswa.namaLengkap}
+                            className="w-full h-full object-cover"
+                            onError={(e) => {
+                              e.currentTarget.style.display = 'none';
+                            }}
+                          />
                         ) : (
                           <div className="w-full h-full flex items-center justify-center text-slate-500 bg-blue-50 text-[11px] font-bold">
                             {siswa.namaLengkap.charAt(0)}
@@ -745,10 +754,13 @@ export const DataSiswaView: React.FC<DataSiswaViewProps> = ({
                 <div className="flex gap-3 items-center">
                   <div className="w-14 h-14 rounded-2xl overflow-hidden bg-slate-100 flex-shrink-0 border-2 border-blue-600 shadow-xs relative">
                     {foto ? (
-                      <img 
-                        src={foto} 
-                        alt="Preview Siswa" 
+                      <img
+                        src={foto}
+                        alt="Preview Siswa"
                         className="w-full h-full object-cover"
+                        onError={(e) => {
+                          e.currentTarget.style.display = 'none';
+                        }}
                       />
                     ) : (
                       <div className="w-full h-full flex items-center justify-center text-slate-400">
@@ -778,7 +790,7 @@ export const DataSiswaView: React.FC<DataSiswaViewProps> = ({
                               }
                             } catch (err) {
                               console.error('Foto siswa compression error:', err);
-                              alert('Gagal memproses foto.');
+                              toast.error('Gagal memproses foto.');
                             } finally {
                               setIsUploadingFoto(false);
                               e.target.value = '';

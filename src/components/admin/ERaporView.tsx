@@ -15,6 +15,7 @@ import {
   Layers,
   Sparkles,
   ExternalLink,
+  X,
 } from 'lucide-react';
 
 export const ERaporView: React.FC = () => {
@@ -181,7 +182,7 @@ export const ERaporView: React.FC = () => {
           </p>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2">
           <button
             onClick={handleAutoGenerateGrades}
             className="px-3.5 py-2 rounded-xl bg-blue-50 hover:bg-blue-100 text-blue-700 text-xs font-semibold flex items-center gap-1.5 transition-colors border border-blue-200 cursor-pointer"
@@ -235,11 +236,20 @@ export const ERaporView: React.FC = () => {
                 onChange={(e) => setSelectedKelas(e.target.value)}
                 className="py-1.5 px-3 bg-slate-50 border border-slate-200 rounded-xl text-xs font-semibold text-slate-800 focus:bg-white"
               >
-                {kelasList.map((k) => (
-                  <option key={k.id} value={k.nama}>
-                    {k.nama} ({db.getSiswaList().filter((s) => s.kelas === k.nama).length} Siswa)
-                  </option>
-                ))}
+                {kelasList.map((k) => {
+                  const kNorm = k.nama.toLowerCase().replace(/[^a-z0-9]/g, '');
+                  const count = db.getSiswaList().filter((s) => {
+                    if (!s.kelas) return false;
+                    if (s.kelas === k.nama || s.kelas === k.id) return true;
+                    const sNorm = s.kelas.toLowerCase().replace(/[^a-z0-9]/g, '');
+                    return sNorm === kNorm || sNorm === `kelas${kNorm}` || `kelas${sNorm}` === kNorm;
+                  }).length;
+                  return (
+                    <option key={k.id} value={k.nama}>
+                      {k.nama} ({count} Siswa)
+                    </option>
+                  );
+                })}
               </select>
             )}
           </div>
@@ -407,6 +417,14 @@ export const ERaporView: React.FC = () => {
                   {mapelList.find((m) => m.id === editingMapelId)?.nama} - {selectedSiswa?.namaLengkap}
                 </p>
               </div>
+              <button
+                type="button"
+                onClick={() => setIsEditNilaiOpen(false)}
+                className="p-1.5 rounded-lg text-blue-200 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+                aria-label="Tutup modal nilai"
+              >
+                <X className="w-5 h-5" />
+              </button>
             </div>
 
             <form onSubmit={handleSaveNilai} className="p-6 space-y-4">
@@ -527,8 +545,9 @@ export const ERaporView: React.FC = () => {
               }}
             >
               <img
-                src={settings.logoUrl}
+                src={settings.logoUrl || '/logo.svg'}
                 alt="Logo Sekolah"
+                onError={(e) => { (e.currentTarget as HTMLImageElement).src = '/logo.svg'; }}
                 style={{ width: '70px', height: '70px', objectFit: 'contain', marginRight: '20px' }}
               />
               <div style={{ textAlign: 'center', flex: 1 }}>

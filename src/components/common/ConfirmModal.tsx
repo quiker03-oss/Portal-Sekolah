@@ -44,10 +44,10 @@ export const ConfirmModal: React.FC<ConfirmModalProps> = ({
         <div className="flex items-start gap-3">
           <div
             className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${
-              isDestructive ? 'bg-rose-50 text-rose-600' : 'bg-amber-50 text-amber-600'
+              destructive ? 'bg-rose-50 text-rose-600' : 'bg-amber-50 text-amber-600'
             }`}
           >
-            {isDestructive ? <Trash2 className="w-5 h-5" /> : <AlertTriangle className="w-5 h-5" />}
+            {destructive ? <Trash2 className="w-5 h-5" /> : <AlertTriangle className="w-5 h-5" />}
           </div>
           <div className="flex-1 min-w-0">
             <h3 className="text-sm font-bold text-slate-900 leading-snug">{title}</h3>

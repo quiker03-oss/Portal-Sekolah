@@ -14,11 +14,11 @@ export default function handler(req: any, res: any) {
   return res.status(200).json({
     status: "ok",
     app: "ISTAFA Portal Sekolah",
+    aiAvailable: diag.exists,
+    platform: process.env.VERCEL ? "vercel-serverless" : "local-node",
+    timestamp: new Date().toISOString(),
     diagnostics: {
       aiAvailable: diag.exists,
-      apiKeySource: diag.source,
-      apiKeyLength: diag.length,
-      apiKeyPreview: diag.maskedPreview,
       platform: process.env.VERCEL ? "vercel-serverless" : "local-node",
       nodeVersion: process.version,
       timestamp: new Date().toISOString(),

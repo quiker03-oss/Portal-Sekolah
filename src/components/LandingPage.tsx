@@ -105,8 +105,11 @@ export const LandingPage: React.FC<LandingPageProps> = ({
         {/* Background photo with overlay */}
         <div className="absolute inset-0 z-0">
           <img
-            src={sekolah.fotoSekolah}
+            src={sekolah.fotoSekolah || '/logo.svg'}
             alt={sekolah.nama}
+            onError={(e) => {
+              (e.currentTarget as HTMLImageElement).style.display = 'none';
+            }}
             className="w-full h-full object-cover opacity-20 filter brightness-75 scale-105"
             referrerPolicy="no-referrer"
           />
@@ -123,8 +126,15 @@ export const LandingPage: React.FC<LandingPageProps> = ({
           <div className="flex flex-col items-center">
             <div className="w-24 h-24 sm:w-28 sm:h-28 bg-white/95 rounded-2xl p-2.5 shadow-2xl border-2 border-amber-400 mb-4 transform hover:scale-105 transition-transform">
               <img
-                src={sekolah.logo}
+                src={sekolah.logo || '/logo.svg'}
                 alt={sekolah.nama}
+                onError={(e) => {
+                  const img = e.currentTarget as HTMLImageElement;
+                  if (!img.dataset.fallbackApplied) {
+                    img.dataset.fallbackApplied = '1';
+                    img.src = '/logo.svg';
+                  }
+                }}
                 className="w-full h-full object-contain"
                 referrerPolicy="no-referrer"
               />
@@ -238,6 +248,14 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                   <img
                     src={sekolah.fotoKepalaSekolah || "https://images.unsplash.com/photo-1544717305-2782549b5136?auto=format&fit=crop&w=400&q=80"}
                     alt={sekolah.namaKepalaSekolah}
+                    onError={(e) => {
+                      const img = e.currentTarget as HTMLImageElement;
+                      if (!img.dataset.fallbackApplied) {
+                        img.dataset.fallbackApplied = '1';
+                        img.src = '/logo.svg';
+                        img.className = 'w-full h-full object-contain p-6 bg-slate-50';
+                      }
+                    }}
                     className="w-full h-full object-cover"
                     referrerPolicy="no-referrer"
                   />
@@ -390,6 +408,14 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                     'https://images.unsplash.com/photo-1544005313-94ddf0286df2?auto=format&fit=crop&w=400&q=80'
                   }
                   alt={guru.nama}
+                  onError={(e) => {
+                    const img = e.currentTarget as HTMLImageElement;
+                    if (!img.dataset.fallbackApplied) {
+                      img.dataset.fallbackApplied = '1';
+                      img.src = '/logo.svg';
+                      img.className = 'w-full h-full object-contain p-6 bg-slate-50';
+                    }
+                  }}
                   className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                   referrerPolicy="no-referrer"
                 />
@@ -427,7 +453,7 @@ export const LandingPage: React.FC<LandingPageProps> = ({
               </h2>
             </div>
             <p className="text-sm text-slate-500 max-w-md">
-              Pemberitahuan resmi terkait kegiatan belajar mengajar, agenda ujian, dan PPDB di {sekolah.nama}.
+              Pemberitahuan resmi terkait kegiatan belajar mengajar, agenda akademik, dan PPDB di {sekolah.nama}.
             </p>
           </div>
 
@@ -442,6 +468,14 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                     <img
                       src={item.gambar}
                       alt={item.judul}
+                      onError={(e) => {
+                        const img = e.currentTarget as HTMLImageElement;
+                        if (!img.dataset.fallbackApplied) {
+                          img.dataset.fallbackApplied = '1';
+                          img.src = '/logo.svg';
+                          img.className = 'w-full h-full object-contain p-6 bg-slate-50';
+                        }
+                      }}
                       className="w-full h-full object-cover hover:scale-105 transition-transform duration-300"
                       referrerPolicy="no-referrer"
                     />
@@ -509,6 +543,14 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                     'https://images.unsplash.com/photo-1577896851231-70ef18881754?auto=format&fit=crop&w=800&q=80'
                   }
                   alt={berita.judul}
+                  onError={(e) => {
+                    const img = e.currentTarget as HTMLImageElement;
+                    if (!img.dataset.fallbackApplied) {
+                      img.dataset.fallbackApplied = '1';
+                      img.src = '/logo.svg';
+                      img.className = 'w-full h-full object-contain p-6 bg-slate-50';
+                    }
+                  }}
                   className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
                   referrerPolicy="no-referrer"
                 />
@@ -568,6 +610,14 @@ export const LandingPage: React.FC<LandingPageProps> = ({
                 <img
                   src={item.gambar}
                   alt={item.judul}
+                  onError={(e) => {
+                    const img = e.currentTarget as HTMLImageElement;
+                    if (!img.dataset.fallbackApplied) {
+                      img.dataset.fallbackApplied = '1';
+                      img.src = '/logo.svg';
+                      img.className = 'w-full h-full object-contain p-8 bg-slate-800';
+                    }
+                  }}
                   className="w-full h-full object-cover group-hover:scale-110 transition-transform duration-500"
                   referrerPolicy="no-referrer"
                 />
@@ -727,8 +777,16 @@ export const LandingPage: React.FC<LandingPageProps> = ({
           <div className="bg-white rounded-2xl max-w-2xl w-full overflow-hidden shadow-2xl border border-slate-200 flex flex-col max-h-[90vh]">
             <div className="relative h-64 overflow-hidden bg-slate-100 flex-shrink-0">
               <img
-                src={selectedBerita.gambar}
+                src={selectedBerita.gambar || '/logo.svg'}
                 alt={selectedBerita.judul}
+                onError={(e) => {
+                  const img = e.currentTarget as HTMLImageElement;
+                  if (!img.dataset.fallbackApplied) {
+                    img.dataset.fallbackApplied = '1';
+                    img.src = '/logo.svg';
+                    img.className = 'w-full h-full object-contain p-6 bg-slate-50';
+                  }
+                }}
                 className="w-full h-full object-cover"
               />
               <button

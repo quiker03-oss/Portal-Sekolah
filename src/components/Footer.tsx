@@ -21,10 +21,15 @@ export const Footer: React.FC = () => {
             <div className="flex items-center gap-3">
               <div className="w-12 h-12 bg-white rounded-xl p-1 shadow-sm flex-shrink-0 flex items-center justify-center">
                 <img
-                  src={sekolah.logo}
+                  src={sekolah.logo || '/logo.svg'}
                   alt={sekolah.nama}
                   className="w-full h-full object-contain"
                   referrerPolicy="no-referrer"
+                  onError={(e) => {
+                    if (!e.currentTarget.src.endsWith('/logo.svg')) {
+                      e.currentTarget.src = '/logo.svg';
+                    }
+                  }}
                 />
               </div>
               <div>

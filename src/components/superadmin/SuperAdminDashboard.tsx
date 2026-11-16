@@ -90,10 +90,14 @@ export const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({
     setTimeout(() => setNotification(null), 4000);
   };
 
-  const handleCopyUsername = (id: string, text: string) => {
-    navigator.clipboard.writeText(text);
-    setCopiedUsernameId(id);
-    setTimeout(() => setCopiedUsernameId(null), 2000);
+  const handleCopyUsername = async (id: string, text: string) => {
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopiedUsernameId(id);
+      setTimeout(() => setCopiedUsernameId(null), 2000);
+    } catch {
+      showToast('error', 'Gagal menyalin username ke clipboard.');
+    }
   };
 
   const handleToggleStatus = (school: SchoolAccount) => {
@@ -319,11 +323,11 @@ export const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({
         </div>
 
         {/* Tab Selection */}
-        <div className="flex border-b border-slate-800 space-x-1 sm:space-x-2">
+        <div className="flex border-b border-slate-800 space-x-1 sm:space-x-2 overflow-x-auto">
           <button
             id="tab-manage-schools"
             onClick={() => setActiveTab('schools')}
-            className={`px-4 py-2.5 text-xs sm:text-sm font-semibold rounded-t-xl transition-all border-b-2 flex items-center gap-2 ${
+            className={`px-4 py-2.5 text-xs sm:text-sm font-semibold rounded-t-xl transition-all border-b-2 flex items-center gap-2 whitespace-nowrap ${
               activeTab === 'schools'
                 ? 'border-indigo-500 text-indigo-400 bg-slate-900/90'
                 : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-900/40'
@@ -339,7 +343,7 @@ export const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({
           <button
             id="tab-sa-profile"
             onClick={() => setActiveTab('profile')}
-            className={`px-4 py-2.5 text-xs sm:text-sm font-semibold rounded-t-xl transition-all border-b-2 flex items-center gap-2 ${
+            className={`px-4 py-2.5 text-xs sm:text-sm font-semibold rounded-t-xl transition-all border-b-2 flex items-center gap-2 whitespace-nowrap ${
               activeTab === 'profile'
                 ? 'border-indigo-500 text-indigo-400 bg-slate-900/90'
                 : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-900/40'
@@ -352,7 +356,7 @@ export const SuperAdminDashboard: React.FC<SuperAdminDashboardProps> = ({
           <button
             id="tab-sa-logs"
             onClick={() => setActiveTab('logs')}
-            className={`px-4 py-2.5 text-xs sm:text-sm font-semibold rounded-t-xl transition-all border-b-2 flex items-center gap-2 ${
+            className={`px-4 py-2.5 text-xs sm:text-sm font-semibold rounded-t-xl transition-all border-b-2 flex items-center gap-2 whitespace-nowrap ${
               activeTab === 'logs'
                 ? 'border-indigo-500 text-indigo-400 bg-slate-900/90'
                 : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-900/40'

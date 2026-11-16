@@ -43,11 +43,15 @@ export const ResetPasswordModal: React.FC<ResetPasswordModalProps> = ({
     setCopied(false);
   };
 
-  const handleCopy = () => {
+  const handleCopy = async () => {
     if (!newPassword) return;
-    navigator.clipboard.writeText(newPassword);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    try {
+      await navigator.clipboard.writeText(newPassword);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setError('Gagal menyalin kata sandi ke clipboard.');
+    }
   };
 
   const handleSubmit = (e: React.FormEvent) => {

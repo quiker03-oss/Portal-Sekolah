@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { db } from '../../services/database';
+import { getWibDateStr } from '../../utils/dateHelper';
 import { User, Siswa, Guru, AbsensiSiswa, AbsensiGuru, Pengumuman } from '../../types';
 import {
   GraduationCap,
@@ -14,7 +15,7 @@ import {
   UserCheck,
   TrendingUp,
   Sparkles,
-  FileQuestion,
+  Wallet,
 } from 'lucide-react';
 
 interface DashboardViewProps {
@@ -29,7 +30,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ currentUser, onNav
   const [absensiSiswa, setAbsensiSiswa] = useState<AbsensiSiswa[]>(db.getAbsensiSiswaList());
   const [absensiGuru, setAbsensiGuru] = useState<AbsensiGuru[]>(db.getAbsensiGuruList());
 
-  const todayStr = new Date().toISOString().split('T')[0];
+  const todayStr = getWibDateStr();
 
   useEffect(() => {
     const handleUpdate = () => {
@@ -120,10 +121,17 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ currentUser, onNav
           <div className="flex flex-wrap gap-2.5">
             <button
               onClick={() => onNavigate('ujian-online')}
+              className="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white rounded-xl text-xs font-bold shadow-xs flex items-center gap-2 transition-colors cursor-pointer"
+            >
+              <FileSpreadsheet className="w-4 h-4" />
+              Ujian Online (CBT)
+            </button>
+            <button
+              onClick={() => onNavigate('uang-kas')}
               className="px-4 py-2 bg-blue-600 hover:bg-blue-500 text-white rounded-xl text-xs font-bold shadow-xs flex items-center gap-2 transition-colors cursor-pointer"
             >
-              <FileQuestion className="w-4 h-4 text-white" />
-              Ujian Online (CBT)
+              <Wallet className="w-4 h-4 text-white" />
+              Uang Kas Kelas
             </button>
             <button
               onClick={() => onNavigate('nilai-harian')}

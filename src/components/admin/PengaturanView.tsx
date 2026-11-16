@@ -2,6 +2,7 @@ import React, { useState } from 'react';
 import { db } from '../../services/database';
 import { Settings } from '../../types';
 import { compressImage } from '../../utils/imageCompressor';
+import { getWibDateStr } from '../../utils/dateHelper';
 import { ConfirmModal } from '../common/ConfirmModal';
 import {
   Settings as SettingsIcon,
@@ -84,7 +85,7 @@ export const PengaturanView: React.FC = () => {
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.download = `BACKUP_DATABASE_Sekolah_${new Date().toISOString().split('T')[0]}.json`;
+    link.download = `BACKUP_DATABASE_Sekolah_${getWibDateStr()}.json`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
@@ -173,7 +174,16 @@ export const PengaturanView: React.FC = () => {
           <div className="grid grid-cols-1 sm:grid-cols-12 gap-6 items-center">
             <div className="sm:col-span-4 flex flex-col items-center justify-center p-5 bg-slate-50 rounded-2xl border border-slate-200 text-center space-y-3">
               <div className="w-28 h-28 p-2 bg-white rounded-2xl border border-slate-300 shadow-xs flex items-center justify-center relative overflow-hidden">
-                <img src={logoUrl || '/logo.svg'} alt="Logo Sekolah" className="w-full h-full object-contain" />
+                <img
+                  src={logoUrl || '/logo.svg'}
+                  alt="Logo Sekolah"
+                  className="w-full h-full object-contain"
+                  onError={(e) => {
+                    if (!e.currentTarget.src.endsWith('/logo.svg')) {
+                      e.currentTarget.src = '/logo.svg';
+                    }
+                  }}
+                />
                 {isUploadingLogo && (
                   <div className="absolute inset-0 bg-blue-900/60 backdrop-blur-xs flex items-center justify-center text-white">
                     <Loader2 className="w-6 h-6 animate-spin" />
@@ -386,7 +396,7 @@ export const PengaturanView: React.FC = () => {
       <ConfirmModal
         isOpen={showResetModal}
         title="Konfirmasi Reset Sistem ke Setelan Awal"
-        message="PERINGATAN: Tindakan ini akan mengembalikan seluruh data presensi, akun, dan ujian ke data bawaan awal pabrik. Pastikan Anda telah mengunduh berkas backup jika data ini masih diperlukan. Lanjutkan proses reset?"
+        message="PERINGATAN: Tindakan ini akan mengembalikan seluruh data presensi, jadwal, dan akun ke data bawaan awal pabrik. Pastikan Anda telah mengunduh berkas backup jika data ini masih diperlukan. Lanjutkan proses reset?"
         confirmText="Ya, Reset ke Awal"
         cancelText="Batal"
         isDanger={true}

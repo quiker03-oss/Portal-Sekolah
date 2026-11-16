@@ -3,6 +3,7 @@ import * as XLSX from 'xlsx';
 import { db } from '../../services/database';
 import { Siswa, Kelas } from '../../types';
 import { exportToExcel } from '../../utils/exportHelper';
+import { toast } from '../../utils/toast';
 import {
   Upload,
   FileSpreadsheet,
@@ -808,7 +809,7 @@ export const ImportSiswaView: React.FC<ImportSiswaViewProps> = ({ onSuccess, ini
       );
     } catch (err: any) {
       console.error('Parsing error:', err);
-      alert('Gagal membaca file: ' + (err?.message || 'Pastikan format berkas valid.'));
+      toast.error('Gagal membaca file: ' + (err?.message || 'Pastikan format berkas valid.'));
     } finally {
       setIsProcessing(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
@@ -1187,7 +1188,7 @@ export const ImportSiswaView: React.FC<ImportSiswaViewProps> = ({ onSuccess, ini
   const handleDownloadFailedRowsOnly = () => {
     const failedList = rows.filter((r) => !r.isValid || (duplicateMode === 'reject' && r.isDuplicate));
     if (failedList.length === 0) {
-      alert('Tidak ada baris siswa yang bermasalah.');
+      toast.info('Tidak ada baris siswa yang bermasalah.');
       return;
     }
 
@@ -1215,7 +1216,7 @@ export const ImportSiswaView: React.FC<ImportSiswaViewProps> = ({ onSuccess, ini
   // Save to database permanently with Firestore writeBatch and progress bar
   const handleSaveToDatabase = async () => {
     if (validRows.length === 0) {
-      alert('Tidak ada data siswa yang valid untuk disimpan.');
+      toast.warning('Tidak ada data siswa yang valid untuk disimpan.');
       return;
     }
 
@@ -1276,7 +1277,7 @@ export const ImportSiswaView: React.FC<ImportSiswaViewProps> = ({ onSuccess, ini
       setFileName('');
     } catch (err: any) {
       console.error('Save to database error:', err);
-      alert('Terjadi kendala saat menyimpan ke database: ' + (err?.message || 'Koneksi terputus.'));
+      toast.error('Terjadi kendala saat menyimpan ke database: ' + (err?.message || 'Koneksi terputus.'));
     } finally {
       setIsSaving(false);
     }

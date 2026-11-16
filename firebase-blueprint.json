@@ -64,31 +64,6 @@
         "kategori": { "type": "string" }
       }
     },
-    "UjianOnline": {
-      "title": "UjianOnline",
-      "description": "Online exam definition and questions",
-      "type": "object",
-      "properties": {
-        "id": { "type": "string" },
-        "schoolId": { "type": "string" },
-        "judul": { "type": "string" },
-        "mataPelajaran": { "type": "string" },
-        "status": { "type": "string" }
-      }
-    },
-    "JawabanSiswaUjian": {
-      "title": "JawabanSiswaUjian",
-      "description": "Student exam submissions and scores",
-      "type": "object",
-      "properties": {
-        "id": { "type": "string" },
-        "schoolId": { "type": "string" },
-        "ujianId": { "type": "string" },
-        "siswaId": { "type": "string" },
-        "status": { "type": "string" },
-        "nilaiAkhir": { "type": "number" }
-      }
-    },
     "BelJadwal": {
       "title": "BelJadwal",
       "description": "School bell schedule entry",
@@ -104,6 +79,49 @@
         "hari": { "type": "array", "items": { "type": "string" } }
       },
       "required": ["id", "waktu", "keterangan"]
+    },
+    "UjianOnline": {
+      "title": "UjianOnline",
+      "description": "Online exams and question bank",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "schoolId": { "type": "string" },
+        "judul": { "type": "string" },
+        "mataPelajaran": { "type": "string" },
+        "status": { "type": "string" }
+      }
+    },
+    "SesiUjianSiswa": {
+      "title": "SesiUjianSiswa",
+      "description": "Student exam sessions, answers, and scores",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "schoolId": { "type": "string" },
+        "ujianId": { "type": "string" },
+        "siswaId": { "type": "string" },
+        "status": { "type": "string" },
+        "nilaiAkhir": { "type": "number" }
+      }
+    },
+    "ExamImageMeta": {
+      "title": "ExamImageMeta",
+      "description": "Metadata for exam question and choice images stored in Firebase Storage",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "schoolId": { "type": "string" },
+        "ujianId": { "type": "string" },
+        "soalId": { "type": "string" },
+        "targetType": { "type": "string", "enum": ["soal", "pilihan"] },
+        "choiceLetter": { "type": "string" },
+        "url": { "type": "string" },
+        "storagePath": { "type": "string" },
+        "mimeType": { "type": "string" },
+        "sizeBytes": { "type": "number" }
+      },
+      "required": ["id", "schoolId", "ujianId", "soalId", "url"]
     }
   },
   "firestore": {
@@ -127,17 +145,21 @@
       "schema": { "$ref": "#/entities/TransaksiKas" },
       "description": "Cash transactions"
     },
-    "/schools/{schoolId}/ujian_online/{ujianId}": {
-      "schema": { "$ref": "#/entities/UjianOnline" },
-      "description": "Online exams"
-    },
-    "/schools/{schoolId}/jawaban_ujian/{jawabanId}": {
-      "schema": { "$ref": "#/entities/JawabanSiswaUjian" },
-      "description": "Exam submissions"
-    },
     "/schools/{schoolId}/bel_jadwal/{belId}": {
       "schema": { "$ref": "#/entities/BelJadwal" },
       "description": "School automatic bell schedules"
+    },
+    "/schools/{schoolId}/exams/{examId}": {
+      "schema": { "$ref": "#/entities/UjianOnline" },
+      "description": "Online school exams"
+    },
+    "/schools/{schoolId}/exam_sessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/SesiUjianSiswa" },
+      "description": "Student exam sessions and submissions"
+    },
+    "/schools/{schoolId}/exam_images/{imageId}": {
+      "schema": { "$ref": "#/entities/ExamImageMeta" },
+      "description": "Exam image metadata linked to questions and Firebase Storage"
     }
   }
 }

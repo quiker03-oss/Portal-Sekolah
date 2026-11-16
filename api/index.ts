@@ -1,22 +1,8 @@
 import {
-  handleParseDocx,
-  handleParsePdf,
-  handleParseTextSoal,
-  handleParseImage,
-  handleMatchAnswerKeys,
-  handleGradeEssay,
   getGeminiApiKey,
+  parseExamDocumentWithGemini,
 } from "./_lib/geminiBackend.ts";
-import {
-  handleStartExamSession,
-  handleSaveAnswerSession,
-  handleHeartbeatSession,
-  handleSubmitSession,
-  handleUnlockSession,
-  handleGetProctoringAuditLogs,
-  handleResetExamSession,
-} from "./_lib/examSessionBackend.ts";
-import { logBackendStep, logBackendError } from "./_lib/diagnosticHelper.ts";
+import { getSafeKeyDiagnostics, logBackendError } from "./_lib/diagnosticHelper.ts";
 
 export const config = {
   maxDuration: 60,
@@ -54,6 +40,7 @@ export default async function handler(req: any, res: any) {
   try {
     // 1. Health check
     if (pathname === "/health" || pathname === "" || pathname === "/") {
+      const diag = getSafeKeyDiagnostics();
       return res.status(200).json({
         status: "ok",
         app: "ISTAFA Portal Sekolah",
@@ -61,163 +48,87 @@ export default async function handler(req: any, res: any) {
         timestamp: new Date().toISOString(),
         platform: process.env.VERCEL ? "vercel-serverless" : "local-node",
         endpoint: pathname,
+        diagnostics: {
+          aiAvailable: diag.exists,
+          platform: process.env.VERCEL ? "vercel-serverless" : "local-node",
+          nodeVersion: process.version,
+          timestamp: new Date().toISOString(),
+        },
       });
     }
 
-    // 2. Parse DOCX
-    if (pathname === "/ujian/parse-docx") {
+    // 2. Exam document parsing with AI
+    if (pathname === "/ujian/parse") {
       if (req.method !== "POST") {
-        return res.status(405).json({ success: false, error: "Metode harus POST." });
+        return res.status(405).json({ success: false, error: "Metode request harus POST." });
       }
-      const { fileBase64, fileName = "dokumen-soal.docx" } = body || {};
-      if (!fileBase64) {
-        return res.status(400).json({ success: false, error: "Data fileBase64 tidak ditemukan." });
+
+      const { fileBase64, fileName = "dokumen-soal", mimeType, text } = body && typeof body === "object" ? body : {};
+      const hasValidBase64 = typeof fileBase64 === "string" && fileBase64.trim().length > 0;
+      const hasValidText = typeof text === "string" && text.trim().length > 0;
+      const safeFileName = typeof fileName === "string" && fileName.trim() ? fileName.trim() : "dokumen-soal";
+
+      if (!hasValidBase64 && !hasValidText) {
+        return res.status(400).json({
+          success: false,
+          error: "Data berkas atau teks soal tidak ditemukan dalam request.",
+        });
       }
-      const result = await handleParseDocx(fileBase64, fileName);
-      return res.status(200).json(result);
-    }
 
-    // 3. Parse PDF
-    if (pathname === "/ujian/parse-pdf") {
-      if (req.method !== "POST") {
-        return res.status(405).json({ success: false, error: "Metode harus POST." });
+      const resolvedMime =
+        typeof mimeType === "string" && mimeType.trim()
+          ? mimeType.trim().toLowerCase()
+          : safeFileName.toLowerCase().endsWith(".pdf")
+          ? "application/pdf"
+          : hasValidBase64
+          ? "image/jpeg"
+          : "text/plain";
+
+      const allowedMimes = new Set([
+        "application/pdf",
+        "image/jpeg",
+        "image/jpg",
+        "image/png",
+        "image/webp",
+        "text/plain",
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+      ]);
+
+      if (!allowedMimes.has(resolvedMime)) {
+        return res.status(400).json({
+          success: false,
+          error: `Tipe berkas (${resolvedMime}) tidak didukung.`,
+        });
       }
-      const { fileBase64, fileName = "dokumen-soal.pdf" } = body || {};
-      if (!fileBase64) {
-        return res.status(400).json({ success: false, error: "Data fileBase64 PDF tidak ditemukan." });
+
+      const apiKey = getGeminiApiKey();
+      if (!apiKey) {
+        return res.status(200).json({
+          success: false,
+          fallbackToLocal: true,
+          error: "GEMINI_API_KEY belum dikonfigurasi di server. Menggunakan parser lokal in-browser.",
+        });
       }
-      const result = await handleParsePdf(fileBase64, fileName);
-      return res.status(200).json(result);
-    }
 
-    // 4. Parse Raw Text Soal
-    if (pathname === "/ujian/parse-text-soal") {
-      if (req.method !== "POST") {
-        return res.status(405).json({ success: false, error: "Metode harus POST." });
+      try {
+        const result = await parseExamDocumentWithGemini({
+          text: hasValidText ? text : undefined,
+          fileBase64: hasValidBase64 ? fileBase64 : undefined,
+          mimeType: resolvedMime,
+          fileName: safeFileName,
+        });
+
+        return res.status(200).json({
+          success: true,
+          data: result,
+        });
+      } catch (parseErr: any) {
+        return res.status(200).json({
+          success: false,
+          fallbackToLocal: true,
+          error: parseErr?.message || "AI tidak dapat membaca dokumen, beralih ke parser lokal.",
+        });
       }
-      const { text } = body || {};
-      if (!text || !text.trim()) {
-        return res.status(400).json({ success: false, error: "Teks soal tidak boleh kosong." });
-      }
-      const result = await handleParseTextSoal(text);
-      return res.status(200).json(result);
-    }
-
-    // 5. Parse Image Soal
-    if (pathname === "/ujian/parse-image") {
-      if (req.method !== "POST") {
-        return res.status(405).json({ success: false, error: "Metode harus POST." });
-      }
-      const { fileBase64, fileName = "naskah-ujian.jpg", mimeType = "image/jpeg" } = body || {};
-      if (!fileBase64) {
-        return res.status(400).json({ success: false, error: "Data fileBase64 gambar tidak ditemukan." });
-      }
-      const result = await handleParseImage(fileBase64, fileName, mimeType);
-      return res.status(200).json(result);
-    }
-
-    // 6. Match Answer Keys
-    if (pathname === "/ujian/match-answer-keys") {
-      if (req.method !== "POST") {
-        return res.status(405).json({ success: false, error: "Metode harus POST." });
-      }
-      const { soalList, keyFileBase64, keyMimeType, keyText, fileName } = body || {};
-      if (!soalList || !Array.isArray(soalList) || soalList.length === 0) {
-        return res.status(400).json({ success: false, error: "Daftar butir soal tidak boleh kosong." });
-      }
-      const result = await handleMatchAnswerKeys(soalList, {
-        keyFileBase64,
-        keyMimeType,
-        keyText,
-        fileName,
-      });
-      return res.status(200).json(result);
-    }
-
-    // 7. AI Grade Essay
-    if (pathname === "/ujian/ai-grade-essay") {
-      if (req.method !== "POST") {
-        return res.status(405).json({ success: false, error: "Metode harus POST." });
-      }
-      const {
-        pertanyaan,
-        kunciJawaban,
-        contohJawaban,
-        rubrikPenilaian,
-        indikatorWajib,
-        variasiJawaban,
-        jawabanSiswa,
-        bobotMaksimal,
-      } = body || {};
-      if (!pertanyaan) {
-        return res.status(400).json({ success: false, error: "Teks pertanyaan wajib disertakan." });
-      }
-      const result = await handleGradeEssay({
-        pertanyaan,
-        kunciJawaban,
-        contohJawaban,
-        rubrikPenilaian,
-        indikatorWajib,
-        variasiJawaban,
-        jawabanSiswa: jawabanSiswa || "",
-        bobotMaksimal: Number(bobotMaksimal) || 10,
-      });
-      return res.status(200).json(result);
-    }
-
-    // 8. Session: Start / Recover
-    if (pathname === "/ujian/session/start") {
-      if (req.method !== "POST") return res.status(405).json({ success: false, error: "Metode harus POST." });
-      const clientIp = (req.headers && req.headers["x-forwarded-for"]) || req.socket?.remoteAddress;
-      const result = await handleStartExamSession(body, clientIp);
-      if ("locked" in result && result.locked) return res.status(403).json(result);
-      return res.status(200).json(result);
-    }
-
-    // 9. Session: Save Answer
-    if (pathname === "/ujian/session/save-answer") {
-      if (req.method !== "POST") return res.status(405).json({ success: false, error: "Metode harus POST." });
-      const result = await handleSaveAnswerSession(body);
-      if ("locked" in result && result.locked) return res.status(403).json(result);
-      return res.status(200).json(result);
-    }
-
-    // 10. Session: Heartbeat
-    if (pathname === "/ujian/session/heartbeat") {
-      if (req.method !== "POST") return res.status(405).json({ success: false, error: "Metode harus POST." });
-      const result = await handleHeartbeatSession(body);
-      return res.status(200).json(result);
-    }
-
-    // 11. Session: Submit
-    if (pathname === "/ujian/session/submit") {
-      if (req.method !== "POST") return res.status(405).json({ success: false, error: "Metode harus POST." });
-      const result = await handleSubmitSession(body);
-      if (result.locked) return res.status(403).json(result);
-      return res.status(200).json(result);
-    }
-
-    // 12. Session: Unlock
-    if (pathname === "/ujian/session/unlock") {
-      if (req.method !== "POST") return res.status(405).json({ success: false, error: "Metode harus POST." });
-      const result = await handleUnlockSession(body);
-      return res.status(200).json(result);
-    }
-
-    // 13. Session: Reset
-    if (pathname === "/ujian/session/reset") {
-      if (req.method !== "POST") return res.status(405).json({ success: false, error: "Metode harus POST." });
-      const { ujianId, siswaId, guruNama } = body || {};
-      const result = await handleResetExamSession(ujianId, siswaId, guruNama);
-      return res.status(200).json(result);
-    }
-
-    // 14. Session: Audit Logs
-    if (pathname === "/ujian/session/audit-logs") {
-      const urlObj = new URL(rawUrl, "http://localhost");
-      const ujianId = urlObj.searchParams.get("ujianId") || undefined;
-      const result = handleGetProctoringAuditLogs(ujianId);
-      return res.status(200).json(result);
     }
 
     return res.status(404).json({

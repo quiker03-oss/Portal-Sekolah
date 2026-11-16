@@ -327,61 +327,7 @@ export interface LandingConfig {
   showGaleri: boolean;
   showKontak: boolean;
 }
-
-// ==================== ASISTEN AI GURU (SOAL, MODUL, LKPD) ====================
-export interface SoalPilihanGanda {
-  nomor: number;
-  pertanyaan: string;
-  gambar?: string; // High-res image data URI (Base64) or URL
-  gambarCaption?: string;
-  tipe?: 'pilihan_ganda' | 'pilihan_ganda_kompleks' | 'benar_salah' | 'menjodohkan' | 'isian' | 'esai' | string;
-  pilihan: {
-    A: string;
-    B: string;
-    C: string;
-    D: string;
-    E?: string;
-    [key: string]: string | undefined;
-  };
-  kunciJawaban: string;
-  pembahasan: string;
-}
-
-export interface SoalEsai {
-  nomor: number;
-  pertanyaan: string;
-  gambar?: string;
-  gambarCaption?: string;
-  tipe?: string;
-  pedomanPenskoran: string;
-  kunciJawaban: string;
-  pembahasan?: string;
-}
-
-export interface NaskahUjianAI {
-  id: string;
-  schoolId?: string;
-  guruId?: string;
-  guruName?: string;
-  judul: string;
-  mataPelajaran: string;
-  kelas: string;
-  fase?: string;
-  semester?: 'Ganjil' | 'Genap';
-  durasiMenit?: number;
-  kurikulum: 'Kurikulum Merdeka' | 'Kurikulum 2013';
-  jenisUjian: string;
-  tingkatKesulitan: string;
-  topikMateri: string;
-  tujuanPembelajaran?: string;
-  petunjukUmum: string;
-  pilihanGanda: SoalPilihanGanda[];
-  esai: SoalEsai[];
-  kisiKisi?: { nomor: number; materi: string; indikator: string; tingkatKognitif: string; bentukSoal: string }[];
-  rubrikPenilaian?: string;
-  createdAt: string;
-}
-
+// ==================== ASISTEN AI GURU (MODUL AJAR & LKPD) ====================
 export interface ModulAjarAI {
   id: string;
   schoolId?: string;
@@ -480,269 +426,125 @@ export interface BahanAjarAI {
 }
 
 // ==================== UJIAN ONLINE / CBT MODULE ====================
-export type JenisSoal =
-  | 'pilihan_ganda'
-  | 'pilihan_ganda_kompleks'
-  | 'benar_salah'
-  | 'menjodohkan'
-  | 'susun_urutan'
-  | 'isian'
-  | 'esai';
-export type StatusUjian = 'draf' | 'terjadwal' | 'aktif' | 'selesai' | 'diarsipkan';
 
-export type GameModeType =
-  | 'petualangan' // Mode A / Adventure Quiz: Jelajah level & peta cerita
-  | 'battle' // Battle Quiz: Aksi serangan karakter vs Monster/Boss
-  | 'detektif' // Detective Quiz: Pecahkan misteri lewat bukti & petunjuk
-  | 'puzzle' // Puzzle Quiz: Logika, susun urutan & pasangkan jawaban
-  | 'tantangan_waktu' // Mode C / Time Challenge: Bonus kecepatan adil
-  | 'boss_challenge' // Boss Challenge: Tantangan bos akhir berfase
-  | 'latihan_mandiri' // Practice Mode: Latihan santai tanpa batas waktu + pembahasan
-  | 'kompetisi' // Competition Mode: Papan peringkat kelas live
-  | 'kumpulkan_bintang' // Mode B: Kumpulkan Bintang
-  | 'misi_pengetahuan' // Mode D: Misi Pengetahuan
-  | 'tebak_gambar' // Mode E: Tebak Gambar
-  | 'pasangkan_jawaban' // Mode F: Pasangkan Jawaban
-  | 'susun_urutan'; // Mode G: Susun Urutan
+export type TipeSoalUjian = 'pilihan_ganda' | 'uraian';
 
-export interface GameQuizSettings {
-  gameMode: GameModeType;
-  tingkatKesulitan?: 'mudah' | 'sedang' | 'menantang';
-  maksimalPercobaan: number; // e.g. 1, 2, 3, or 999 (tak terbatas)
-  poinPerSoal: number; // default 10
-  batasWaktuPerSoalDetik: number; // 0 = tanpa batas, or e.g. 30, 45, 60
-  tampilkanPetunjuk: boolean; // default true
-  efekSuaraAktif: boolean; // default true
-  animasiAktif: boolean; // default true
-  izinkanUlangKuis: boolean; // default true
-  tampilkanPapanPeringkat: boolean; // default true
-  simpanSebagaiNilai: 'latihan_saja' | 'nilai_harian';
-}
-
-export interface PasanganMenjodohkan {
+export interface ExamImageMeta {
   id: string;
-  kiri: string;
-  kanan: string;
+  schoolId: string;
+  ujianId: string;
+  soalId: string;
+  targetType: 'soal' | 'pilihan';
+  choiceLetter?: string;
+  url: string;
+  storagePath?: string;
+  mimeType: string;
+  sizeBytes: number;
+  width?: number;
+  height?: number;
+  caption?: string;
+  createdBy?: string;
+  createdAt: string;
 }
 
 export interface SoalUjian {
   id: string;
   nomor: number;
-  tipe: JenisSoal;
+  tipe: TipeSoalUjian;
   pertanyaan: string;
-  gambar?: string; // Data URI (Base64) or URL
-  gambarList?: string[]; // Multiple figures / illustrations
-  gambarCaption?: string;
-  pilihan?: {
-    [key: string]: string; // A, B, C, D, E
-  };
-  pilihanKompleks?: {
-    [key: string]: string; // A, B, C, D, E for multi-checkbox
-  };
-  kunciPilihanKompleks?: string[]; // e.g. ["A", "C"]
-  pasanganMenjodohkan?: PasanganMenjodohkan[];
-  kunciMenjodohkan?: { [keyKiri: string]: string }; // Map key kiri to expected kanan
-  itemUrutan?: string[]; // Mode G (Susun Urutan): items to arrange
-  kunciUrutan?: string[]; // Mode G: expected order of items
-  kunciJawaban: string; // e.g. "A", "Benar", "kata kunci", atau rubrik esai
-  pembahasan?: string;
-  penjelasanBenar?: string; // Short educational explanation why answer is correct
-  petunjuk?: string; // Educational hint for incorrect attempts without giving away the answer
+  pilihan?: { [key: string]: string }; // A, B, C, D, E (teks pilihan)
+  pilihanGambar?: { [key: string]: string }; // A, B, C, D, E (gambar pilihan)
+  pilihanGambarMeta?: { [key: string]: { imageId?: string; storagePath?: string } };
+  kunciJawaban: string; // e.g. "A", "B" atau kata kunci uraian
   bobot: number; // default 1
-  perluVerifikasi?: boolean; // flag if OCR/parser is uncertain
+  gambar?: string; // Data URI base64 atau storage URL
+  gambarId?: string; // ID unik aset gambar di koleksi exam_images
+  gambarStoragePath?: string; // Path objek di Firebase Storage
+  gambarCaption?: string;
+  gambarPosisi?: 'atas' | 'tengah' | 'bawah';
+  gambarUkuran?: 'kecil' | 'sedang' | 'besar' | 'asli';
+  gambarStatus?: 'ok' | 'warning' | 'error';
+  gambarWarning?: string;
+  pedomanPenilaian?: string; // Rubrik skor untuk soal uraian
+  perluVerifikasi?: boolean;
   catatanVerifikasi?: string;
-  nomorHalaman?: number;
-  // Enhanced Essay, Rubric & Key fields
-  contohJawaban?: string; // Model or expected answer
-  rubrikPenilaian?: string; // Scoring rubric / guidelines
-  kriteriaSkor?: { skor: number; deskripsi: string }[]; // Structured rubric criteria
-  indikatorWajib?: string[]; // Required keywords/concepts
-  variasiJawaban?: string[]; // Acceptable alternative phrasing
-  catatanPenilaian?: string; // Teacher scoring notes
-  nilaiMaksimum?: number; // Max score for this question (defaults to bobot)
-  saranKunciAI?: string; // AI suggested answer when not in document
-  kunciResmiDitemukan?: boolean; // True if key detected directly from source document
 }
 
-export interface RiwayatPerubahanKunci {
-  id: string;
-  tanggal: string;
-  diubahOleh: string;
-  keterangan: string;
-  nomorSoal: number;
-  kunciLama: string;
-  kunciBaru: string;
-}
+export type StatusUjian = 'draf' | 'terbit' | 'aktif' | 'selesai' | 'ditutup';
 
 export interface UjianOnline {
   id: string;
   schoolId?: string;
-  judul: string;
-  deskripsi?: string;
-  mataPelajaran: string;
-  mapelId?: string;
   guruId: string;
   guruNama: string;
-  kelasTarget: string[]; // e.g. ["Kelas 1A", "Kelas 1B"] or ["Semua Siswa"]
-  semester: 'Ganjil' | 'Genap';
-  tahunAjaran: string;
-  jenisUjian:
-    | 'Ulangan Harian'
-    | 'Penilaian Tengah Semester (PTS/STS)'
-    | 'Penilaian Akhir Semester (PAS/SAS)'
-    | 'Ujian Sekolah'
-    | 'Try Out'
-    | 'Kuis / Latihan Harian';
-  status: StatusUjian;
+  judul: string;
+  mataPelajaran: string;
+  mapelId?: string;
+  kelasTarget: string[]; // e.g. ["Kelas 4A", "Kelas 4B"]
   tanggalMulai: string; // YYYY-MM-DDTHH:mm
   tanggalSelesai: string; // YYYY-MM-DDTHH:mm
   durasiMenit: number; // e.g. 60
   jumlahPercobaan: number; // default 1
+  kkm: number; // default 75
+  status: StatusUjian;
+  soalList: SoalUjian[];
   acakSoal: boolean;
   acakPilihan: boolean;
   tampilkanNilaiLangsung: boolean;
-  tampilkanPembahasan: 'tidak' | 'setelah_ujian' | 'setelah_jadwal_selesai' | 'langsung';
-  kodeUjian?: string; // Optional PIN / Token (e.g. "ABC123")
-  kkm: number; // e.g. 75
-  soalList: SoalUjian[];
-  modeTampilan: 'terstruktur' | 'dokumen_asli' | 'satu_per_satu';
+  tampilkanPembahasan: boolean;
+  kodeUjian?: string; // 6-digit PIN akses umum
+  petunjukPengerjaan?: string;
+  batasPelanggaran?: number; // Maksimum toleransi pelanggaran (default: 3)
   dokumenAsliNama?: string;
-  dokumenAsliUrl?: string; // Base64 or Blob
-  dokumenAsliSize?: number;
-  dokumenAsliType?: string;
-  dokumenKunciNama?: string;
-  dokumenKunciUrl?: string;
-  riwayatPerubahanKunci?: RiwayatPerubahanKunci[];
-  // Mode Interaktif: Ujian Resmi CBT vs Kuis Game Interaktif Edukasi
-  modeInteraktif?: 'ujian_resmi' | 'kuis_game';
-  gameSettings?: GameQuizSettings;
-  // Fitur Pengawasan & Anti-Curang (Proctoring - aktif hanya pada Ujian Resmi)
-  pengawasanAktif?: boolean; // default true
-  wajibFullscreen?: boolean; // default true
-  maksimalPelanggaran?: number; // default 3, jika tercapai maka otomatis terkunci
-  blokirCopyPaste?: boolean; // default true
   createdAt: string;
   updatedAt: string;
 }
 
-export interface LogPelanggaranUjian {
-  id: string;
-  waktu: string;
-  jenis: 'pindah_tab' | 'keluar_fullscreen' | 'copy_paste' | 'klik_kanan' | 'jendela_blur' | 'lainnya';
-  deskripsi: string;
-  durasiKeluarDetik?: number;
-}
+export type StatusSesiUjian = 'terverifikasi' | 'sedang_mengerjakan' | 'mengerjakan' | 'selesai' | 'waktu_habis' | 'terkunci';
 
 export interface DetailJawabanSiswa {
-  jawabanDipilih: string; // Plain string or comma-separated keys for complex
-  jawabanKompleks?: string[]; // Array of selected option keys (e.g. ['A', 'C'])
-  jawabanMenjodohkan?: { [keyKiri: string]: string }; // Pair selections
+  jawabanDipilih: string;
   raguRagu?: boolean;
-  isBenar?: boolean;
-  skorDidapat?: number;
-  nilaiEsai?: number;
-  catatanGuruEsai?: string;
-  dinilaiOlehGuru?: boolean;
-  // AI Rubric Evaluation fields
-  skorRekomendasiAI?: number;
-  alasanPenilaianAI?: string;
-  indikatorDitemukan?: string[];
-  dinilaiOleh?: string;
-  waktuPenilaian?: string;
+  nilaiManual?: number; // Nilai koreksi guru untuk uraian
+  catatanGuru?: string;
+  waktuJawab?: string;
 }
 
-export interface DeviceSessionInfo {
-  deviceId: string;
-  userAgent: string;
-  platform: string;
-  screenResolution: string;
-  language?: string;
-  browserSummary?: string;
-  browser?: string;
-  os?: string;
-  ip?: string;
-  loginAt: string;
-  lastActiveAt?: string;
-  timestamp?: string;
-}
-
-export interface AuditLogUjian {
-  id: string;
-  ujianId: string;
-  siswaId: string;
-  namaSiswa: string;
-  kelas: string;
+export interface LogPelanggaranSesi {
   waktu: string;
-  timestamp?: string;
-  tipe:
-    | 'login_awal'
-    | 'pemulihan_sesi'
-    | 'deteksi_perangkat_ganda'
-    | 'kunci_otomatis'
-    | 'buka_kunci_guru'
-    | 'simpan_jawaban_ditolak'
-    | 'selesai_ujian';
-  action?: string;
-  severity?: 'critical' | 'warning' | 'info';
-  deskripsi: string;
-  details?: string;
-  alasan?: string;
-  deviceAwal?: Partial<DeviceSessionInfo>;
-  deviceMencurigakan?: Partial<DeviceSessionInfo>;
-  deviceInfo?: Partial<DeviceSessionInfo>;
-  aktor?: string; // 'Sistem Server (Otomatis)' or 'Guru Pengawas: ...'
-  actor?: string;
+  jenis: 'pindah_tab' | 'keluar_fullscreen' | 'jendela_blur' | 'copy_paste' | 'akses_ganda' | 'lainnya';
+  keterangan: string;
 }
 
-export interface JawabanSiswaUjian {
-  id: string;
+export interface SesiUjianSiswa {
+  id: string; // session_<ujianId>_<siswaId>
   schoolId?: string;
   ujianId: string;
   siswaId: string;
   namaSiswa: string;
-  nisn?: string;
-  nomorInduk?: string;
+  nisn: string;
   kelas: string;
-  jawaban: { [soalId: string]: DetailJawabanSiswa };
-  waktuMulai: string;
+  sessionToken: string; // Unique URL token
+  passCode: string; // 6-digit pairing code (e.g. 482195)
+  status: StatusSesiUjian;
+  waktuMulai?: string;
   waktuSelesai?: string;
   durasiDetik?: number;
-  status: 'sedang_mengerjakan' | 'selesai' | 'waktu_habis' | 'terkunci' | 'mencurigakan';
-  jumlahBenar?: number;
-  jumlahSalah?: number;
-  jumlahKosong?: number;
-  nilaiAkhir?: number; // 0 - 100
-  lulusKkm?: boolean;
-  adaEsaiBelumDinilai?: boolean;
-  catatanGuru?: string;
-  // Pengawasan & Status Sesi Perangkat
-  sessionToken?: string;
-  deviceInfo?: DeviceSessionInfo;
-  deviceMencurigakan?: DeviceSessionInfo;
-  waktuAktivitasMencurigakan?: string;
-  riwayatAudit?: AuditLogUjian[];
-  jumlahPelanggaran?: number;
-  logPelanggaran?: LogPelanggaranUjian[];
-  terkunciOlehSistem?: boolean;
-  alasanTerkunci?: string;
-  alasanKunci?: string;
-  waktuTerkunci?: string;
-  waktuKunci?: string;
-  dibukaOlehGuru?: boolean;
-  terakhirAktif?: string;
-  // Progres Kuis Game Edukasi Interaktif
-  isGameMode?: boolean;
-  totalPoinGame?: number;
-  totalBintang?: number;
-  lencanaDiperoleh?: string[]; // e.g. ['bintang_pemula', 'penjelajah_ilmu', 'ahli_matematika', 'jago_ipa', 'juara_ketekunan', 'master_kuis']
-  levelSiswa?: number;
-  xpGame?: number;
-  koinTotal?: number;
-  materiDikuasai?: string[];
-  materiPerluPeningkatan?: string[];
-  percobaanPerSoal?: { [soalId: string]: number };
-  statusPerSoal?: { [soalId: string]: 'benar' | 'salah' | 'belum' };
-  urutanPilihanSiswa?: { [soalId: string]: string[] };
+  jawaban: { [soalId: string]: DetailJawabanSiswa };
+  nilaiPg: number; // 0 - 100
+  nilaiUraian: number; // 0 - 100
+  nilaiAkhir: number; // 0 - 100 proporsional
+  lulusKkm: boolean;
+  adaUraianBelumDinilai: boolean;
+  jumlahPelanggaran: number;
+  logPelanggaran: LogPelanggaranSesi[];
+  deviceInfo?: {
+    browser?: string;
+    platform?: string;
+    userAgent?: string;
+    ip?: string;
+  };
+  terakhirAktif: string;
   createdAt: string;
   updatedAt: string;
 }
