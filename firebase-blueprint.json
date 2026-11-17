@@ -122,6 +122,21 @@
         "sizeBytes": { "type": "number" }
       },
       "required": ["id", "schoolId", "ujianId", "soalId", "url"]
+    },
+    "AiSoalReaderSession": {
+      "title": "AiSoalReaderSession",
+      "description": "Saved AI question reading and answering sessions parsed from uploaded files",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "schoolId": { "type": "string" },
+        "guruId": { "type": "string" },
+        "guruName": { "type": "string" },
+        "judul": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "judul", "createdAt"]
     }
   },
   "firestore": {
@@ -160,6 +175,10 @@
     "/schools/{schoolId}/exam_images/{imageId}": {
       "schema": { "$ref": "#/entities/ExamImageMeta" },
       "description": "Exam image metadata linked to questions and Firebase Storage"
+    },
+    "/schools/{schoolId}/ai_soal_reader/{readerId}": {
+      "schema": { "$ref": "#/entities/AiSoalReaderSession" },
+      "description": "Saved AI automatic question reader sessions"
     }
   }
 }

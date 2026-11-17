@@ -6,6 +6,12 @@ import { sound } from '../../services/audio';
 import { toast } from '../../utils/toast';
 import { UjianOnline, SesiUjianSiswa, SoalUjian, DetailJawabanSiswa, Siswa, Settings } from '../../types';
 import { ImageLightboxModal } from './ImageLightboxModal';
+import { ExamRichContent, renderMathAndTextInline } from './ExamRichContent';
+import {
+  buildDisplayedChoicesForQuestion,
+  checkExamScheduleWindow,
+  getOrderedQuestionsForSession,
+} from '../../utils/examShuffleAndScore';
 import {
   Clock,
   CheckCircle,
@@ -19,9 +25,7 @@ import {
   Sparkles,
   BookOpen,
   User,
-  GraduationCap,
   KeyRound,
-  FileCheck,
   CheckCircle2,
   RefreshCw,
   Camera,
@@ -31,9 +35,11 @@ import {
   Lock,
   Unlock,
   UploadCloud,
-  FileText,
   ZoomIn,
-  Image as ImageIcon,
+  Maximize2,
+  LayoutGrid,
+  X,
+  XCircle,
 } from 'lucide-react';
 
 interface UjianSiswaViewProps {
@@ -83,8 +89,48 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
   const [timeLeftSeconds, setTimeLeftSeconds] = useState<number>(0);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [showSubmitModal, setShowSubmitModal] = useState(false);
+  const [showMobileNavModal, setShowMobileNavModal] = useState(false);
+  const [readyStarted, setReadyStarted] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
   const [isCompleted, setIsCompleted] = useState(false);
   const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'offline'>('saved');
+  const [pembahasanMap, setPembahasanMap] = useState<
+    Record<string, { kunciJawaban?: string; benar?: boolean }> | undefined
+  >(undefined);
+  const serverOffsetMsRef = useRef<number>(0);
+  const essaySaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const getAuthoritativeNowMs = () => Date.now() + serverOffsetMsRef.current;
+
+  const tryEnterFullscreen = async () => {
+    try {
+      const el: any = document.documentElement;
+      if (document.fullscreenElement) {
+        setIsFullscreen(true);
+        return;
+      }
+      if (el.requestFullscreen) {
+        await el.requestFullscreen();
+        setIsFullscreen(true);
+      } else if (el.webkitRequestFullscreen) {
+        el.webkitRequestFullscreen();
+        setIsFullscreen(true);
+      }
+    } catch {
+      // Browser/iOS may block fullscreen cleanly; exam stays fully playable
+    }
+  };
+
+  const tryExitFullscreen = () => {
+    try {
+      const doc: any = document;
+      if (doc.fullscreenElement && doc.exitFullscreen) {
+        doc.exitFullscreen().catch(() => {});
+      } else if (doc.webkitFullscreenElement && doc.webkitExitFullscreen) {
+        doc.webkitExitFullscreen();
+      }
+    } catch {}
+  };
 
   // Anti-cheat Proctoring Warning Modal
   const [cheatWarning, setCheatWarning] = useState<string | null>(null);
@@ -105,11 +151,34 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
   const [isOnline, setIsOnline] = useState<boolean>(typeof navigator !== 'undefined' ? navigator.onLine : true);
 
   useEffect(() => {
-    const handleOnline = () => {
+    const syncClock = async () => {
+      try {
+        const resp = await fetch('/api/ujian/time');
+        if (resp.ok) {
+          const json = await resp.json().catch(() => null);
+          if (typeof json?.serverTimeMs === 'number') {
+            serverOffsetMsRef.current = json.serverTimeMs - Date.now();
+          }
+        }
+      } catch {}
+    };
+    syncClock();
+  }, []);
+
+  useEffect(() => {
+    const handleOnline = async () => {
       setIsOnline(true);
       setSaveStatus('saved');
       if (sesi && ujian) {
-        db.saveSesiUjian({ ...sesi, jawaban: jawabanState }).catch(() => {});
+        if (sesi.pendingSubmitSync) {
+          const synced = await db.submitUjianKeBackend(sesi.id).catch(() => null);
+          if (synced?.sesi) {
+            setSesi(synced.sesi);
+            if (synced.pembahasanMap) setPembahasanMap(synced.pembahasanMap);
+          }
+        } else {
+          db.saveSesiUjian({ ...sesi, jawaban: jawabanState }).catch(() => {});
+        }
       }
     };
     const handleOffline = () => {
@@ -401,12 +470,10 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
         throw new Error('Naskah ujian belum dipilih atau tautan tidak valid.');
       }
 
-      // Check exam status
-      if (ujian.status === 'draf') {
-        throw new Error('Ujian ini masih berstatus DRAF dan belum resmi diterbitkan oleh Guru.');
-      }
-      if (ujian.status === 'selesai' || ujian.status === 'ditutup') {
-        throw new Error('Ujian ini sudah ditutup dan masa pengerjaan telah berakhir.');
+      // Check exam status & authoritative schedule window
+      const sched = checkExamScheduleWindow(ujian, getAuthoritativeNowMs());
+      if (!sched.allowed) {
+        throw new Error(sched.reason || 'Ujian belum dibuka atau masa pengerjaan telah berakhir.');
       }
 
       // 1. Look up student identity from database (with Firestore fallback on fresh devices)
@@ -509,48 +576,97 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
   };
 
   // --------------------------------------------------------------------------
-  // 4. ACTIVE SESSION INITIALIZATION
+  // 4. ACTIVE SESSION INITIALIZATION (Lock Question & Choice Ordering)
   // --------------------------------------------------------------------------
-  const initSession = (session: SesiUjianSiswa) => {
-    // Strictly load sanitized exam without answer keys for the student!
-    const exam = db.getUjianForStudent(session.ujianId);
+  const initSession = async (session: SesiUjianSiswa) => {
+    let exam = db.getUjianForStudent(session.ujianId);
+    if (!exam) {
+      exam = await db.resolveExamFromFirestore(session.ujianId, session.schoolId);
+    }
     if (!exam) {
       setVerificationError('Data naskah ujian tidak ditemukan.');
       return;
     }
 
-    setSesi(session);
-    setUjian(exam);
-    setJawabanState(session.jawaban || {});
+    const sched = checkExamScheduleWindow(exam, getAuthoritativeNowMs());
+    if (!sched.allowed && session.status !== 'selesai' && session.status !== 'waktu_habis') {
+      setVerificationError(sched.reason || 'Masa pengerjaan ujian belum dibuka atau telah berakhir.');
+      return;
+    }
 
-    // Duration calculation
+    const sessionSeedKey = session.id || session.siswaId;
+    const { urutanSoalIds, urutanPilihanMap } = getOrderedQuestionsForSession(
+      exam,
+      sessionSeedKey,
+      session
+    );
+
+    const needsOrderPersist =
+      !session.urutanSoalIds ||
+      session.urutanSoalIds.length === 0 ||
+      !session.urutanPilihanMap ||
+      Object.keys(session.urutanPilihanMap).length === 0;
+
+    let lockedSession = {
+      ...session,
+      urutanSoalIds,
+      urutanPilihanMap,
+    };
+
+    if (needsOrderPersist) {
+      lockedSession = await db.saveSesiUjian(lockedSession).catch(() => lockedSession);
+    }
+
+    setSesi(lockedSession);
+    setUjian(exam);
+    setJawabanState(lockedSession.jawaban || {});
+
     const durasiTotalSec = (exam.durasiMenit || 60) * 60;
-    if (session.waktuMulai) {
-      const startMs = new Date(session.waktuMulai).getTime();
-      const elapsedSec = Math.floor((Date.now() - startMs) / 1000);
-      const remain = Math.max(0, durasiTotalSec - elapsedSec);
-      setTimeLeftSeconds(remain);
+    if (lockedSession.waktuMulai) {
+      const startMs = new Date(lockedSession.waktuMulai).getTime();
+      const elapsedSec = Math.floor((getAuthoritativeNowMs() - startMs) / 1000);
+      setTimeLeftSeconds(Math.max(0, durasiTotalSec - elapsedSec));
     } else {
       setTimeLeftSeconds(durasiTotalSec);
     }
 
-    if (session.status === 'selesai' || session.status === 'waktu_habis') {
+    if (lockedSession.status === 'selesai' || lockedSession.status === 'waktu_habis') {
+      setReadyStarted(true);
       setIsCompleted(true);
+    } else {
+      setReadyStarted(false);
     }
   };
 
+  const handleStartExamWithFullscreen = async () => {
+    if (!sesi || !ujian) return;
+    if (ujian.modeFullscreen !== false) {
+      await tryEnterFullscreen();
+    }
+    if (!sesi.waktuMulai || sesi.status === 'terverifikasi') {
+      const startedSesi: SesiUjianSiswa = {
+        ...sesi,
+        status: 'sedang_mengerjakan',
+        waktuMulai: sesi.waktuMulai || new Date(getAuthoritativeNowMs()).toISOString(),
+      };
+      setSesi(startedSesi);
+      db.saveSesiUjian(startedSesi).catch(() => {});
+    }
+    setReadyStarted(true);
+  };
+
   // --------------------------------------------------------------------------
-  // 5. COUNTDOWN TIMER (Wall-clock synchronized so background throttling won't drift)
+  // 5. COUNTDOWN TIMER (Server-offset wall-clock synchronized)
   // --------------------------------------------------------------------------
   useEffect(() => {
-    if (!sesi || !ujian || isCompleted || sesi.status === 'terkunci') return;
+    if (!sesi || !ujian || !readyStarted || isCompleted || sesi.status === 'terkunci') return;
 
     const durasiTotalMs = (ujian.durasiMenit || 60) * 60 * 1000;
-    const startMs = sesi.waktuMulai ? new Date(sesi.waktuMulai).getTime() : Date.now();
+    const startMs = sesi.waktuMulai ? new Date(sesi.waktuMulai).getTime() : getAuthoritativeNowMs();
     const targetEndMs = startMs + durasiTotalMs;
 
     const tick = () => {
-      const remainingSec = Math.max(0, Math.ceil((targetEndMs - Date.now()) / 1000));
+      const remainingSec = Math.max(0, Math.ceil((targetEndMs - getAuthoritativeNowMs()) / 1000));
       setTimeLeftSeconds(remainingSec);
       if (remainingSec <= 0) {
         clearInterval(timer);
@@ -562,21 +678,39 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
     const timer = setInterval(tick, 1000);
 
     return () => clearInterval(timer);
-  }, [sesi?.id, sesi?.status, sesi?.waktuMulai, ujian?.id, ujian?.durasiMenit, isCompleted]);
+  }, [sesi?.id, sesi?.status, sesi?.waktuMulai, ujian?.id, ujian?.durasiMenit, readyStarted, isCompleted]);
 
   const handleTimeExpired = async () => {
     if (!sesi) return;
     setIsSubmitting(true);
-    await db.selesaikanUjianSiswa(sesi.id);
-    setIsCompleted(true);
-    setIsSubmitting(false);
+    try {
+      const res = await db.submitUjianKeBackend(sesi.id);
+      if (res.sesi) setSesi(res.sesi);
+      if (res.pembahasanMap) setPembahasanMap(res.pembahasanMap);
+    } finally {
+      tryExitFullscreen();
+      setIsCompleted(true);
+      setIsSubmitting(false);
+    }
   };
 
   // --------------------------------------------------------------------------
-  // 6. PROCTORING & ANTI-CHEAT
+  // 6. PROCTORING & FULLSCREEN MONITORING
   // --------------------------------------------------------------------------
   useEffect(() => {
-    if (!sesi || isCompleted || sesi.status === 'terkunci') return;
+    if (!sesi || !readyStarted || isCompleted || sesi.status === 'terkunci') return;
+
+    const handleFsChange = () => {
+      const doc: any = document;
+      const active = Boolean(doc.fullscreenElement || doc.webkitFullscreenElement);
+      setIsFullscreen(active);
+      if (!active && ujian?.modeFullscreen !== false) {
+        triggerViolation(
+          'keluar_fullscreen',
+          'Anda keluar dari mode layar penuh ujian.'
+        );
+      }
+    };
 
     const handleVisibilityChange = () => {
       if (document.hidden) {
@@ -596,23 +730,26 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
       triggerViolation('copy_paste', 'Tindakan menyalin atau menempel teks dinonaktifkan selama ujian.');
     };
 
+    document.addEventListener('fullscreenchange', handleFsChange);
+    document.addEventListener('webkitfullscreenchange', handleFsChange);
     document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('blur', handleWindowBlur);
     document.addEventListener('copy', handleCopyPaste);
     document.addEventListener('paste', handleCopyPaste);
 
     return () => {
+      document.removeEventListener('fullscreenchange', handleFsChange);
+      document.removeEventListener('webkitfullscreenchange', handleFsChange);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('blur', handleWindowBlur);
       document.removeEventListener('copy', handleCopyPaste);
       document.removeEventListener('paste', handleCopyPaste);
     };
-  }, [sesi, isCompleted]);
+  }, [sesi, ujian?.modeFullscreen, readyStarted, isCompleted]);
 
   const triggerViolation = (jenis: any, keterangan: string) => {
     if (!sesi || isCompleted || sesi.status === 'terkunci') return;
 
-    // Cooldown debounce (2500ms) so simultaneous visibilitychange + blur only counts once
     const now = Date.now();
     if (jenis !== 'copy_paste' && now - lastViolationAtRef.current < 2500) {
       return;
@@ -639,47 +776,65 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
   };
 
   // --------------------------------------------------------------------------
-  // 7. ANSWER SUBMISSION & AUTOSAVE
+  // 7. ANSWER SUBMISSION & SEQUENCE-GUARDED AUTOSAVE
   // --------------------------------------------------------------------------
-  const handleSelectAnswer = async (soalId: string, answer: string) => {
+  const handleSelectAnswer = async (
+    soalId: string,
+    answerOriginalKeyOrText: string,
+    displayLetter?: string,
+    debounceWrite = false
+  ) => {
     if (!sesi || isCompleted || sesi.status === 'terkunci') return;
 
+    const nowTs = Date.now();
     setSaveStatus('saving');
     const existing = jawabanState[soalId] || { jawabanDipilih: '' };
     const updatedDetail: DetailJawabanSiswa = {
       ...existing,
-      jawabanDipilih: answer,
-      waktuJawab: new Date().toISOString(),
+      jawabanDipilih: answerOriginalKeyOrText,
+      opsiAsliDipilih: displayLetter ? answerOriginalKeyOrText : existing.opsiAsliDipilih,
+      opsiTampilDipilih: displayLetter ?? existing.opsiTampilDipilih,
+      waktuJawab: new Date(nowTs).toISOString(),
+      clientUpdatedAt: nowTs,
     };
 
-    const newJawabanState = {
-      ...jawabanState,
+    setJawabanState((prev) => ({
+      ...prev,
       [soalId]: updatedDetail,
-    };
-    setJawabanState(newJawabanState);
+    }));
 
-    try {
-      await db.saveJawabanSiswa(sesi.id, soalId, updatedDetail);
-      setSaveStatus('saved');
-    } catch {
-      setSaveStatus('offline');
+    const persistNow = async () => {
+      try {
+        await db.saveJawabanSiswa(sesi.id, soalId, updatedDetail);
+        setSaveStatus(navigator.onLine ? 'saved' : 'offline');
+      } catch {
+        setSaveStatus('offline');
+      }
+    };
+
+    if (debounceWrite) {
+      if (essaySaveTimerRef.current) clearTimeout(essaySaveTimerRef.current);
+      essaySaveTimerRef.current = setTimeout(persistNow, 350);
+    } else {
+      await persistNow();
     }
   };
 
   const handleToggleRagu = async (soalId: string) => {
     if (!sesi || isCompleted) return;
 
+    const nowTs = Date.now();
     const existing = jawabanState[soalId] || { jawabanDipilih: '' };
     const updatedDetail: DetailJawabanSiswa = {
       ...existing,
       raguRagu: !existing.raguRagu,
+      clientUpdatedAt: nowTs,
     };
 
-    const newJawabanState = {
-      ...jawabanState,
+    setJawabanState((prev) => ({
+      ...prev,
       [soalId]: updatedDetail,
-    };
-    setJawabanState(newJawabanState);
+    }));
     await db.saveJawabanSiswa(sesi.id, soalId, updatedDetail);
   };
 
@@ -687,10 +842,17 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
     if (!sesi || !ujian) return;
     setIsSubmitting(true);
     try {
-      const finalSesi = await db.selesaikanUjianSiswa(sesi.id);
-      if (finalSesi) {
-        setSesi(finalSesi);
+      const submitRes = await db.submitUjianKeBackend(sesi.id);
+      if (submitRes.sesi) {
+        setSesi(submitRes.sesi);
       }
+      if (submitRes.pembahasanMap) {
+        setPembahasanMap(submitRes.pembahasanMap);
+      }
+      if (!submitRes.syncedToServer) {
+        toast.info('Jawaban disimpan di perangkat dan akan tersinkronisasi ke server begitu internet aktif.');
+      }
+      tryExitFullscreen();
       setIsCompleted(true);
       setShowSubmitModal(false);
       try {
@@ -717,22 +879,12 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
     return `${minutes.toString().padStart(2, '0')}:${seconds.toString().padStart(2, '0')}`;
   };
 
-  // Deterministic question order per student session when acakSoal is active
+  // Locked ordered questions from SesiUjianSiswa (`urutanSoalIds` + `jumlahSoalTampil`)
   const orderedSoalList = useMemo<SoalUjian[]>(() => {
-    const rawList = ujian?.soalList || [];
-    if (!ujian?.acakSoal || !sesi?.id || rawList.length <= 1) {
-      return rawList;
-    }
-    const hashScore = (str: string): number => {
-      let h = 2166136261;
-      for (let i = 0; i < str.length; i++) {
-        h ^= str.charCodeAt(i);
-        h = Math.imul(h, 16777619);
-      }
-      return h >>> 0;
-    };
-    return [...rawList].sort((a, b) => hashScore(`${sesi.id}:${a.id}`) - hashScore(`${sesi.id}:${b.id}`));
-  }, [ujian, sesi?.id]);
+    if (!ujian) return [];
+    const key = sesi?.id || sesi?.siswaId || 'preview';
+    return getOrderedQuestionsForSession(ujian, key, sesi || undefined).orderedQuestions;
+  }, [ujian, sesi?.id, sesi?.siswaId, sesi?.urutanSoalIds, sesi?.urutanPilihanMap]);
 
   // --------------------------------------------------------------------------
   // SCREEN 1: VERIFIKASI QR ABSENSI & IDENTITAS SISWA (URUTAN WAJIB TAHAP 2 & 3)
@@ -1125,14 +1277,18 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
   // SCREEN 3: EXAM COMPLETED SCREEN (Hasil / Bukti Pengiriman)
   // --------------------------------------------------------------------------
   if (isCompleted) {
-    const totalSoal = ujian ? ujian.soalList.length : 0;
+    const activeQuestionIds = new Set(orderedSoalList.map((q) => q.id));
+    const totalSoal = orderedSoalList.length || (ujian ? ujian.soalList.length : 0);
     const dijawabCount = Object.keys(jawabanState).filter(
-      (k) => jawabanState[k] && jawabanState[k].jawabanDipilih
+      (k) =>
+        (activeQuestionIds.size === 0 || activeQuestionIds.has(k)) &&
+        jawabanState[k] &&
+        Boolean(jawabanState[k].jawabanDipilih?.trim())
     ).length;
 
     return (
-      <div className="min-h-screen bg-slate-900 flex items-center justify-center p-4">
-        <div className="max-w-md w-full bg-white rounded-3xl p-8 text-center space-y-6 shadow-2xl">
+      <div className="min-h-[100dvh] bg-slate-900 flex items-center justify-center p-4">
+        <div className="max-w-lg w-full bg-white rounded-3xl p-6 sm:p-8 text-center space-y-5 shadow-2xl max-h-[92dvh] overflow-y-auto">
           <div className="w-16 h-16 rounded-2xl bg-emerald-100 text-emerald-600 mx-auto flex items-center justify-center">
             <CheckCircle2 className="w-8 h-8" />
           </div>
@@ -1143,6 +1299,24 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
               Lembar jawaban Anda telah berhasil disimpan dan diserahkan kepada Guru Pengawas.
             </p>
           </div>
+
+          {sesi.pendingSubmitSync && (
+            <div className="p-3 bg-amber-50 border border-amber-200 rounded-2xl text-xs text-amber-800 flex items-center justify-between gap-2 text-left">
+              <span>Jawaban tersimpan lokal & menunggu koneksi untuk sinkronisasi ke server.</span>
+              <button
+                type="button"
+                onClick={async () => {
+                  const res = await db.submitUjianKeBackend(sesi.id);
+                  if (res.sesi) setSesi(res.sesi);
+                  if (res.pembahasanMap) setPembahasanMap(res.pembahasanMap);
+                  if (res.syncedToServer) toast.success('Berhasil disinkronkan ke server!');
+                }}
+                className="px-2.5 py-1 bg-amber-600 text-white rounded-lg font-bold shrink-0 cursor-pointer"
+              >
+                Kirim Ulang
+              </button>
+            </div>
+          )}
 
           <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 space-y-2.5 text-left text-xs">
             <div className="flex justify-between">
@@ -1160,22 +1334,88 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
               </strong>
             </div>
 
-            {ujian?.tampilkanNilaiLangsung && (
-              <div className="pt-2 border-t border-slate-200 flex justify-between items-center">
-                <span className="font-bold text-slate-700">Nilai Akhir:</span>
-                <span
-                  className={`text-xl font-extrabold px-3 py-0.5 rounded-lg ${
-                    sesi.lulusKkm ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
-                  }`}
-                >
-                  {sesi.nilaiAkhir}
-                </span>
+            {ujian?.tampilkanNilaiLangsung && !sesi.pendingSubmitSync && (
+              <div className="pt-3 border-t border-slate-200 space-y-2">
+                <div className="flex justify-between items-center">
+                  <span className="font-bold text-slate-700">Nilai Akhir:</span>
+                  <span
+                    className={`text-xl font-extrabold px-3 py-0.5 rounded-lg ${
+                      sesi.lulusKkm ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'
+                    }`}
+                  >
+                    {sesi.nilaiAkhir}
+                  </span>
+                </div>
+                {typeof sesi.jumlahBenar === 'number' && (
+                  <div className="grid grid-cols-3 gap-2 pt-1 text-center">
+                    <div className="p-2 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800">
+                      <span className="block font-extrabold text-sm">{sesi.jumlahBenar}</span>
+                      <span className="text-[10px]">Benar</span>
+                    </div>
+                    <div className="p-2 rounded-xl bg-rose-50 border border-rose-200 text-rose-800">
+                      <span className="block font-extrabold text-sm">{sesi.jumlahSalah ?? 0}</span>
+                      <span className="text-[10px]">Salah</span>
+                    </div>
+                    <div className="p-2 rounded-xl bg-slate-100 border border-slate-200 text-slate-700">
+                      <span className="block font-extrabold text-sm">{sesi.jumlahKosong ?? 0}</span>
+                      <span className="text-[10px]">Kosong</span>
+                    </div>
+                  </div>
+                )}
+                {sesi.adaUraianBelumDinilai && (
+                  <p className="text-[11px] text-amber-700 bg-amber-50 px-2.5 py-1.5 rounded-xl border border-amber-200">
+                    Nilai akhir final menunggu pemeriksaan soal uraian oleh Guru.
+                  </p>
+                )}
               </div>
             )}
           </div>
 
+          {ujian?.tampilkanNilaiLangsung && ujian?.tampilkanPembahasan && pembahasanMap && (
+            <div className="text-left space-y-2">
+              <h3 className="text-xs font-extrabold text-slate-700 uppercase tracking-wider">
+                Ringkasan Hasil Per Nomor
+              </h3>
+              <div className="max-h-52 overflow-y-auto space-y-1.5 pr-1">
+                {orderedSoalList.map((q, idx) => {
+                  const ans = jawabanState[q.id];
+                  const rev = pembahasanMap[q.id];
+                  return (
+                    <div
+                      key={q.id}
+                      className="flex items-center justify-between text-xs px-3 py-2 rounded-xl border border-slate-200 bg-slate-50"
+                    >
+                      <span className="font-bold text-slate-700">Soal No. {idx + 1}</span>
+                      <div className="flex items-center gap-2">
+                        <span className="text-slate-600">
+                          Pilihan: <strong>{ans?.opsiTampilDipilih || ans?.jawabanDipilih || '-'}</strong>
+                        </span>
+                        {rev?.benar === true ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold text-[10px]">
+                            <CheckCircle className="w-3 h-3" /> Benar
+                          </span>
+                        ) : rev?.benar === false ? (
+                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-rose-100 text-rose-800 font-bold text-[10px]">
+                            <XCircle className="w-3 h-3" /> Salah
+                          </span>
+                        ) : (
+                          <span className="px-2 py-0.5 rounded-full bg-slate-200 text-slate-700 font-bold text-[10px]">
+                            Uraian
+                          </span>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           <button
-            onClick={onExit}
+            onClick={() => {
+              tryExitFullscreen();
+              onExit();
+            }}
             className="w-full py-3 bg-blue-700 hover:bg-blue-600 text-white rounded-xl text-xs font-bold transition-all shadow-md cursor-pointer"
           >
             Kembali ke Portal Sekolah
@@ -1186,7 +1426,93 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
   }
 
   // --------------------------------------------------------------------------
-  // SCREEN 4: ACTIVE EXAM TAKING VIEW (Lembar Pengerjaan Soal Siswa)
+  // SCREEN 3B: READY TO START FULLSCREEN GATEWAY
+  // --------------------------------------------------------------------------
+  if (!readyStarted && ujian) {
+    const isResuming = sesi.status === 'sedang_mengerjakan' && Boolean(sesi.waktuMulai);
+    return (
+      <div className="min-h-[100dvh] bg-slate-900 flex items-center justify-center p-4">
+        <div className="max-w-lg w-full bg-white rounded-3xl p-6 sm:p-8 space-y-6 shadow-2xl border border-slate-200">
+          <div className="flex items-center gap-3">
+            <div className="w-12 h-12 rounded-2xl bg-blue-100 text-blue-700 flex items-center justify-center shrink-0">
+              <Maximize2 className="w-6 h-6" />
+            </div>
+            <div>
+              <span className="text-[11px] font-bold uppercase tracking-wider text-blue-700">
+                Persiapan Memulai Ujian
+              </span>
+              <h2 className="text-lg sm:text-xl font-extrabold text-slate-900 leading-tight">
+                {ujian.judul}
+              </h2>
+            </div>
+          </div>
+
+          <div className="p-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-2 text-xs">
+            <div className="flex justify-between">
+              <span className="text-slate-500">Peserta</span>
+              <strong className="text-slate-900">{sesi.namaSiswa} ({sesi.kelas})</strong>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-500">Mata Pelajaran</span>
+              <strong className="text-slate-900">{ujian.mataPelajaran}</strong>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-500">Jumlah Soal</span>
+              <strong className="text-slate-900">{orderedSoalList.length} Butir Soal</strong>
+            </div>
+            <div className="flex justify-between">
+              <span className="text-slate-500">Sisa Waktu Pengerjaan</span>
+              <strong className="text-blue-700">{formatTimer(timeLeftSeconds)}</strong>
+            </div>
+          </div>
+
+          {ujian.petunjukPengerjaan && (
+            <div className="p-3.5 rounded-2xl bg-blue-50 border border-blue-200 text-xs text-blue-950 leading-relaxed">
+              <strong className="block mb-1">Petunjuk Pengerjaan:</strong>
+              {ujian.petunjukPengerjaan}
+            </div>
+          )}
+
+          {ujian.modeFullscreen !== false && (
+            <div className="p-3.5 rounded-2xl bg-amber-50 border border-amber-200 text-xs text-amber-900 leading-relaxed flex items-start gap-2.5">
+              <ShieldAlert className="w-4 h-4 text-amber-700 shrink-0 mt-0.5" />
+              <span>
+                Ujian akan dijalankan dalam <strong>Mode Layar Penuh (Fullscreen)</strong>. Jangan
+                berpindah tab, membuka aplikasi lain, atau keluar dari layar ujian selama pengerjaan.
+              </span>
+            </div>
+          )}
+
+          <div className="flex flex-col sm:flex-row gap-2.5">
+            <button
+              type="button"
+              onClick={onExit}
+              className="sm:w-36 py-3 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-bold cursor-pointer"
+            >
+              Keluar
+            </button>
+            <button
+              type="button"
+              onClick={handleStartExamWithFullscreen}
+              className="flex-1 py-3.5 px-5 rounded-xl bg-blue-700 hover:bg-blue-600 text-white text-xs sm:text-sm font-extrabold shadow-lg flex items-center justify-center gap-2 cursor-pointer"
+            >
+              <Maximize2 className="w-4 h-4" />
+              <span>
+                {isResuming
+                  ? 'Lanjutkan Ujian (Layar Penuh)'
+                  : ujian.modeFullscreen !== false
+                  ? 'Mulai Kerjakan Ujian (Layar Penuh)'
+                  : 'Mulai Kerjakan Ujian'}
+              </span>
+            </button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // --------------------------------------------------------------------------
+  // SCREEN 4: ACTIVE EXAM TAKING VIEW (Responsive Mobile-First + Fullscreen)
   // --------------------------------------------------------------------------
   const soalList = orderedSoalList;
   const currentSoal = soalList[currentIndex] || soalList[0];
@@ -1195,29 +1521,59 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
     : { jawabanDipilih: '' };
   const totalSoal = soalList.length;
 
+  const activeIdsSet = new Set(soalList.map((q) => q.id));
   const answeredCount = Object.keys(jawabanState).filter(
-    (k) => jawabanState[k] && jawabanState[k].jawabanDipilih
+    (k) => activeIdsSet.has(k) && jawabanState[k] && Boolean(jawabanState[k].jawabanDipilih?.trim())
   ).length;
+  const raguCount = Object.keys(jawabanState).filter(
+    (k) => activeIdsSet.has(k) && jawabanState[k]?.raguRagu
+  ).length;
+  const unansweredCount = Math.max(0, totalSoal - answeredCount);
+
+  const displayedChoices =
+    currentSoal && currentSoal.tipe === 'pilihan_ganda'
+      ? buildDisplayedChoicesForQuestion(currentSoal, sesi.urutanPilihanMap)
+      : [];
+  const hasAnyChoiceImage = displayedChoices.some((c) => Boolean(c.imageUrl));
+  const selectedOriginalKey = currentDetail.opsiAsliDipilih || currentDetail.jawabanDipilih;
 
   const isLastQuestion = currentIndex === totalSoal - 1;
   const isTimeCritical = timeLeftSeconds < 300;
 
   return (
-    <div className="min-h-screen bg-slate-100 flex flex-col font-sans selection:bg-blue-600 selection:text-white">
+    <div className="min-h-[100dvh] bg-slate-100 flex flex-col font-sans selection:bg-blue-600 selection:text-white overflow-x-hidden">
+      {/* Re-enter Fullscreen Banner if user exited fullscreen */}
+      {ujian?.modeFullscreen !== false && !isFullscreen && (
+        <div className="bg-amber-500 text-slate-950 px-3 py-2 text-xs font-bold flex items-center justify-between gap-2 z-50">
+          <div className="flex items-center gap-2 min-w-0">
+            <ShieldAlert className="w-4 h-4 shrink-0" />
+            <span className="truncate">Mode layar penuh sedang nonaktif.</span>
+          </div>
+          <button
+            type="button"
+            onClick={tryEnterFullscreen}
+            className="px-3 py-1 rounded-lg bg-slate-950 text-white text-[11px] font-bold shrink-0 cursor-pointer flex items-center gap-1"
+          >
+            <Maximize2 className="w-3.5 h-3.5" />
+            <span>Masuk Layar Penuh</span>
+          </button>
+        </div>
+      )}
+
       {/* Top Bar Navigation */}
-      <header className="sticky top-0 z-40 bg-white border-b border-slate-200 shadow-xs px-4 sm:px-6 h-16 flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-9 h-9 rounded-xl bg-blue-700 text-white flex items-center justify-center font-bold text-sm shadow-xs">
+      <header className="sticky top-0 z-40 bg-white border-b border-slate-200 shadow-xs px-3 sm:px-6 pt-[env(safe-area-inset-top)] h-16 flex items-center justify-between gap-2">
+        <div className="flex items-center gap-2.5 min-w-0">
+          <div className="w-9 h-9 rounded-xl bg-blue-700 text-white flex items-center justify-center font-bold text-sm shadow-xs shrink-0">
             <BookOpen className="w-5 h-5" />
           </div>
-          <div>
-            <h1 className="text-xs sm:text-sm font-extrabold text-slate-900 leading-tight">
+          <div className="min-w-0">
+            <h1 className="text-xs sm:text-sm font-extrabold text-slate-900 leading-tight truncate max-w-[160px] sm:max-w-xs md:max-w-md">
               {ujian?.judul}
             </h1>
-            <div className="flex items-center gap-2 text-[11px] text-slate-500 mt-0.5">
-              <span>{ujian?.mataPelajaran}</span>
-              <span>&bull;</span>
-              <span>
+            <div className="flex items-center gap-1.5 text-[11px] text-slate-500 mt-0.5 truncate">
+              <span className="truncate">{ujian?.mataPelajaran}</span>
+              <span className="hidden sm:inline">&bull;</span>
+              <span className="hidden sm:inline truncate">
                 {sesi.namaSiswa} ({sesi.kelas})
               </span>
             </div>
@@ -1225,16 +1581,16 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
         </div>
 
         {/* Timer & Cloud Save Indicator */}
-        <div className="flex items-center gap-3 sm:gap-4">
+        <div className="flex items-center gap-2 sm:gap-3 shrink-0">
           <div
-            className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-bold shadow-xs transition-colors ${
+            className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-bold shadow-xs transition-colors ${
               isTimeCritical
                 ? 'bg-red-50 text-red-700 border border-red-200 animate-pulse'
                 : 'bg-blue-50 text-blue-900 border border-blue-200'
             }`}
           >
-            <Clock className="w-4 h-4" />
-            <span>{formatTimer(timeLeftSeconds)}</span>
+            <Clock className="w-4 h-4 shrink-0" />
+            <span className="tabular-nums">{formatTimer(timeLeftSeconds)}</span>
           </div>
 
           <div className="hidden sm:flex items-center gap-1.5 text-[11px] text-slate-500">
@@ -1258,24 +1614,24 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
 
           <button
             onClick={() => setShowSubmitModal(true)}
-            className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold shadow-xs flex items-center gap-1.5 transition-colors cursor-pointer"
+            className="px-3 sm:px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold shadow-xs flex items-center gap-1.5 transition-colors cursor-pointer min-h-[38px]"
           >
             <Send className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Kumpulkan</span>
+            <span>Kumpulkan</span>
           </button>
         </div>
       </header>
 
-      {/* Main Container: Question Card + Number Palette */}
-      <main className="flex-1 max-w-6xl w-full mx-auto p-4 sm:p-6 lg:p-8 grid grid-cols-1 lg:grid-cols-4 gap-6">
+      {/* Main Container: Question Card + Desktop Number Palette */}
+      <main className="flex-1 max-w-6xl w-full mx-auto p-3 sm:p-6 lg:p-8 grid grid-cols-1 lg:grid-cols-4 gap-6">
         {/* Left Column: Question Area */}
         <div className="lg:col-span-3 space-y-4">
           {currentSoal ? (
-            <div className="bg-white rounded-3xl p-6 sm:p-8 border border-slate-200 shadow-xs space-y-6">
+            <div className="bg-white rounded-3xl p-4 sm:p-7 border border-slate-200 shadow-xs space-y-5">
               {/* Question Header */}
-              <div className="flex items-center justify-between pb-4 border-b border-slate-100">
+              <div className="flex items-center justify-between pb-3 border-b border-slate-100 gap-2">
                 <div className="flex items-center gap-2">
-                  <span className="w-8 h-8 rounded-lg bg-blue-100 text-blue-900 font-extrabold flex items-center justify-center text-sm">
+                  <span className="w-8 h-8 rounded-lg bg-blue-100 text-blue-900 font-extrabold flex items-center justify-center text-sm shrink-0">
                     {currentIndex + 1}
                   </span>
                   <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
@@ -1288,8 +1644,9 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
                     Bobot: <strong>{currentSoal.bobot || 1}</strong>
                   </span>
                   <button
+                    type="button"
                     onClick={() => handleToggleRagu(currentSoal.id)}
-                    className={`px-2.5 py-1 rounded-lg text-xs font-bold border transition-colors flex items-center gap-1.5 cursor-pointer ${
+                    className={`px-3 py-1.5 rounded-xl text-xs font-bold border transition-colors flex items-center gap-1.5 cursor-pointer min-h-[36px] ${
                       currentDetail.raguRagu
                         ? 'bg-amber-100 border-amber-300 text-amber-800'
                         : 'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'
@@ -1301,206 +1658,67 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
                 </div>
               </div>
 
-              {/* Question Image & Text with Accurate Positional Layout (atas / tengah / bawah) */}
-              {(() => {
-                const pos = currentSoal.gambarPosisi || 'atas';
-                const qText = (currentSoal.pertanyaan || '').trim();
-                const isPlaceholderImagePrompt = qText === '(Perhatikan gambar berikut)';
-                const paragraphs = qText
-                  ? qText.split(/\r?\n+/).map((p) => p.trim()).filter(Boolean)
-                  : [];
-                const canSplitMiddle = pos === 'tengah' && paragraphs.length >= 2;
-                const splitPoint = canSplitMiddle ? Math.ceil(paragraphs.length / 2) : paragraphs.length;
-                const topParagraphs = canSplitMiddle ? paragraphs.slice(0, splitPoint) : pos === 'tengah' || pos === 'bawah' ? paragraphs : [];
-                const bottomParagraphs = canSplitMiddle ? paragraphs.slice(splitPoint) : pos === 'atas' ? paragraphs : [];
-                const qImgKey = `${currentSoal.id}_q_${imageRetryNonce}`;
+              {/* Ordered Rich Content Renderer (Multi-image, Tables, Math, Text) */}
+              <ExamRichContent
+                soal={currentSoal}
+                displayNumber={currentIndex + 1}
+                imageLoadErrors={imageLoadErrors}
+                imageRetryNonce={imageRetryNonce}
+                onImageError={(imgKey) =>
+                  setImageLoadErrors((prev) => ({ ...prev, [imgKey]: true }))
+                }
+                onRetryImage={(imgKey) => {
+                  setImageLoadErrors((prev) => ({ ...prev, [imgKey]: false }));
+                  setImageRetryNonce((n) => n + 1);
+                }}
+                onOpenLightbox={({ imageUrl, title, caption }) =>
+                  setLightboxData({ isOpen: true, imageUrl, title, caption })
+                }
+              />
 
-                const renderQuestionImage = () => {
-                  if (!currentSoal.gambar) return null;
-                  const sizeClass =
-                    currentSoal.gambarUkuran === 'kecil'
-                      ? 'max-w-xs'
-                      : currentSoal.gambarUkuran === 'besar'
-                      ? 'max-w-2xl'
-                      : currentSoal.gambarUkuran === 'asli'
-                      ? 'max-w-full'
-                      : 'max-w-md';
-
-                  if (imageLoadErrors[qImgKey]) {
-                    return (
-                      <div className="my-3 p-4 rounded-2xl border border-amber-200 bg-amber-50 text-center space-y-2 max-w-md mx-auto">
-                        <p className="text-xs font-bold text-amber-800">
-                          Gambar soal gagal dimuat. Periksa koneksi internet Anda.
-                        </p>
-                        <button
-                          type="button"
-                          onClick={() => {
-                            setImageLoadErrors((prev) => ({ ...prev, [qImgKey]: false }));
-                            setImageRetryNonce((n) => n + 1);
-                          }}
-                          className="px-3 py-1.5 bg-amber-600 hover:bg-amber-700 text-white rounded-xl text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer"
-                        >
-                          <RefreshCw className="w-3.5 h-3.5" />
-                          <span>Muat Ulang Gambar</span>
-                        </button>
-                      </div>
-                    );
-                  }
-
-                  return (
-                    <div className="space-y-1.5 my-3">
-                      <div
-                        onClick={() =>
-                          setLightboxData({
-                            isOpen: true,
-                            imageUrl: currentSoal.gambar!,
-                            title: `Gambar Soal Nomor ${currentIndex + 1}`,
-                            caption: currentSoal.gambarCaption,
-                          })
-                        }
-                        className={`relative group rounded-2xl overflow-hidden border border-slate-200 bg-slate-50 p-2 mx-auto cursor-zoom-in transition-all hover:border-blue-400 hover:shadow-md ${sizeClass}`}
-                      >
-                        <img
-                          key={qImgKey}
-                          src={currentSoal.gambar}
-                          alt={currentSoal.gambarCaption || 'Gambar Soal'}
-                          className="max-h-80 w-auto max-w-full object-contain mx-auto rounded-xl select-none"
-                          loading="lazy"
-                          onError={() =>
-                            setImageLoadErrors((prev) => ({ ...prev, [qImgKey]: true }))
-                          }
-                        />
-                        <div className="absolute inset-0 bg-blue-900/20 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center rounded-xl pointer-events-none">
-                          <span className="px-3 py-1.5 rounded-xl bg-white/95 text-blue-900 text-xs font-bold shadow-md flex items-center gap-1.5 backdrop-blur-xs">
-                            <ZoomIn className="w-3.5 h-3.5" />
-                            <span>Perbesar Gambar</span>
-                          </span>
-                        </div>
-                      </div>
-                      {currentSoal.gambarCaption && (
-                        <p className="text-[11px] text-center text-slate-500 font-medium italic">
-                          {currentSoal.gambarCaption}
-                        </p>
-                      )}
-                    </div>
-                  );
-                };
-
-                const renderTextAndTables = (lines: string[]) => {
-                  if (lines.length === 0) return null;
-                  const nodes: React.ReactNode[] = [];
-                  let i = 0;
-
-                  while (i < lines.length) {
-                    const line = lines[i];
-                    if (line.startsWith('|') && line.endsWith('|')) {
-                      const tableLines: string[] = [];
-                      while (i < lines.length && lines[i].startsWith('|') && lines[i].endsWith('|')) {
-                        tableLines.push(lines[i]);
-                        i++;
-                      }
-                      const parsedRows = tableLines
-                        .map((row) =>
-                          row
-                            .slice(1, -1)
-                            .split('|')
-                            .map((c) => c.trim())
-                        )
-                        .filter((cells) => !cells.every((c) => /^:?-+:?$/.test(c)));
-
-                      if (parsedRows.length > 0) {
-                        const headerRow = parsedRows.length > 1 ? parsedRows[0] : null;
-                        const bodyRows = parsedRows.length > 1 ? parsedRows.slice(1) : parsedRows;
-                        nodes.push(
-                          <div key={`tbl-${i}`} className="overflow-x-auto my-2 rounded-xl border border-slate-200">
-                            <table className="w-full text-xs sm:text-sm text-left border-collapse">
-                              {headerRow && (
-                                <thead className="bg-slate-100 text-slate-800 font-bold">
-                                  <tr>
-                                    {headerRow.map((cell, ci) => (
-                                      <th key={ci} className="px-3 py-2 border-b border-r last:border-r-0 border-slate-200">
-                                        {cell}
-                                      </th>
-                                    ))}
-                                  </tr>
-                                </thead>
-                              )}
-                              <tbody className="divide-y divide-slate-200 bg-white">
-                                {bodyRows.map((row, ri) => (
-                                  <tr key={ri}>
-                                    {row.map((cell, ci) => (
-                                      <td key={ci} className="px-3 py-2 border-r last:border-r-0 border-slate-200 text-slate-700">
-                                        {cell}
-                                      </td>
-                                    ))}
-                                  </tr>
-                                ))}
-                              </tbody>
-                            </table>
-                          </div>
-                        );
-                      }
-                    } else {
-                      nodes.push(<p key={`p-${i}`}>{line}</p>);
-                      i++;
-                    }
-                  }
-
-                  return (
-                    <div className="text-sm sm:text-base text-slate-900 leading-relaxed font-medium whitespace-pre-line space-y-2">
-                      {nodes}
-                    </div>
-                  );
-                };
-
-                return (
-                  <div className="space-y-3">
-                    {pos === 'atas' && renderQuestionImage()}
-
-                    {!isPlaceholderImagePrompt && renderTextAndTables(topParagraphs)}
-
-                    {(pos === 'tengah' || pos === 'bawah') && renderQuestionImage()}
-
-                    {!isPlaceholderImagePrompt && renderTextAndTables(bottomParagraphs)}
-                  </div>
-                );
-              })()}
-
-              {/* Answer Choices Form */}
-              {currentSoal.tipe === 'pilihan_ganda' && currentSoal.pilihan ? (
+              {/* Answer Choices Form (Locked Shuffled Permutations Re-labeled A-E) */}
+              {currentSoal.tipe === 'pilihan_ganda' && displayedChoices.length > 0 ? (
                 <div
                   className={`pt-2 ${
-                    currentSoal.pilihanGambar && Object.keys(currentSoal.pilihanGambar).length > 0
-                      ? 'grid grid-cols-1 sm:grid-cols-2 gap-3'
-                      : 'space-y-2.5'
+                    hasAnyChoiceImage ? 'grid grid-cols-1 sm:grid-cols-2 gap-3' : 'space-y-2.5'
                   }`}
                 >
-                  {Object.entries(currentSoal.pilihan).map(([key, text]) => {
-                    const isSelected = currentDetail.jawabanDipilih === key;
-                    const choiceImg = currentSoal.pilihanGambar?.[key];
+                  {displayedChoices.map((choice) => {
+                    const isSelected = selectedOriginalKey === choice.originalKey;
+                    const choiceImg = choice.imageUrl;
+                    const choiceErrKey = `${currentSoal.id}_${choice.originalKey}_${imageRetryNonce}`;
 
                     return (
                       <button
-                        key={key}
+                        key={choice.originalKey}
                         type="button"
-                        onClick={() => handleSelectAnswer(currentSoal.id, key)}
-                        className={`w-full p-4 rounded-2xl border text-left transition-all flex flex-col justify-between gap-3 cursor-pointer ${
+                        onClick={() =>
+                          handleSelectAnswer(
+                            currentSoal.id,
+                            choice.originalKey,
+                            choice.displayLetter,
+                            false
+                          )
+                        }
+                        className={`w-full p-3.5 sm:p-4 rounded-2xl border text-left transition-all flex flex-col justify-between gap-3 cursor-pointer min-h-[52px] ${
                           isSelected
                             ? 'bg-blue-50 border-blue-600 ring-2 ring-blue-600/20 text-blue-950 font-bold shadow-xs'
                             : 'bg-white border-slate-200 hover:border-slate-300 text-slate-800'
                         }`}
                       >
-                        <div className="flex items-start justify-between w-full gap-2">
-                          <div className="flex items-center gap-2.5">
+                        <div className="flex items-start justify-between w-full gap-2.5">
+                          <div className="flex items-start gap-2.5 min-w-0">
                             <span
-                              className={`w-7 h-7 rounded-xl flex items-center justify-center text-xs font-extrabold flex-shrink-0 transition-colors ${
+                              className={`w-8 h-8 rounded-xl flex items-center justify-center text-xs font-extrabold flex-shrink-0 transition-colors ${
                                 isSelected ? 'bg-blue-700 text-white shadow-xs' : 'bg-slate-100 text-slate-700'
                               }`}
                             >
-                              {key}
+                              {choice.displayLetter}
                             </span>
-                            {text && !text.startsWith('(Gambar Pilihan') && (
-                              <span className="text-sm pt-0.5 leading-snug">{text}</span>
+                            {choice.text && !choice.text.startsWith('(Gambar Pilihan') && (
+                              <span className="text-sm pt-1 leading-snug break-words">
+                                {renderMathAndTextInline(choice.text)}
+                              </span>
                             )}
                           </div>
 
@@ -1511,10 +1729,10 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
                                 setLightboxData({
                                   isOpen: true,
                                   imageUrl: choiceImg,
-                                  title: `Pilihan ${key} - Soal Nomor ${currentIndex + 1}`,
+                                  title: `Pilihan ${choice.displayLetter} - Soal Nomor ${currentIndex + 1}`,
                                 });
                               }}
-                              className="p-1 text-slate-400 hover:text-blue-700 hover:bg-blue-50 rounded-lg cursor-zoom-in transition-colors"
+                              className="p-1.5 text-slate-400 hover:text-blue-700 hover:bg-blue-50 rounded-lg cursor-zoom-in transition-colors shrink-0"
                               title="Perbesar Gambar Pilihan"
                             >
                               <ZoomIn className="w-4 h-4" />
@@ -1522,34 +1740,33 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
                           )}
                         </div>
 
-                        {/* Choice Image thumbnail */}
                         {choiceImg && (
                           <div className="rounded-xl overflow-hidden border border-slate-200 bg-slate-50 p-2 flex items-center justify-center max-h-48 w-full">
-                            {imageLoadErrors[`${currentSoal.id}_${key}_${imageRetryNonce}`] ? (
+                            {imageLoadErrors[choiceErrKey] ? (
                               <span
                                 onClick={(e) => {
                                   e.stopPropagation();
                                   setImageLoadErrors((prev) => ({
                                     ...prev,
-                                    [`${currentSoal.id}_${key}_${imageRetryNonce}`]: false,
+                                    [choiceErrKey]: false,
                                   }));
                                   setImageRetryNonce((n) => n + 1);
                                 }}
                                 className="text-[11px] font-bold text-amber-700 hover:underline flex items-center gap-1 py-4"
                               >
-                                <RefreshCw className="w-3.5 h-3.5" /> Muat ulang gambar pilihan {key}
+                                <RefreshCw className="w-3.5 h-3.5" /> Muat ulang gambar pilihan {choice.displayLetter}
                               </span>
                             ) : (
                               <img
-                                key={`${currentSoal.id}_${key}_${imageRetryNonce}`}
+                                key={choiceErrKey}
                                 src={choiceImg}
-                                alt={`Pilihan ${key}`}
+                                alt={`Pilihan ${choice.displayLetter}`}
                                 className="max-h-40 w-auto max-w-full object-contain rounded-lg"
                                 loading="lazy"
                                 onError={() =>
                                   setImageLoadErrors((prev) => ({
                                     ...prev,
-                                    [`${currentSoal.id}_${key}_${imageRetryNonce}`]: true,
+                                    [choiceErrKey]: true,
                                   }))
                                 }
                               />
@@ -1566,7 +1783,7 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
                   <textarea
                     rows={6}
                     value={currentDetail.jawabanDipilih || ''}
-                    onChange={(e) => handleSelectAnswer(currentSoal.id, e.target.value)}
+                    onChange={(e) => handleSelectAnswer(currentSoal.id, e.target.value, undefined, true)}
                     placeholder="Ketik uraian jawaban secara rinci dan teliti di sini..."
                     className="w-full p-4 rounded-2xl border border-slate-200 focus:border-blue-600 focus:ring-4 focus:ring-blue-100 outline-none text-sm transition-all resize-y"
                   />
@@ -1577,9 +1794,10 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
                 </div>
               )}
 
-              {/* Bottom Actions */}
-              <div className="pt-6 border-t border-slate-100 flex items-center justify-between">
+              {/* Desktop Bottom Actions */}
+              <div className="hidden lg:flex pt-6 border-t border-slate-100 items-center justify-between">
                 <button
+                  type="button"
                   onClick={() => setCurrentIndex((prev) => Math.max(0, prev - 1))}
                   disabled={currentIndex === 0}
                   className="px-4 py-2.5 rounded-xl border border-slate-200 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-40 disabled:pointer-events-none transition-colors flex items-center gap-1.5 cursor-pointer"
@@ -1590,6 +1808,7 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
 
                 {isLastQuestion ? (
                   <button
+                    type="button"
                     onClick={() => setShowSubmitModal(true)}
                     className="px-5 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-md transition-colors flex items-center gap-1.5 cursor-pointer"
                   >
@@ -1598,6 +1817,7 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
                   </button>
                 ) : (
                   <button
+                    type="button"
                     onClick={() => setCurrentIndex((prev) => Math.min(totalSoal - 1, prev + 1))}
                     className="px-5 py-2.5 rounded-xl bg-blue-700 hover:bg-blue-600 text-white text-xs font-bold shadow-md transition-colors flex items-center gap-1.5 cursor-pointer"
                   >
@@ -1612,9 +1832,9 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
           )}
         </div>
 
-        {/* Right Column: Numbers Palette */}
-        <div className="space-y-4">
-          <div className="bg-white rounded-3xl p-5 border border-slate-200 shadow-xs space-y-4">
+        {/* Right Column (Desktop): Numbers Palette */}
+        <div className="hidden lg:block space-y-4">
+          <div className="bg-white rounded-3xl p-5 border border-slate-200 shadow-xs space-y-4 sticky top-24">
             <div className="flex items-center justify-between pb-3 border-b border-slate-100">
               <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
                 Navigasi Soal
@@ -1624,7 +1844,6 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
               </span>
             </div>
 
-            {/* Grid numbers */}
             <div className="grid grid-cols-5 gap-2 max-h-80 overflow-y-auto pr-1">
               {soalList.map((q, idx) => {
                 const ans = jawabanState[q.id];
@@ -1635,6 +1854,7 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
                 return (
                   <button
                     key={q.id}
+                    type="button"
                     onClick={() => setCurrentIndex(idx)}
                     className={`h-10 rounded-xl text-xs font-bold transition-all flex items-center justify-center cursor-pointer ${
                       isCurrent ? 'ring-2 ring-blue-600 ring-offset-2' : ''
@@ -1652,7 +1872,6 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
               })}
             </div>
 
-            {/* Legend */}
             <div className="pt-3 border-t border-slate-100 space-y-1.5 text-[11px] text-slate-500">
               <div className="flex items-center gap-2">
                 <span className="w-3 h-3 rounded bg-emerald-600 flex-shrink-0" />
@@ -1660,16 +1879,120 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
               </div>
               <div className="flex items-center gap-2">
                 <span className="w-3 h-3 rounded bg-amber-400 flex-shrink-0" />
-                <span>Ragu-ragu</span>
+                <span>Ragu-ragu ({raguCount})</span>
               </div>
               <div className="flex items-center gap-2">
                 <span className="w-3 h-3 rounded bg-slate-100 border border-slate-200 flex-shrink-0" />
-                <span>Belum Dijawab ({totalSoal - answeredCount})</span>
+                <span>Belum Dijawab ({unansweredCount})</span>
               </div>
             </div>
           </div>
         </div>
       </main>
+
+      {/* Mobile / Tablet Sticky Bottom Navigation Bar (Android Friendly 44px+ Tap Targets) */}
+      <div className="lg:hidden sticky bottom-0 z-30 bg-white/95 backdrop-blur border-t border-slate-200 px-3 pt-2.5 pb-[max(0.625rem,env(safe-area-inset-bottom))] flex items-center justify-between gap-2 shadow-[0_-4px_12px_rgba(15,23,42,0.06)]">
+        <button
+          type="button"
+          onClick={() => setCurrentIndex((prev) => Math.max(0, prev - 1))}
+          disabled={currentIndex === 0}
+          className="px-3.5 min-h-[44px] rounded-xl border border-slate-200 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-40 disabled:pointer-events-none flex items-center gap-1 cursor-pointer"
+        >
+          <ChevronLeft className="w-4 h-4" />
+          <span>Prev</span>
+        </button>
+
+        <button
+          type="button"
+          onClick={() => setShowMobileNavModal(true)}
+          className="flex-1 min-h-[44px] px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer"
+        >
+          <LayoutGrid className="w-4 h-4 text-blue-700" />
+          <span>
+            Soal {currentIndex + 1}/{totalSoal} &bull; {answeredCount} Terjawab
+          </span>
+        </button>
+
+        {isLastQuestion ? (
+          <button
+            type="button"
+            onClick={() => setShowSubmitModal(true)}
+            className="px-4 min-h-[44px] rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold shadow-sm flex items-center gap-1.5 cursor-pointer"
+          >
+            <span>Kumpulkan</span>
+            <Send className="w-3.5 h-3.5" />
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => setCurrentIndex((prev) => Math.min(totalSoal - 1, prev + 1))}
+            className="px-4 min-h-[44px] rounded-xl bg-blue-700 hover:bg-blue-600 text-white text-xs font-bold shadow-sm flex items-center gap-1 cursor-pointer"
+          >
+            <span>Next</span>
+            <ChevronRight className="w-4 h-4" />
+          </button>
+        )}
+      </div>
+
+      {/* Mobile Question Navigator Drawer Modal */}
+      {showMobileNavModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-end sm:items-center justify-center p-0 sm:p-4 lg:hidden">
+          <div className="w-full sm:max-w-md bg-white rounded-t-3xl sm:rounded-3xl p-5 pb-[max(1.25rem,env(safe-area-inset-bottom))] space-y-4 shadow-2xl max-h-[82dvh] flex flex-col">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div>
+                <h3 className="text-sm font-extrabold text-slate-900">Peta Nomor Soal</h3>
+                <p className="text-[11px] text-slate-500">
+                  Terjawab {answeredCount} &bull; Kosong {unansweredCount} &bull; Ragu {raguCount}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowMobileNavModal(false)}
+                className="p-2 rounded-xl bg-slate-100 text-slate-600 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="grid grid-cols-5 gap-2 overflow-y-auto py-1">
+              {soalList.map((q, idx) => {
+                const ans = jawabanState[q.id];
+                const hasAnswer = ans && ans.jawabanDipilih && ans.jawabanDipilih.trim().length > 0;
+                const isRagu = ans && ans.raguRagu;
+                const isCurrent = idx === currentIndex;
+
+                return (
+                  <button
+                    key={q.id}
+                    type="button"
+                    onClick={() => {
+                      setCurrentIndex(idx);
+                      setShowMobileNavModal(false);
+                    }}
+                    className={`h-11 rounded-xl text-xs font-bold transition-all flex items-center justify-center cursor-pointer ${
+                      isCurrent ? 'ring-2 ring-blue-600 ring-offset-2' : ''
+                    } ${
+                      isRagu
+                        ? 'bg-amber-400 text-slate-900'
+                        : hasAnswer
+                        ? 'bg-emerald-600 text-white'
+                        : 'bg-slate-100 text-slate-700'
+                    }`}
+                  >
+                    {idx + 1}
+                  </button>
+                );
+              })}
+            </div>
+
+            <div className="flex items-center justify-between text-[11px] text-slate-500 pt-2 border-t border-slate-100">
+              <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-emerald-600" /> Terjawab</span>
+              <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-amber-400" /> Ragu-ragu</span>
+              <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-slate-200" /> Kosong</span>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Confirmation Submit Modal */}
       {showSubmitModal && (
@@ -1681,12 +2004,28 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
 
             <div>
               <h3 className="text-lg font-bold text-slate-900">Konfirmasi Kumpulkan Ujian</h3>
-              <p className="text-xs text-slate-600 mt-1.5 leading-relaxed">
-                Anda telah menjawab <strong>{answeredCount}</strong> dari total <strong>{totalSoal}</strong>{' '}
-                butir soal.
-                {totalSoal - answeredCount > 0 && (
-                  <span className="block mt-1 text-amber-700 font-semibold">
-                    Perhatian: Masih ada {totalSoal - answeredCount} butir soal yang belum Anda isi!
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 my-3 text-center">
+                <div className="p-2.5 rounded-xl bg-slate-50 border border-slate-200">
+                  <span className="block text-base font-extrabold text-slate-900">{totalSoal}</span>
+                  <span className="text-[10px] text-slate-500">Total Soal</span>
+                </div>
+                <div className="p-2.5 rounded-xl bg-emerald-50 border border-emerald-200">
+                  <span className="block text-base font-extrabold text-emerald-700">{answeredCount}</span>
+                  <span className="text-[10px] text-emerald-700">Terjawab</span>
+                </div>
+                <div className="p-2.5 rounded-xl bg-rose-50 border border-rose-200">
+                  <span className="block text-base font-extrabold text-rose-700">{unansweredCount}</span>
+                  <span className="text-[10px] text-rose-700">Belum Dijawab</span>
+                </div>
+                <div className="p-2.5 rounded-xl bg-amber-50 border border-amber-200">
+                  <span className="block text-base font-extrabold text-amber-700">{raguCount}</span>
+                  <span className="text-[10px] text-amber-700">Ragu-ragu</span>
+                </div>
+              </div>
+              <p className="text-xs text-slate-600 leading-relaxed">
+                {unansweredCount > 0 && (
+                  <span className="block mb-1 text-amber-700 font-semibold">
+                    Perhatian: Masih ada {unansweredCount} butir soal yang belum Anda isi!
                   </span>
                 )}
                 Apakah Anda yakin ingin menyelesaikan dan mengumpulkan lembar jawaban sekarang?
@@ -1695,12 +2034,14 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
 
             <div className="flex gap-2.5 pt-2">
               <button
+                type="button"
                 onClick={() => setShowSubmitModal(false)}
                 className="flex-1 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-700 rounded-xl text-xs font-bold transition-colors cursor-pointer"
               >
                 Periksa Kembali
               </button>
               <button
+                type="button"
                 onClick={handleSubmitExam}
                 disabled={isSubmitting}
                 className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold shadow-md transition-colors cursor-pointer flex items-center justify-center gap-1.5"
@@ -1721,15 +2062,16 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
 
       {/* Proctoring Warning Toast */}
       {cheatWarning && (
-        <div className="fixed bottom-6 right-6 z-50 max-w-sm bg-red-600 text-white p-4 rounded-2xl shadow-xl flex items-start gap-3 animate-in fade-in slide-in-from-bottom">
+        <div className="fixed bottom-20 lg:bottom-6 right-4 left-4 sm:left-auto z-50 sm:max-w-sm bg-red-600 text-white p-4 rounded-2xl shadow-xl flex items-start gap-3 animate-in fade-in slide-in-from-bottom">
           <ShieldAlert className="w-5 h-5 flex-shrink-0 mt-0.5 text-amber-300" />
           <div className="flex-1 text-xs">
             <h4 className="font-bold">Peringatan Pengawasan!</h4>
             <p className="mt-0.5 text-red-100">{cheatWarning}</p>
           </div>
           <button
+            type="button"
             onClick={() => setCheatWarning(null)}
-            className="text-white hover:text-red-200 text-xs font-bold"
+            className="text-white hover:text-red-200 text-xs font-bold shrink-0 cursor-pointer"
           >
             Tutup
           </button>

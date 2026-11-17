@@ -164,7 +164,7 @@ export interface AbsensiGuru {
   tanggal: string; // YYYY-MM-DD
   jamMasuk: string; // HH:mm:ss
   jamPulang?: string; // HH:mm:ss
-  status: 'Hadir' | 'Terlambat' | 'Izin' | 'Sakit' | 'Dinas Luar';
+  status: 'Hadir' | 'Terlambat' | 'Izin' | 'Sakit' | 'Alpa' | 'Dinas Luar';
   keterangan?: string;
 }
 
@@ -429,6 +429,22 @@ export interface BahanAjarAI {
 
 export type TipeSoalUjian = 'pilihan_ganda' | 'uraian';
 
+export type ModePengacakanUjian = 'off' | 'sama' | 'per_siswa';
+
+export type KontenElemenSoal =
+  | { id: string; tipe: 'teks'; isi: string }
+  | { id: string; tipe: 'tabel'; markdown: string }
+  | { id: string; tipe: 'rumus'; isi: string }
+  | {
+      id: string;
+      tipe: 'gambar';
+      url: string;
+      imageId?: string;
+      storagePath?: string;
+      caption?: string;
+      ukuran?: 'kecil' | 'sedang' | 'besar' | 'asli';
+    };
+
 export interface ExamImageMeta {
   id: string;
   schoolId: string;
@@ -452,6 +468,7 @@ export interface SoalUjian {
   nomor: number;
   tipe: TipeSoalUjian;
   pertanyaan: string;
+  kontenElemen?: KontenElemenSoal[]; // Susunan elemen berurutan persis dokumen (teks, gambar, tabel, rumus)
   pilihan?: { [key: string]: string }; // A, B, C, D, E (teks pilihan)
   pilihanGambar?: { [key: string]: string }; // A, B, C, D, E (gambar pilihan)
   pilihanGambarMeta?: { [key: string]: { imageId?: string; storagePath?: string } };
@@ -463,6 +480,13 @@ export interface SoalUjian {
   gambarCaption?: string;
   gambarPosisi?: 'atas' | 'tengah' | 'bawah';
   gambarUkuran?: 'kecil' | 'sedang' | 'besar' | 'asli';
+  gambarTambahan?: Array<{
+    url: string;
+    imageId?: string;
+    storagePath?: string;
+    caption?: string;
+    posisi?: 'atas' | 'tengah' | 'bawah';
+  }>;
   gambarStatus?: 'ok' | 'warning' | 'error';
   gambarWarning?: string;
   pedomanPenilaian?: string; // Rubrik skor untuk soal uraian
@@ -488,8 +512,12 @@ export interface UjianOnline {
   kkm: number; // default 75
   status: StatusUjian;
   soalList: SoalUjian[];
+  jumlahSoalTampil?: number; // 0 atau undefined = tampilkan seluruh soal
   acakSoal: boolean;
   acakPilihan: boolean;
+  modeAcakSoal?: ModePengacakanUjian;
+  modeAcakPilihan?: ModePengacakanUjian;
+  modeFullscreen?: boolean; // default true
   tampilkanNilaiLangsung: boolean;
   tampilkanPembahasan: boolean;
   kodeUjian?: string; // 6-digit PIN akses umum
@@ -503,11 +531,14 @@ export interface UjianOnline {
 export type StatusSesiUjian = 'terverifikasi' | 'sedang_mengerjakan' | 'mengerjakan' | 'selesai' | 'waktu_habis' | 'terkunci';
 
 export interface DetailJawabanSiswa {
-  jawabanDipilih: string;
+  jawabanDipilih: string; // Selalu menyimpan ID/huruf opsi asli (e.g. 'C') atau teks uraian
+  opsiAsliDipilih?: string; // Pemetaan huruf opsi asli sebelum acak pilihan
+  opsiTampilDipilih?: string; // Huruf yang terlihat di layar siswa saat memilih (A-E)
   raguRagu?: boolean;
   nilaiManual?: number; // Nilai koreksi guru untuk uraian
   catatanGuru?: string;
   waktuJawab?: string;
+  clientUpdatedAt?: number;
 }
 
 export interface LogPelanggaranSesi {
@@ -530,12 +561,21 @@ export interface SesiUjianSiswa {
   waktuMulai?: string;
   waktuSelesai?: string;
   durasiDetik?: number;
+  urutanSoalIds?: string[]; // Urutan soal terkunci per sesi agar konsisten saat refresh
+  urutanPilihanMap?: { [soalId: string]: string[] }; // e.g. { soalId: ['C', 'A', 'D', 'B'] }
   jawaban: { [soalId: string]: DetailJawabanSiswa };
   nilaiPg: number; // 0 - 100
   nilaiUraian: number; // 0 - 100
   nilaiAkhir: number; // 0 - 100 proporsional
+  jumlahBenar?: number;
+  jumlahSalah?: number;
+  jumlahKosong?: number;
   lulusKkm: boolean;
   adaUraianBelumDinilai: boolean;
+  gradedBy?: 'backend' | 'local';
+  gradedAt?: string;
+  pendingSubmitSync?: boolean;
+  syncVersion?: number;
   jumlahPelanggaran: number;
   logPelanggaran: LogPelanggaranSesi[];
   deviceInfo?: {
@@ -548,4 +588,66 @@ export interface SesiUjianSiswa {
   createdAt: string;
   updatedAt: string;
 }
+
+// ==================== AI PEMBACA SOAL OTOMATIS BERBASIS FILE ====================
+
+export type AiReaderStatusTerbaca = 'terbaca' | 'kurang_jelas' | 'tidak_terbaca';
+export type AiReaderStatusJawaban =
+  | 'belum_dijawab'
+  | 'terjawab'
+  | 'informasi_tidak_cukup'
+  | 'tidak_terbaca';
+
+export interface AiReaderQuestionItem {
+  id: string;
+  nomor: number;
+  nomorTeksAsli?: string;
+  sumberFile: string;
+  halaman?: number;
+  tipe: 'pilihan_ganda' | 'uraian';
+  pertanyaan: string;
+  pilihan?: {
+    A?: string;
+    B?: string;
+    C?: string;
+    D?: string;
+    E?: string;
+    [key: string]: string | undefined;
+  };
+  kunciAsliDokumen?: string;
+  jawaban?: string;
+  pembahasan?: string;
+  langkahMatematika?: string[];
+  statusTerbaca: AiReaderStatusTerbaca;
+  statusJawaban: AiReaderStatusJawaban;
+  catatanPembacaan?: string;
+  mengandungVisual?: boolean;
+  previewGambarDataUri?: string;
+}
+
+export interface AiReaderValidationReport {
+  totalSoal: number;
+  urutanValid: boolean;
+  nomorTerurut: number[];
+  nomorHilang: number[];
+  nomorDuplikat: number[];
+  soalTidakTerbaca: number[];
+  soalInformasiKurang: number[];
+  peringatanHalaman: string[];
+  kesesuaianJawabanIssues: string[];
+}
+
+export interface AiReaderSessionRecord {
+  id: string;
+  schoolId?: string;
+  guruId?: string;
+  guruName?: string;
+  judul: string;
+  namaFiles: string[];
+  soalList: AiReaderQuestionItem[];
+  validation: AiReaderValidationReport;
+  createdAt: string;
+  updatedAt: string;
+}
+
 

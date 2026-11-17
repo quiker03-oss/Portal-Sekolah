@@ -21,7 +21,6 @@ interface PortalLoginProps {
 export const PortalLogin: React.FC<PortalLoginProps> = ({
   onLoginSuccess,
   onNavigateToSuperAdmin,
-  onNavigateToUjian,
 }) => {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
@@ -292,23 +291,6 @@ export const PortalLogin: React.FC<PortalLoginProps> = ({
               </button>
             </form>
 
-            {/* Direct CBT Student Access */}
-            <div className="pt-4 mt-2 border-t border-slate-100 text-center">
-              <button
-                type="button"
-                onClick={() => {
-                  if (onNavigateToUjian) {
-                    onNavigateToUjian();
-                  } else {
-                    window.location.hash = '#ujian';
-                  }
-                }}
-                className="w-full py-2.5 px-4 bg-indigo-50 hover:bg-indigo-100 text-indigo-700 border border-indigo-200/80 rounded-xl text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer shadow-xs"
-              >
-                <GraduationCap className="w-4 h-4 text-indigo-600" />
-                <span>Pintu Masuk Siswa &bull; Ujian Online (CBT)</span>
-              </button>
-            </div>
           </div>
         </div>
       </main>

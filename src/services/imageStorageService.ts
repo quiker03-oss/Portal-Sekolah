@@ -370,6 +370,10 @@ export async function uploadExamQuestionsImages(
 ): Promise<SoalUjian[]> {
   const results: SoalUjian[] = [];
   let storageUnavailable = false;
+  const uploadedCache = new Map<
+    string,
+    { url: string; imageId: string; storagePath?: string }
+  >();
   let totalEmbeddedImages = 0;
 
   for (const s of soalList) {
@@ -379,33 +383,72 @@ export async function uploadExamQuestionsImages(
         if (val && val.startsWith('data:image/')) totalEmbeddedImages++;
       }
     }
+    if (Array.isArray(s.kontenElemen)) {
+      for (const el of s.kontenElemen) {
+        if (el.tipe === 'gambar' && el.url.startsWith('data:image/')) totalEmbeddedImages++;
+      }
+    }
+    if (Array.isArray(s.gambarTambahan)) {
+      for (const ex of s.gambarTambahan) {
+        if (ex.url && ex.url.startsWith('data:image/')) totalEmbeddedImages++;
+      }
+    }
   }
 
   let processedImages = 0;
 
+  const uploadWithDedup = async (
+    soal: SoalUjian,
+    idx: number,
+    dataUri: string,
+    suffix: string,
+    targetType: 'soal' | 'pilihan',
+    choiceLetter?: string,
+    caption?: string
+  ) => {
+    const cached = uploadedCache.get(dataUri);
+    if (cached) {
+      processedImages++;
+      return cached;
+    }
+    processedImages++;
+    onProgress?.(`Mengoptimalkan & mengunggah gambar ${processedImages}/${totalEmbeddedImages}...`);
+    const up = await uploadExamImage(
+      schoolId,
+      examId,
+      soal.id,
+      dataUri,
+      `soal_${soal.nomor || idx + 1}_${suffix}`,
+      {
+        targetType,
+        choiceLetter,
+        caption,
+        createdBy,
+        skipStorage: storageUnavailable,
+        timeoutMs: 5000,
+      }
+    );
+    if (up.storageFailed) storageUnavailable = true;
+    const entry = { url: up.url, imageId: up.imageId, storagePath: up.storagePath };
+    uploadedCache.set(dataUri, entry);
+    return entry;
+  };
+
   for (let i = 0; i < soalList.length; i++) {
     const soal = { ...soalList[i] };
 
-    // 1. Question image
+    // 1. Primary question image
     if (soal.gambar && soal.gambar.startsWith('data:image/')) {
-      processedImages++;
-      onProgress?.(`Mengoptimalkan & mengunggah gambar ${processedImages}/${totalEmbeddedImages}...`);
       try {
-        const up = await uploadExamImage(
-          schoolId,
-          examId,
-          soal.id,
+        const up = await uploadWithDedup(
+          soal,
+          i,
           soal.gambar,
-          `soal_${soal.nomor || i + 1}`,
-          {
-            targetType: 'soal',
-            caption: soal.gambarCaption,
-            createdBy,
-            skipStorage: storageUnavailable,
-            timeoutMs: 5000,
-          }
+          'utama',
+          'soal',
+          undefined,
+          soal.gambarCaption
         );
-        if (up.storageFailed) storageUnavailable = true;
         soal.gambar = up.url;
         soal.gambarId = up.imageId;
         soal.gambarStoragePath = up.storagePath;
@@ -417,7 +460,74 @@ export async function uploadExamQuestionsImages(
       }
     }
 
-    // 2. Choice images (A-E)
+    // 2. Ordered content blocks (kontenElemen) multi-image support
+    if (Array.isArray(soal.kontenElemen) && soal.kontenElemen.length > 0) {
+      const updatedBlocks = [];
+      let blkImgIdx = 0;
+      for (const el of soal.kontenElemen) {
+        if (el.tipe === 'gambar' && el.url && el.url.startsWith('data:image/')) {
+          blkImgIdx++;
+          try {
+            const up = await uploadWithDedup(
+              soal,
+              i,
+              el.url,
+              `blk_${blkImgIdx}`,
+              'soal',
+              undefined,
+              el.caption
+            );
+            updatedBlocks.push({
+              ...el,
+              url: up.url,
+              imageId: up.imageId,
+              storagePath: up.storagePath,
+            });
+          } catch {
+            storageUnavailable = true;
+            updatedBlocks.push(el);
+          }
+        } else {
+          updatedBlocks.push(el);
+        }
+      }
+      soal.kontenElemen = updatedBlocks;
+    }
+
+    // 3. Additional question images (gambarTambahan)
+    if (Array.isArray(soal.gambarTambahan) && soal.gambarTambahan.length > 0) {
+      const updatedExtras = [];
+      for (let exIdx = 0; exIdx < soal.gambarTambahan.length; exIdx++) {
+        const ex = soal.gambarTambahan[exIdx];
+        if (ex.url && ex.url.startsWith('data:image/')) {
+          try {
+            const up = await uploadWithDedup(
+              soal,
+              i,
+              ex.url,
+              `extra_${exIdx + 1}`,
+              'soal',
+              undefined,
+              ex.caption
+            );
+            updatedExtras.push({
+              ...ex,
+              url: up.url,
+              imageId: up.imageId,
+              storagePath: up.storagePath,
+            });
+          } catch {
+            storageUnavailable = true;
+            updatedExtras.push(ex);
+          }
+        } else {
+          updatedExtras.push(ex);
+        }
+      }
+      soal.gambarTambahan = updatedExtras;
+    }
+
+    // 4. Choice images (A-E)
     if (soal.pilihanGambar) {
       const updatedChoices = { ...soal.pilihanGambar };
       const updatedMeta = { ...(soal.pilihanGambarMeta || {}) };
@@ -425,24 +535,15 @@ export async function uploadExamQuestionsImages(
       for (const letter of Object.keys(updatedChoices)) {
         const imgVal = updatedChoices[letter];
         if (imgVal && imgVal.startsWith('data:image/')) {
-          processedImages++;
-          onProgress?.(`Mengoptimalkan & mengunggah gambar ${processedImages}/${totalEmbeddedImages}...`);
           try {
-            const up = await uploadExamImage(
-              schoolId,
-              examId,
-              soal.id,
+            const up = await uploadWithDedup(
+              soal,
+              i,
               imgVal,
-              `soal_${soal.nomor || i + 1}_pilihan_${letter}`,
-              {
-                targetType: 'pilihan',
-                choiceLetter: letter,
-                createdBy,
-                skipStorage: storageUnavailable,
-                timeoutMs: 5000,
-              }
+              `pilihan_${letter}`,
+              'pilihan',
+              letter
             );
-            if (up.storageFailed) storageUnavailable = true;
             updatedChoices[letter] = up.url;
             updatedMeta[letter] = {
               imageId: up.imageId,
@@ -450,7 +551,6 @@ export async function uploadExamQuestionsImages(
             };
           } catch {
             storageUnavailable = true;
-            // Retain existing Data URI on error
           }
         }
       }

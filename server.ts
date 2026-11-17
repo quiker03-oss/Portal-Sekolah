@@ -152,6 +152,195 @@ async function startServer() {
     }
   });
 
+  // Authoritative server clock for CBT timer & schedule window
+  app.get("/api/ujian/time", (_req, res) => {
+    const now = new Date();
+    res.json({
+      success: true,
+      serverTimeMs: now.getTime(),
+      serverIso: now.toISOString(),
+    });
+  });
+
+  // Sanitized CBT exam fetch (never sends kunciJawaban or pedomanPenilaian to students)
+  app.get("/api/ujian/exam", async (req, res) => {
+    try {
+      const id = typeof req.query?.id === "string" ? req.query.id : "";
+      const school = typeof req.query?.school === "string" ? req.query.school : undefined;
+      if (!id) {
+        return res.status(400).json({ success: false, error: "Parameter id ujian diperlukan." });
+      }
+      const { getSanitizedExamPayloadForStudent } = await import("./api/_lib/ujianBackend.ts");
+      const result = await getSanitizedExamPayloadForStudent(id, school);
+      if (!result.found) {
+        return res.status(404).json({
+          success: false,
+          error: "Naskah ujian tidak ditemukan.",
+          serverTimeMs: result.serverTimeMs,
+        });
+      }
+      return res.json({
+        success: true,
+        schoolId: result.schoolId,
+        exam: result.exam,
+        serverTimeMs: result.serverTimeMs,
+        scheduleCheck: result.scheduleCheck,
+      });
+    } catch (err: any) {
+      return res.status(500).json({
+        success: false,
+        error: err?.message || "Gagal memuat naskah ujian dari server.",
+      });
+    }
+  });
+
+  // Authoritative CBT exam submission & server-side grading endpoint
+  app.post("/api/ujian/submit", async (req, res) => {
+    try {
+      const body = req.body && typeof req.body === "object" ? req.body : {};
+      if (!body.ujianId || !body.sessionId) {
+        return res.status(400).json({
+          success: false,
+          error: "Parameter ujianId dan sessionId wajib diisi.",
+        });
+      }
+      const { submitAndGradeExamOnBackend } = await import("./api/_lib/ujianBackend.ts");
+      const result = await submitAndGradeExamOnBackend(body);
+      if (!result.success) {
+        return res.status(404).json(result);
+      }
+      return res.json(result);
+    } catch (err: any) {
+      return res.status(500).json({
+        success: false,
+        error: err?.message || "Gagal menilai & mengirim jawaban ke server.",
+      });
+    }
+  });
+
+  // AI Pembaca Soal Otomatis: Read document chunk/pages
+  app.post("/api/ai-reader/read", async (req, res) => {
+    try {
+      const { readQuestionsForAiReaderWithGemini, getGeminiApiKey } = await import(
+        "./api/_lib/geminiBackend.ts"
+      );
+      if (!getGeminiApiKey()) {
+        return res.status(503).json({
+          success: false,
+          error: "GEMINI_API_KEY belum dikonfigurasi pada server.",
+        });
+      }
+
+      const {
+        fileBase64,
+        fileName = "dokumen-soal",
+        mimeType,
+        text,
+        pages,
+        chunkLabel,
+      } = req.body && typeof req.body === "object" ? req.body : {};
+
+      const hasValidBase64 = typeof fileBase64 === "string" && fileBase64.trim().length > 0;
+      const hasValidText = typeof text === "string" && text.trim().length > 0;
+      const normalizedPages = Array.isArray(pages)
+        ? pages
+            .filter(
+              (p: any) =>
+                p &&
+                typeof p === "object" &&
+                typeof p.imageBase64 === "string" &&
+                p.imageBase64.trim().length > 0
+            )
+            .map((p: any) => ({
+              pageNumber: typeof p.pageNumber === "number" ? p.pageNumber : undefined,
+              imageBase64: p.imageBase64.trim(),
+              mimeType:
+                typeof p.mimeType === "string" && p.mimeType.trim()
+                  ? p.mimeType.trim().toLowerCase()
+                  : "image/jpeg",
+            }))
+        : [];
+
+      if (!hasValidBase64 && !hasValidText && normalizedPages.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: "Konten berkas, halaman gambar, atau teks soal tidak ditemukan.",
+        });
+      }
+
+      const result = await readQuestionsForAiReaderWithGemini({
+        text: hasValidText ? text : undefined,
+        fileBase64: hasValidBase64 ? fileBase64 : undefined,
+        mimeType: typeof mimeType === "string" ? mimeType.trim().toLowerCase() : undefined,
+        fileName: typeof fileName === "string" && fileName.trim() ? fileName.trim() : "dokumen-soal",
+        pages: normalizedPages.length > 0 ? normalizedPages : undefined,
+        chunkLabel: typeof chunkLabel === "string" ? chunkLabel : undefined,
+      });
+
+      res.json({ success: true, data: result });
+    } catch (err: any) {
+      res.status(500).json({
+        success: false,
+        error: err?.message || "Gagal membaca soal dari berkas menggunakan AI.",
+      });
+    }
+  });
+
+  // AI Pembaca Soal Otomatis: Answer & explain question batch
+  app.post("/api/ai-reader/answer", async (req, res) => {
+    try {
+      const { answerQuestionsForAiReaderWithGemini, getGeminiApiKey } = await import(
+        "./api/_lib/geminiBackend.ts"
+      );
+      if (!getGeminiApiKey()) {
+        return res.status(503).json({
+          success: false,
+          error: "GEMINI_API_KEY belum dikonfigurasi pada server.",
+        });
+      }
+
+      const { questions, pageImages } =
+        req.body && typeof req.body === "object" ? req.body : {};
+      if (!Array.isArray(questions) || questions.length === 0) {
+        return res.status(400).json({
+          success: false,
+          error: "Daftar soal yang akan dijawab kosong.",
+        });
+      }
+
+      const normalizedPageImages = Array.isArray(pageImages)
+        ? pageImages
+            .filter(
+              (p: any) =>
+                p &&
+                typeof p === "object" &&
+                typeof p.imageBase64 === "string" &&
+                p.imageBase64.trim().length > 0
+            )
+            .map((p: any) => ({
+              pageNumber: typeof p.pageNumber === "number" ? p.pageNumber : undefined,
+              imageBase64: p.imageBase64.trim(),
+              mimeType:
+                typeof p.mimeType === "string" && p.mimeType.trim()
+                  ? p.mimeType.trim().toLowerCase()
+                  : "image/jpeg",
+            }))
+        : undefined;
+
+      const result = await answerQuestionsForAiReaderWithGemini({
+        questions,
+        pageImages: normalizedPageImages,
+      });
+
+      res.json({ success: true, data: result });
+    } catch (err: any) {
+      res.status(500).json({
+        success: false,
+        error: err?.message || "Gagal menjawab soal menggunakan AI.",
+      });
+    }
+  });
+
   // Vite middleware setup
   if (process.env.NODE_ENV !== "production") {
     const vite = await createViteServer({

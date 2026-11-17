@@ -2,7 +2,7 @@
 // Supports real Word (.docx) and PDF (.pdf) with embedded illustrations and images
 import { Document, Packer, Paragraph, TextRun, HeadingLevel, AlignmentType, ImageRun, Table, TableRow, TableCell, WidthType, BorderStyle } from 'docx';
 import jsPDF from 'jspdf';
-import { ModulAjarAI, BahanAjarAI, LkpdData } from '../types';
+import { ModulAjarAI, BahanAjarAI, LkpdData, AiReaderSessionRecord } from '../types';
 
 /**
  * Converts a base64 / dataURI or SVG data URI to a Uint8Array for docx ImageRun,
@@ -507,4 +507,345 @@ export function exportLkpdToPdf(bahanAjar: BahanAjarAI) {
   });
 
   doc.save(`LKPD-Visual-${lkpd.mataPelajaran.replace(/\s+/g, '_')}-${lkpd.kelas.replace(/\s+/g, '_')}.pdf`);
+}
+
+// =========================================================================
+// 4. EXPORT AI PEMBACA SOAL OTOMATIS (WORD .DOCX & PDF .PDF)
+// =========================================================================
+
+function normalizeTextForPdf(input: string): string {
+  return String(input || '')
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2013\u2014]/g, '-')
+    .replace(/\u2022/g, '-')
+    .replace(/\u00D7/g, 'x')
+    .replace(/\u00F7/g, '/')
+    .replace(/\u2264/g, '<=')
+    .replace(/\u2265/g, '>=')
+    .replace(/\u2260/g, '!=')
+    .replace(/\u00B1/g, '+/-')
+    .replace(/\u221A/g, 'akar ')
+    .replace(/\u00B2/g, '^2')
+    .replace(/\u00B3/g, '^3')
+    .replace(/\u00B0/g, ' derajat')
+    .replace(/\u2192/g, '->')
+    .replace(/\u03C0/g, 'pi')
+    .replace(/[^\x09\x0A\x0D\x20-\x7E\xA0-\xFF]/g, ' ');
+}
+
+export async function exportAiReaderToDocx(
+  session: AiReaderSessionRecord,
+  schoolName?: string
+) {
+  if (!session || !Array.isArray(session.soalList) || session.soalList.length === 0) {
+    throw new Error('Tidak ada daftar soal yang dapat diekspor ke Word.');
+  }
+
+  const children: Paragraph[] = [
+    new Paragraph({
+      text: session.judul || 'HASIL PEMBACAAN & PEMBAHASAN SOAL AI',
+      heading: HeadingLevel.HEADING_1,
+      alignment: AlignmentType.CENTER,
+      spacing: { after: 120 },
+    }),
+    new Paragraph({
+      alignment: AlignmentType.CENTER,
+      children: [
+        new TextRun({
+          text: `${schoolName ? `${schoolName} · ` : ''}Sumber: ${session.namaFiles.join(', ') || '-'} · Total: ${session.soalList.length} Soal`,
+          size: 20,
+          color: '475569',
+        }),
+      ],
+      spacing: { after: 280 },
+    }),
+  ];
+
+  for (const q of session.soalList) {
+    children.push(
+      new Paragraph({
+        children: [
+          new TextRun({
+            text: `NOMOR SOAL: ${q.nomor}`,
+            bold: true,
+            size: 24,
+            color: '1E3A8A',
+          }),
+          ...(q.sumberFile
+            ? [
+                new TextRun({
+                  text: `  (${q.sumberFile}${q.halaman ? ` · Hal. ${q.halaman}` : ''})`,
+                  size: 18,
+                  color: '64748B',
+                }),
+              ]
+            : []),
+        ],
+        spacing: { before: 220, after: 80 },
+      })
+    );
+
+    children.push(
+      new Paragraph({
+        children: [new TextRun({ text: 'PERTANYAAN:', bold: true, size: 22 })],
+        spacing: { after: 40 },
+      })
+    );
+
+    q.pertanyaan.split('\n').forEach((line) => {
+      children.push(
+        new Paragraph({
+          children: [new TextRun({ text: line || ' ', size: 22 })],
+          spacing: { after: 40 },
+        })
+      );
+    });
+
+    if (q.previewGambarDataUri) {
+      const imgBuffer = await dataUriToImageUint8Array(q.previewGambarDataUri);
+      if (imgBuffer) {
+        children.push(
+          new Paragraph({
+            alignment: AlignmentType.LEFT,
+            children: [
+              new ImageRun({
+                data: imgBuffer,
+                transformation: { width: 320, height: 220 },
+                type: 'jpg',
+              }),
+            ],
+            spacing: { before: 60, after: 80 },
+          })
+        );
+      }
+    }
+
+    if (q.pilihan && Object.keys(q.pilihan).length > 0) {
+      children.push(
+        new Paragraph({
+          children: [new TextRun({ text: 'PILIHAN JAWABAN:', bold: true, size: 22 })],
+          spacing: { before: 80, after: 40 },
+        })
+      );
+      (['A', 'B', 'C', 'D', 'E'] as const).forEach((key) => {
+        const opt = q.pilihan?.[key];
+        if (opt) {
+          children.push(
+            new Paragraph({
+              children: [new TextRun({ text: `${key}. ${opt}`, size: 22 })],
+              indent: { left: 280 },
+              spacing: { after: 30 },
+            })
+          );
+        }
+      });
+    }
+
+    children.push(
+      new Paragraph({
+        children: [
+          new TextRun({ text: 'JAWABAN: ', bold: true, size: 22, color: '047857' }),
+          new TextRun({
+            text: q.jawaban || '(Belum dijawab)',
+            bold: Boolean(q.jawaban),
+            size: 22,
+          }),
+        ],
+        spacing: { before: 80, after: 60 },
+      })
+    );
+
+    children.push(
+      new Paragraph({
+        children: [new TextRun({ text: 'PEMBAHASAN:', bold: true, size: 22 })],
+        spacing: { after: 40 },
+      })
+    );
+
+    const pembahasanText = q.pembahasan || '(Belum ada pembahasan)';
+    pembahasanText.split('\n').forEach((line) => {
+      children.push(
+        new Paragraph({
+          children: [new TextRun({ text: line || ' ', size: 21, color: '1E293B' })],
+          spacing: { after: 40 },
+        })
+      );
+    });
+
+    if (Array.isArray(q.langkahMatematika) && q.langkahMatematika.length > 0) {
+      children.push(
+        new Paragraph({
+          children: [new TextRun({ text: 'Langkah Penyelesaian:', bold: true, size: 21 })],
+          spacing: { before: 60, after: 30 },
+        })
+      );
+      q.langkahMatematika.forEach((step, sIdx) => {
+        children.push(
+          new Paragraph({
+            children: [new TextRun({ text: `${sIdx + 1}. ${step}`, size: 21 })],
+            indent: { left: 280 },
+            spacing: { after: 30 },
+          })
+        );
+      });
+    }
+
+    children.push(
+      new Paragraph({
+        border: {
+          bottom: { color: 'CBD5E1', space: 4, style: BorderStyle.SINGLE, size: 6 },
+        },
+        spacing: { before: 100, after: 140 },
+      })
+    );
+  }
+
+  const doc = new Document({
+    sections: [
+      {
+        properties: {
+          page: {
+            margin: { top: 960, bottom: 960, left: 1080, right: 1080 },
+          },
+        },
+        children,
+      },
+    ],
+  });
+
+  const blob = await Packer.toBlob(doc);
+  const safeName = (session.judul || 'Pembaca_Soal_AI').replace(/[^a-zA-Z0-9_-]+/g, '_');
+  downloadBlob(blob, `${safeName}.docx`);
+}
+
+export function exportAiReaderToPdf(
+  session: AiReaderSessionRecord,
+  schoolName?: string
+) {
+  if (!session || !Array.isArray(session.soalList) || session.soalList.length === 0) {
+    throw new Error('Tidak ada daftar soal yang dapat diekspor ke PDF.');
+  }
+
+  const doc = new jsPDF({ orientation: 'portrait', unit: 'mm', format: 'a4' });
+  const pageWidth = 210;
+  const pageHeight = 297;
+  const margin = 16;
+  const contentWidth = pageWidth - margin * 2;
+  let y = 18;
+
+  const ensureSpace = (neededMm: number) => {
+    if (y + neededMm > pageHeight - 16) {
+      doc.addPage();
+      y = 18;
+    }
+  };
+
+  const writeWrapped = (
+    rawText: string,
+    options: { fontSize?: number; bold?: boolean; indent?: number; color?: [number, number, number]; lineHeight?: number } = {}
+  ) => {
+    const fontSize = options.fontSize ?? 10;
+    const indent = options.indent ?? 0;
+    const lineHeight = options.lineHeight ?? 4.8;
+    const color = options.color ?? [30, 41, 59];
+
+    doc.setFont('helvetica', options.bold ? 'bold' : 'normal');
+    doc.setFontSize(fontSize);
+    doc.setTextColor(color[0], color[1], color[2]);
+
+    const normalized = normalizeTextForPdf(rawText);
+    const lines = doc.splitTextToSize(normalized, contentWidth - indent);
+    for (const line of lines) {
+      ensureSpace(lineHeight + 2);
+      doc.text(line, margin + indent, y);
+      y += lineHeight;
+    }
+  };
+
+  // Document Header
+  doc.setFont('helvetica', 'bold');
+  doc.setFontSize(13);
+  doc.setTextColor(15, 23, 42);
+  const titleLines = doc.splitTextToSize(
+    normalizeTextForPdf(session.judul || 'HASIL PEMBACAAN & PEMBAHASAN SOAL AI'),
+    contentWidth
+  );
+  titleLines.forEach((line: string) => {
+    doc.text(line, pageWidth / 2, y, { align: 'center' });
+    y += 5.5;
+  });
+
+  doc.setFont('helvetica', 'normal');
+  doc.setFontSize(9);
+  doc.setTextColor(100, 116, 139);
+  const metaLine = normalizeTextForPdf(
+    `${schoolName ? `${schoolName} | ` : ''}Sumber: ${session.namaFiles.join(', ') || '-'} | Total: ${session.soalList.length} Soal`
+  );
+  const metaLines = doc.splitTextToSize(metaLine, contentWidth);
+  metaLines.forEach((line: string) => {
+    doc.text(line, pageWidth / 2, y, { align: 'center' });
+    y += 4.2;
+  });
+  y += 3;
+  doc.setDrawColor(203, 213, 225);
+  doc.line(margin, y, pageWidth - margin, y);
+  y += 6;
+
+  // Questions
+  session.soalList.forEach((q) => {
+    ensureSpace(22);
+    writeWrapped(`NOMOR SOAL: ${q.nomor}`, {
+      fontSize: 10.5,
+      bold: true,
+      color: [30, 58, 138],
+      lineHeight: 5.2,
+    });
+    y += 0.5;
+
+    writeWrapped('PERTANYAAN:', { fontSize: 9.5, bold: true, color: [15, 23, 42] });
+    writeWrapped(q.pertanyaan, { fontSize: 10, color: [15, 23, 42] });
+    y += 1.5;
+
+    if (q.pilihan && Object.keys(q.pilihan).length > 0) {
+      writeWrapped('PILIHAN JAWABAN:', { fontSize: 9.5, bold: true, color: [15, 23, 42] });
+      (['A', 'B', 'C', 'D', 'E'] as const).forEach((key) => {
+        const opt = q.pilihan?.[key];
+        if (opt) {
+          writeWrapped(`${key}. ${opt}`, { fontSize: 9.8, indent: 4, color: [30, 41, 59] });
+        }
+      });
+      y += 1.5;
+    }
+
+    writeWrapped(`JAWABAN: ${q.jawaban || '(Belum dijawab)'}`, {
+      fontSize: 10,
+      bold: true,
+      color: [4, 120, 87],
+    });
+    y += 1;
+
+    writeWrapped('PEMBAHASAN:', { fontSize: 9.5, bold: true, color: [15, 23, 42] });
+    writeWrapped(q.pembahasan || '(Belum ada pembahasan)', {
+      fontSize: 9.5,
+      color: [51, 65, 85],
+    });
+
+    if (Array.isArray(q.langkahMatematika) && q.langkahMatematika.length > 0) {
+      y += 1;
+      writeWrapped('Langkah Penyelesaian:', { fontSize: 9.5, bold: true, color: [15, 23, 42] });
+      q.langkahMatematika.forEach((step, idx) => {
+        writeWrapped(`${idx + 1}. ${step}`, { fontSize: 9.3, indent: 4, color: [51, 65, 85] });
+      });
+    }
+
+    y += 3;
+    ensureSpace(6);
+    doc.setDrawColor(226, 232, 240);
+    doc.line(margin, y, pageWidth - margin, y);
+    y += 5;
+  });
+
+  const safeName = (session.judul || 'Pembaca_Soal_AI').replace(/[^a-zA-Z0-9_-]+/g, '_');
+  doc.save(`${safeName}.pdf`);
 }

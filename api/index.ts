@@ -1,8 +1,14 @@
 import {
   getGeminiApiKey,
   parseExamDocumentWithGemini,
+  readQuestionsForAiReaderWithGemini,
+  answerQuestionsForAiReaderWithGemini,
 } from "./_lib/geminiBackend.ts";
 import { getSafeKeyDiagnostics, logBackendError } from "./_lib/diagnosticHelper.ts";
+import {
+  getSanitizedExamPayloadForStudent,
+  submitAndGradeExamOnBackend,
+} from "./_lib/ujianBackend.ts";
 
 export const config = {
   maxDuration: 60,
@@ -16,7 +22,7 @@ export const config = {
 export default async function handler(req: any, res: any) {
   // CORS configuration
   res.setHeader("Access-Control-Allow-Origin", "*");
-  res.setHeader("Access-Control-Allow-Methods", "GET, POST, OPTIONS");
+  res.setHeader("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS");
   res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
 
   if (req.method === "OPTIONS") {
@@ -165,6 +171,103 @@ export default async function handler(req: any, res: any) {
           error: parseErr?.message || "AI tidak dapat membaca dokumen, beralih ke parser lokal.",
         });
       }
+    }
+
+    if (pathname === "/ujian/time") {
+      const now = new Date();
+      return res.status(200).json({
+        success: true,
+        serverTimeMs: now.getTime(),
+        serverIso: now.toISOString(),
+      });
+    }
+
+    if (pathname === "/ujian/exam") {
+      if (req.method !== "GET") {
+        return res.status(405).json({ success: false, error: "Metode request harus GET." });
+      }
+      const parsedUrl = new URL(rawUrl, "http://localhost");
+      const id = String(req.query?.id || parsedUrl.searchParams.get("id") || "");
+      const school = String(req.query?.school || parsedUrl.searchParams.get("school") || "") || undefined;
+      if (!id) {
+        return res.status(400).json({ success: false, error: "Parameter id ujian diperlukan." });
+      }
+      const result = await getSanitizedExamPayloadForStudent(id, school);
+      if (!result.found) {
+        return res.status(404).json({
+          success: false,
+          error: "Naskah ujian tidak ditemukan.",
+          serverTimeMs: result.serverTimeMs,
+        });
+      }
+      return res.status(200).json({
+        success: true,
+        schoolId: result.schoolId,
+        exam: result.exam,
+        serverTimeMs: result.serverTimeMs,
+        scheduleCheck: result.scheduleCheck,
+      });
+    }
+
+    if (pathname === "/ujian/submit") {
+      if (req.method !== "POST") {
+        return res.status(405).json({ success: false, error: "Metode request harus POST." });
+      }
+      if (!body || !body.ujianId || !body.sessionId) {
+        return res.status(400).json({
+          success: false,
+          error: "Parameter ujianId dan sessionId wajib diisi.",
+        });
+      }
+      const result = await submitAndGradeExamOnBackend(body);
+      if (!result.success) {
+        return res.status(404).json(result);
+      }
+      return res.status(200).json(result);
+    }
+
+    if (pathname === "/ai-reader/read") {
+      if (req.method !== "POST") {
+        return res.status(405).json({ success: false, error: "Metode request harus POST." });
+      }
+      if (!getGeminiApiKey()) {
+        return res.status(503).json({
+          success: false,
+          error: "GEMINI_API_KEY belum dikonfigurasi pada server.",
+        });
+      }
+      const { fileBase64, fileName = "dokumen-soal", mimeType, text, pages, chunkLabel } =
+        body && typeof body === "object" ? body : {};
+      const result = await readQuestionsForAiReaderWithGemini({
+        text: typeof text === "string" && text.trim() ? text : undefined,
+        fileBase64: typeof fileBase64 === "string" && fileBase64.trim() ? fileBase64 : undefined,
+        mimeType: typeof mimeType === "string" ? mimeType.trim().toLowerCase() : undefined,
+        fileName: typeof fileName === "string" && fileName.trim() ? fileName.trim() : "dokumen-soal",
+        pages: Array.isArray(pages) && pages.length > 0 ? pages : undefined,
+        chunkLabel: typeof chunkLabel === "string" ? chunkLabel : undefined,
+      });
+      return res.status(200).json({ success: true, data: result });
+    }
+
+    if (pathname === "/ai-reader/answer") {
+      if (req.method !== "POST") {
+        return res.status(405).json({ success: false, error: "Metode request harus POST." });
+      }
+      if (!getGeminiApiKey()) {
+        return res.status(503).json({
+          success: false,
+          error: "GEMINI_API_KEY belum dikonfigurasi pada server.",
+        });
+      }
+      const { questions, pageImages } = body && typeof body === "object" ? body : {};
+      if (!Array.isArray(questions) || questions.length === 0) {
+        return res.status(400).json({ success: false, error: "Daftar soal kosong." });
+      }
+      const result = await answerQuestionsForAiReaderWithGemini({
+        questions,
+        pageImages: Array.isArray(pageImages) && pageImages.length > 0 ? pageImages : undefined,
+      });
+      return res.status(200).json({ success: true, data: result });
     }
 
     return res.status(404).json({

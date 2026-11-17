@@ -27,6 +27,7 @@ service cloud.firestore {
         'superadmin_logs',
         'ai_modul',
         'ai_materi',
+        'ai_soal_reader',
         'bel_jadwal',
         'exams',
         'exam_sessions',

@@ -22,6 +22,7 @@ import {
   User,
   StatusUjian,
   Settings,
+  ModePengacakanUjian,
 } from '../../types';
 import {
   FileText,
@@ -70,10 +71,15 @@ import {
   ZoomIn,
   Sliders,
   ImagePlus,
+  Smartphone,
+  Monitor,
+  ShieldAlert,
 } from 'lucide-react';
 import confetti from 'canvas-confetti';
 import { ExamImageManagerModal, AvailableImageOption } from '../ujian/ExamImageManagerModal';
 import { ImageLightboxModal } from '../ujian/ImageLightboxModal';
+import { ExamRichContent, renderMathAndTextInline } from '../ujian/ExamRichContent';
+import { buildDisplayedChoicesForQuestion } from '../../utils/examShuffleAndScore';
 import { ConfirmModal } from '../common/ConfirmModal';
 
 interface UjianOnlineViewProps {
@@ -81,6 +87,10 @@ interface UjianOnlineViewProps {
 }
 
 export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser }) => {
+  const effectiveRole = currentUser?.role;
+  const isAuthorizedStaff =
+    effectiveRole === 'admin' || effectiveRole === 'guru' || effectiveRole === 'superadmin';
+
   const [settings, setSettings] = useState<Settings>(() => db.getSettings());
   const [activeSubTab, setActiveSubTab] = useState<'daftar' | 'buat' | 'pengawasan' | 'penilaian' | 'simulasi'>('daftar');
 
@@ -103,8 +113,12 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
   const [formBatasPelanggaran, setFormBatasPelanggaran] = useState<number>(3);
   const [formTanggalMulai, setFormTanggalMulai] = useState('');
   const [formTanggalSelesai, setFormTanggalSelesai] = useState('');
-  const [formAcakSoal, setFormAcakSoal] = useState(true);
+  const [formJumlahSoalTampil, setFormJumlahSoalTampil] = useState<number>(0);
+  const [formModeAcakSoal, setFormModeAcakSoal] = useState<ModePengacakanUjian>('per_siswa');
+  const [formModeAcakPilihan, setFormModeAcakPilihan] = useState<ModePengacakanUjian>('per_siswa');
+  const [formModeFullscreen, setFormModeFullscreen] = useState<boolean>(true);
   const [formTampilkanNilai, setFormTampilkanNilai] = useState(true);
+  const [formTampilkanPembahasan, setFormTampilkanPembahasan] = useState(false);
   const [formPetunjuk, setFormPetunjuk] = useState('Jawablah setiap butir soal dengan jujur, teliti, dan mandiri.');
 
   // Document Upload & Side-by-Side Review State (Masalah B)
@@ -115,6 +129,19 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
   const [originalDocText, setOriginalDocText] = useState<string>('');
   const [originalDocHtml, setOriginalDocHtml] = useState<string>('');
   const [showSideBySide, setShowSideBySide] = useState(true);
+
+  // Student Viewport Simulator, Publish Validation Guard & Violation Inspector
+  const [showStudentPreviewModal, setShowStudentPreviewModal] = useState(false);
+  const [studentPreviewViewport, setStudentPreviewViewport] = useState<'desktop' | 'mobile'>('desktop');
+  const [studentPreviewIndex, setStudentPreviewIndex] = useState(0);
+  const [previewImageErrors, setPreviewImageErrors] = useState<Record<string, boolean>>({});
+  const [previewImageRetryNonce, setPreviewImageRetryNonce] = useState(0);
+  const [publishConfirmModal, setPublishConfirmModal] = useState<{
+    warnings: string[];
+    missingKeys: number;
+    failedImgs: number;
+  } | null>(null);
+  const [violationDetailSession, setViolationDetailSession] = useState<SesiUjianSiswa | null>(null);
 
   // Separate Answer Key Modal State
   const [showSeparateKeyModal, setShowSeparateKeyModal] = useState(false);
@@ -699,7 +726,7 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
   };
 
   // Save or Publish Exam (uploads any inline Data URI images permanently to Firebase Storage & exam_images metadata)
-  const handleSaveExam = async (status: StatusUjian) => {
+  const handleSaveExam = async (status: StatusUjian, forcePublish: boolean = false) => {
     if (!formJudul.trim()) {
       toast.warning('Judul ujian tidak boleh kosong.');
       return;
@@ -717,6 +744,33 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
       return;
     }
 
+    if (formTanggalMulai && formTanggalSelesai) {
+      const startTs = new Date(formTanggalMulai).getTime();
+      const endTs = new Date(formTanggalSelesai).getTime();
+      if (Number.isFinite(startTs) && Number.isFinite(endTs) && endTs <= startTs) {
+        toast.warning('Jadwal selesai ujian harus lebih lambat daripada jadwal mulai.');
+        return;
+      }
+    }
+
+    const pgQuestions = parsedSoalList.filter((s) => s.tipe === 'pilihan_ganda');
+    const missingKeys = pgQuestions.filter((s) => !s.kunciJawaban || !s.kunciJawaban.trim()).length;
+    const errorImgs = parsedSoalList.filter((s) => s.gambarStatus === 'error').length;
+    const failedImgs = docImageStats.failedCount + errorImgs;
+
+    if ((status === 'aktif' || status === 'terbit') && !forcePublish && (missingKeys > 0 || failedImgs > 0)) {
+      const warnings: string[] = [];
+      if (missingKeys > 0) {
+        warnings.push(`${missingKeys} soal Pilihan Ganda belum memiliki kunci jawaban (skor otomatis tidak dapat menilai soal tersebut).`);
+      }
+      if (failedImgs > 0) {
+        warnings.push(`${failedImgs} gambar terdeteksi gagal/perlu pemeriksaan ulang pada dokumen.`);
+      }
+      setPublishConfirmModal({ warnings, missingKeys, failedImgs });
+      return;
+    }
+
+    setPublishConfirmModal(null);
     setIsSavingExam(true);
     setSavingStatusText('Mempersiapkan naskah & gambar soal...');
     try {
@@ -746,7 +800,7 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
         console.warn('[UjianOnlineView] Image optimization/upload warning, continuing save:', imgErr);
       }
 
-      setSavingStatusText(status === 'aktif' ? 'Menerbitkan ujian ke server...' : 'Menyimpan draf ujian...');
+      setSavingStatusText(status === 'aktif' || status === 'terbit' ? 'Menerbitkan ujian ke server...' : 'Menyimpan draf ujian...');
 
       const examData: UjianOnline = {
         id: examId,
@@ -764,11 +818,16 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
         batasPelanggaran: Number(formBatasPelanggaran) || 3,
         status,
         soalList: syncedSoalList,
-        acakSoal: formAcakSoal,
-        acakPilihan: formAcakSoal,
+        jumlahSoalTampil: Math.max(0, Number(formJumlahSoalTampil) || 0),
+        acakSoal: formModeAcakSoal !== 'off',
+        acakPilihan: formModeAcakPilihan !== 'off',
+        modeAcakSoal: formModeAcakSoal,
+        modeAcakPilihan: formModeAcakPilihan,
+        modeFullscreen: formModeFullscreen,
         tampilkanNilaiLangsung: formTampilkanNilai,
-        tampilkanPembahasan: false,
+        tampilkanPembahasan: formTampilkanPembahasan,
         petunjukPengerjaan: formPetunjuk,
+        dokumenAsliNama: uploadedFileName || editingUjian?.dokumenAsliNama || undefined,
         createdAt: editingUjian?.createdAt || new Date().toISOString(),
         updatedAt: new Date().toISOString(),
       };
@@ -779,7 +838,7 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
       try {
         sound.playSuccess();
       } catch {}
-      toast.success(`Ujian "${formJudul}" berhasil ${status === 'aktif' ? 'diterbitkan' : 'disimpan sebagai draf'}!`);
+      toast.success(`Ujian "${formJudul}" berhasil ${status === 'aktif' || status === 'terbit' ? 'diterbitkan' : 'disimpan sebagai draf'}!`);
 
       setEditingUjian(null);
       setUploadedFileName('');
@@ -808,9 +867,14 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
     setFormBatasPelanggaran(exam.batasPelanggaran ?? 3);
     setFormTanggalMulai(exam.tanggalMulai || '');
     setFormTanggalSelesai(exam.tanggalSelesai || '');
-    setFormAcakSoal(exam.acakSoal ?? true);
+    setFormJumlahSoalTampil(exam.jumlahSoalTampil ?? 0);
+    setFormModeAcakSoal(exam.modeAcakSoal || (exam.acakSoal ? 'per_siswa' : 'off'));
+    setFormModeAcakPilihan(exam.modeAcakPilihan || (exam.acakPilihan ? 'per_siswa' : 'off'));
+    setFormModeFullscreen(exam.modeFullscreen ?? true);
     setFormTampilkanNilai(exam.tampilkanNilaiLangsung ?? true);
+    setFormTampilkanPembahasan(exam.tampilkanPembahasan ?? false);
     setFormPetunjuk(exam.petunjukPengerjaan || '');
+    setUploadedFileName(exam.dokumenAsliNama || '');
     setParsedSoalList(exam.soalList || []);
     setOriginalDocText('');
     setOriginalDocHtml('');
@@ -914,13 +978,21 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
       'Nama Siswa': s.namaSiswa,
       NISN: s.nisn || '-',
       Kelas: s.kelas,
+      Benar: s.jumlahBenar ?? '-',
+      Salah: s.jumlahSalah ?? '-',
+      Kosong: s.jumlahKosong ?? '-',
       'Nilai PG': s.nilaiPg,
       'Nilai Uraian': s.nilaiUraian,
       'Nilai Akhir': s.nilaiAkhir,
       Status: s.lulusKkm ? 'Lulus KKM' : 'Remedial',
+      'Sumber Penilaian': s.gradedBy === 'backend' ? 'Server' : s.gradedBy === 'local' ? 'Lokal' : '-',
       'Waktu Mulai': s.waktuMulai ? new Date(s.waktuMulai).toLocaleTimeString('id-ID') : '-',
       'Waktu Selesai': s.waktuSelesai ? new Date(s.waktuSelesai).toLocaleTimeString('id-ID') : '-',
       Pelanggaran: s.jumlahPelanggaran || 0,
+      'Detail Pelanggaran':
+        (s.logPelanggaran || [])
+          .map((l) => `[${new Date(l.waktu).toLocaleTimeString('id-ID')}] ${l.jenis}: ${l.keterangan}`)
+          .join(' | ') || '-',
     }));
 
     const ws = XLSX.utils.json_to_sheet(rows);
@@ -928,6 +1000,18 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
     XLSX.utils.book_append_sheet(wb, ws, 'Rekap Nilai');
     XLSX.writeFile(wb, `Rekap_Nilai_${activeExam.judul.replace(/[^a-zA-Z0-9]/g, '_')}.xlsx`);
   };
+
+  if (!isAuthorizedStaff) {
+    return (
+      <div className="bg-white rounded-3xl p-8 border border-red-200 text-center space-y-3 shadow-xs">
+        <Shield className="w-12 h-12 text-red-500 mx-auto" />
+        <h3 className="text-lg font-extrabold text-slate-900">Akses Dibatasi</h3>
+        <p className="text-xs text-slate-600 max-w-md mx-auto leading-relaxed">
+          Halaman Manajemen Ujian Online hanya dapat diakses oleh Guru, Operator, atau Administrator Sekolah yang berwenang.
+        </p>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -951,7 +1035,16 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
             setFormJudul('');
             setFormMapel('');
             setFormKelasTarget([]);
+            setFormDurasi(60);
+            setFormKkm(75);
             setFormBatasPelanggaran(3);
+            setFormJumlahSoalTampil(0);
+            setFormModeAcakSoal('per_siswa');
+            setFormModeAcakPilihan('per_siswa');
+            setFormModeFullscreen(true);
+            setFormTampilkanNilai(true);
+            setFormTampilkanPembahasan(false);
+            setFormPetunjuk('Jawablah setiap butir soal dengan jujur, teliti, dan mandiri.');
             setUploadedFileName('');
             setParsedSoalList([]);
             setExtractedDocImages([]);
@@ -1160,30 +1253,42 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
                 Langkah 1: Unggah Dokumen Soal Asli
               </span>
               <h3 className="text-lg font-extrabold text-slate-900 mt-2">
-                Unggah Berkas DOCX (Word), PDF, atau Dokumen Berisi Tabel & Gambar
+                Unggah Berkas Word (.docx), PDF, Excel (.xlsx), TXT, atau Foto Soal
               </h3>
               <p className="text-xs text-slate-500 mt-0.5">
-                Sistem membaca teks asli, tabel, dan gambar dokumen tanpa mengubah kalimat atau mereka-reka kunci jawaban.
+                Sistem membaca teks asli, tabel, rumus matematika, dan gambar tersemat tanpa mengubah kalimat atau mereka-reka kunci jawaban.
               </p>
             </div>
 
             <div className="border-2 border-dashed border-slate-300 hover:border-blue-500 rounded-2xl p-6 sm:p-8 text-center transition-all bg-slate-50/50">
               <Upload className="w-10 h-10 text-blue-700 mx-auto mb-2" />
               <label className="inline-block px-5 py-2.5 bg-blue-700 hover:bg-blue-600 text-white rounded-xl text-xs font-bold shadow-md transition-all cursor-pointer">
-                <span>Pilih Berkas DOCX / PDF / Foto Soal</span>
+                <span>Pilih Berkas DOCX / PDF / XLSX / TXT / Foto Soal</span>
                 <input
                   type="file"
-                  accept=".docx,.doc,.pdf,.txt,.jpg,.jpeg,.png,.webp"
+                  accept=".docx,.doc,.pdf,.xlsx,.xls,.txt,.csv,.jpg,.jpeg,.png,.webp"
                   onChange={handleUploadDocument}
                   className="hidden"
                 />
               </label>
               <p className="text-[11px] text-slate-400 mt-2">
-                Mendukung Microsoft Word (.docx), PDF (teks digital & hasil scan), maupun foto lembar soal (JPG/PNG/WEBP).
+                Mendukung Microsoft Word (.docx), PDF (teks digital, gambar tersemat &amp; scan), Excel (.xlsx/.xls), TXT, maupun foto lembar soal (JPG/PNG/WEBP).
               </p>
               {uploadedFileName && (
-                <div className="mt-3 text-xs font-semibold text-blue-800 bg-blue-50 py-1.5 px-3 rounded-lg inline-block">
-                  Berkas Terunggah: {uploadedFileName}
+                <div className="mt-3 flex flex-wrap items-center justify-center gap-2">
+                  <span className="text-xs font-semibold text-blue-800 bg-blue-50 py-1.5 px-3 rounded-lg inline-block">
+                    Berkas Terunggah: {uploadedFileName}
+                  </span>
+                  {docImageStats.extractedCount > 0 && (
+                    <span className="text-xs font-semibold text-emerald-800 bg-emerald-50 py-1.5 px-3 rounded-lg inline-block">
+                      {docImageStats.extractedCount} Gambar Terekstrak
+                    </span>
+                  )}
+                  {docImageStats.failedCount > 0 && (
+                    <span className="text-xs font-semibold text-amber-800 bg-amber-50 py-1.5 px-3 rounded-lg inline-block">
+                      {docImageStats.failedCount} Gambar Perlu Periksa
+                    </span>
+                  )}
                 </div>
               )}
             </div>
@@ -1191,7 +1296,7 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
             {isParsingDoc && (
               <div className="p-4 bg-blue-50 rounded-2xl flex items-center gap-3 text-xs text-blue-800 font-semibold animate-pulse">
                 <RefreshCw className="w-4 h-4 animate-spin text-blue-700" />
-                <span>Sedang membaca dokumen asli dan mengekstrak butir soal serta gambar...</span>
+                <span>Sedang membaca dokumen asli dan mengekstrak butir soal, rumus, tabel, serta gambar...</span>
               </div>
             )}
 
@@ -1236,19 +1341,46 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
                 <label className="text-xs font-bold text-slate-700">Mata Pelajaran</label>
                 <input
                   type="text"
+                  list="mapel-suggestions-cbt"
                   value={formMapel}
                   onChange={(e) => setFormMapel(e.target.value)}
                   placeholder="Contoh: IPA, Matematika, Bahasa Indonesia"
                   className="w-full p-3 rounded-xl border border-slate-200 focus:border-blue-600 outline-none text-xs font-semibold"
                 />
+                <datalist id="mapel-suggestions-cbt">
+                  {availableMapel.map((m) => (
+                    <option key={m.id} value={m.nama} />
+                  ))}
+                </datalist>
               </div>
 
               <div className="space-y-1.5">
                 <label className="text-xs font-bold text-slate-700">Durasi Pengerjaan (Menit)</label>
                 <input
                   type="number"
+                  min={5}
                   value={formDurasi}
-                  onChange={(e) => setFormDurasi(Number(e.target.value))}
+                  onChange={(e) => setFormDurasi(Math.max(1, Number(e.target.value) || 60))}
+                  className="w-full p-3 rounded-xl border border-slate-200 focus:border-blue-600 outline-none text-xs font-semibold"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-slate-700">Jadwal Mulai Ujian</label>
+                <input
+                  type="datetime-local"
+                  value={formTanggalMulai}
+                  onChange={(e) => setFormTanggalMulai(e.target.value)}
+                  className="w-full p-3 rounded-xl border border-slate-200 focus:border-blue-600 outline-none text-xs font-semibold"
+                />
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-slate-700">Jadwal Selesai Ujian</label>
+                <input
+                  type="datetime-local"
+                  value={formTanggalSelesai}
+                  onChange={(e) => setFormTanggalSelesai(e.target.value)}
                   className="w-full p-3 rounded-xl border border-slate-200 focus:border-blue-600 outline-none text-xs font-semibold"
                 />
               </div>
@@ -1257,13 +1389,58 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
                 <label className="text-xs font-bold text-slate-700">KKM Kelulusan</label>
                 <input
                   type="number"
+                  min={0}
+                  max={100}
                   value={formKkm}
-                  onChange={(e) => setFormKkm(Number(e.target.value))}
+                  onChange={(e) => setFormKkm(Math.max(0, Math.min(100, Number(e.target.value) || 0)))}
                   className="w-full p-3 rounded-xl border border-slate-200 focus:border-blue-600 outline-none text-xs font-semibold"
                 />
               </div>
 
               <div className="space-y-1.5">
+                <label className="text-xs font-bold text-slate-700">Jumlah Soal Ditampilkan ke Siswa</label>
+                <div className="flex items-center gap-2">
+                  <input
+                    type="number"
+                    min={0}
+                    max={Math.max(500, parsedSoalList.length)}
+                    value={formJumlahSoalTampil}
+                    onChange={(e) => setFormJumlahSoalTampil(Math.max(0, Number(e.target.value) || 0))}
+                    className="w-28 p-3 rounded-xl border border-slate-200 focus:border-blue-600 outline-none text-xs font-semibold"
+                  />
+                  <span className="text-[11px] text-slate-500">
+                    Isi <strong>0</strong> untuk menampilkan seluruh bank soal ({parsedSoalList.length} soal)
+                  </span>
+                </div>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-slate-700">Pengacakan Urutan Soal</label>
+                <select
+                  value={formModeAcakSoal}
+                  onChange={(e) => setFormModeAcakSoal(e.target.value as ModePengacakanUjian)}
+                  className="w-full p-3 rounded-xl border border-slate-200 focus:border-blue-600 outline-none text-xs font-semibold bg-white"
+                >
+                  <option value="per_siswa">Acak Berbeda per Siswa (Direkomendasikan)</option>
+                  <option value="sama">Acak Sekali (Urutan Sama untuk Semua Siswa)</option>
+                  <option value="off">Urutan Asli Dokumen (Tidak Diacak)</option>
+                </select>
+              </div>
+
+              <div className="space-y-1.5">
+                <label className="text-xs font-bold text-slate-700">Pengacakan Pilihan Jawaban (A-E)</label>
+                <select
+                  value={formModeAcakPilihan}
+                  onChange={(e) => setFormModeAcakPilihan(e.target.value as ModePengacakanUjian)}
+                  className="w-full p-3 rounded-xl border border-slate-200 focus:border-blue-600 outline-none text-xs font-semibold bg-white"
+                >
+                  <option value="per_siswa">Acak Pilihan per Siswa (Kunci Tetap Akurat)</option>
+                  <option value="sama">Acak Sekali (Pola Sama Semua Siswa)</option>
+                  <option value="off">Sesuai Dokumen Asli (Tidak Diacak)</option>
+                </select>
+              </div>
+
+              <div className="space-y-1.5 md:col-span-2">
                 <label className="text-xs font-bold text-slate-700">Batas Toleransi Anti-Kecurangan</label>
                 <div className="flex items-center gap-2">
                   <input
@@ -1275,9 +1452,61 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
                     className="w-24 p-3 rounded-xl border border-slate-200 focus:border-blue-600 outline-none text-xs font-semibold"
                   />
                   <span className="text-[11px] text-slate-500">
-                    kali keluar tab / minimize sebelum sesi otomatis dikunci
+                    kali keluar tab / minimize / keluar layar penuh sebelum sesi otomatis dikunci
                   </span>
                 </div>
+              </div>
+
+              <div className="md:col-span-2 grid grid-cols-1 sm:grid-cols-3 gap-3 pt-1">
+                <label className="flex items-start gap-2.5 p-3.5 rounded-2xl border border-slate-200 bg-slate-50/70 cursor-pointer hover:border-blue-300 transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={formModeFullscreen}
+                    onChange={(e) => setFormModeFullscreen(e.target.checked)}
+                    className="mt-0.5 rounded border-slate-300 text-blue-700 focus:ring-blue-500"
+                  />
+                  <div className="text-xs">
+                    <span className="font-bold text-slate-800 block">Wajib Layar Penuh</span>
+                    <span className="text-[11px] text-slate-500">Aktifkan fullscreen &amp; deteksi keluar layar penuh saat siswa mengerjakan</span>
+                  </div>
+                </label>
+
+                <label className="flex items-start gap-2.5 p-3.5 rounded-2xl border border-slate-200 bg-slate-50/70 cursor-pointer hover:border-blue-300 transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={formTampilkanNilai}
+                    onChange={(e) => setFormTampilkanNilai(e.target.checked)}
+                    className="mt-0.5 rounded border-slate-300 text-blue-700 focus:ring-blue-500"
+                  />
+                  <div className="text-xs">
+                    <span className="font-bold text-slate-800 block">Tampilkan Nilai Langsung</span>
+                    <span className="text-[11px] text-slate-500">Siswa melihat skor PG &amp; status KKM segera setelah ujian dikumpulkan</span>
+                  </div>
+                </label>
+
+                <label className="flex items-start gap-2.5 p-3.5 rounded-2xl border border-slate-200 bg-slate-50/70 cursor-pointer hover:border-blue-300 transition-colors">
+                  <input
+                    type="checkbox"
+                    checked={formTampilkanPembahasan}
+                    onChange={(e) => setFormTampilkanPembahasan(e.target.checked)}
+                    className="mt-0.5 rounded border-slate-300 text-blue-700 focus:ring-blue-500"
+                  />
+                  <div className="text-xs">
+                    <span className="font-bold text-slate-800 block">Tampilkan Kunci Setelah Selesai</span>
+                    <span className="text-[11px] text-slate-500">Ringkasan kunci &amp; koreksi dikirim server hanya setelah siswa selesai</span>
+                  </div>
+                </label>
+              </div>
+
+              <div className="space-y-1.5 md:col-span-2">
+                <label className="text-xs font-bold text-slate-700">Petunjuk Pengerjaan Ujian</label>
+                <textarea
+                  rows={2}
+                  value={formPetunjuk}
+                  onChange={(e) => setFormPetunjuk(e.target.value)}
+                  placeholder="Tuliskan tata tertib dan petunjuk pengerjaan untuk siswa..."
+                  className="w-full p-3 rounded-xl border border-slate-200 focus:border-blue-600 outline-none text-xs leading-relaxed"
+                />
               </div>
 
               <div className="space-y-1.5 md:col-span-2">
@@ -1319,7 +1548,15 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
               const uraianQuestions = parsedSoalList.filter((s) => s.tipe === 'uraian');
               const kunciFoundCount = pgQuestions.filter((s) => Boolean(s.kunciJawaban)).length;
               const kunciMissingCount = pgQuestions.length - kunciFoundCount;
-              const isReady = parsedSoalList.length > 0 && kunciMissingCount === 0;
+              const attachedImagesCount = parsedSoalList.reduce(
+                (acc, q) =>
+                  acc +
+                  (q.gambar ? 1 : 0) +
+                  (q.gambarTambahan ? q.gambarTambahan.length : 0) +
+                  (q.pilihanGambar ? Object.keys(q.pilihanGambar).length : 0),
+                0
+              );
+              const isReady = parsedSoalList.length > 0 && kunciMissingCount === 0 && docImageStats.failedCount === 0;
 
               return (
                 <div className="bg-slate-50 rounded-2xl border border-slate-200 p-4 space-y-3">
@@ -1342,11 +1579,26 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
                           ? 'Belum Ada Soal'
                           : isReady
                           ? 'Siap Diterbitkan'
-                          : `Perlu Kunci Jawaban (${kunciMissingCount} Soal PG)`}
+                          : kunciMissingCount > 0
+                          ? `Perlu Kunci Jawaban (${kunciMissingCount} Soal PG)`
+                          : `Periksa Gambar (${docImageStats.failedCount} Gagal)`}
                       </span>
                     </div>
 
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
+                      {parsedSoalList.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setStudentPreviewIndex(0);
+                            setShowStudentPreviewModal(true);
+                          }}
+                          className="px-3 py-1.5 bg-blue-700 hover:bg-blue-600 text-white rounded-xl text-xs font-bold flex items-center gap-1.5 shadow-xs transition-colors cursor-pointer"
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                          <span>Pratinjau Tampilan Siswa</span>
+                        </button>
+                      )}
                       <button
                         type="button"
                         onClick={() => {
@@ -1372,10 +1624,13 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
                       <div className="text-lg font-extrabold text-blue-700">{pgQuestions.length} Butir</div>
                     </div>
                     <div className="bg-white p-3 rounded-xl border border-slate-200">
-                      <div className="text-[11px] text-slate-500 font-medium">Kunci Ditemukan</div>
+                      <div className="text-[11px] text-slate-500 font-medium">Kunci PG Terdeteksi</div>
                       <div className="text-lg font-extrabold text-emerald-600">
                         {kunciFoundCount} <span className="text-xs text-slate-400">/ {pgQuestions.length}</span>
                       </div>
+                      {kunciMissingCount > 0 && (
+                        <div className="text-[10px] font-bold text-amber-700">{kunciMissingCount} Belum Ada Kunci</div>
+                      )}
                     </div>
                     <div className="bg-white p-3 rounded-xl border border-slate-200">
                       <div className="text-[11px] text-slate-500 font-medium">Soal Uraian / Esai</div>
@@ -1384,12 +1639,12 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
                     <div className="bg-white p-3 rounded-xl border border-slate-200">
                       <div className="text-[11px] text-slate-500 font-medium">Status Gambar</div>
                       <div className="text-lg font-extrabold text-indigo-700">
-                        {parsedSoalList.reduce(
-                          (acc, q) =>
-                            acc + (q.gambar ? 1 : 0) + (q.pilihanGambar ? Object.keys(q.pilihanGambar).length : 0),
-                          0
-                        )}{' '}
+                        {attachedImagesCount}{' '}
                         <span className="text-xs text-slate-400 font-semibold">Terpasang</span>
+                      </div>
+                      <div className="text-[10px] text-slate-500">
+                        {docImageStats.extractedCount} Terekstrak
+                        {docImageStats.failedCount > 0 ? ` • ${docImageStats.failedCount} Gagal` : ''}
                       </div>
                     </div>
                   </div>
@@ -1679,6 +1934,69 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
                       className="w-full p-3 rounded-xl border border-slate-200 bg-white text-xs leading-relaxed focus:border-blue-600 outline-none"
                     />
 
+                    {/* Ordered Visual / Table / Formula Preview Box */}
+                    {(Boolean(q.kontenElemen?.length) ||
+                      Boolean(q.gambarTambahan?.length) ||
+                      q.pertanyaan.includes('|') ||
+                      /[\^_]/.test(q.pertanyaan)) && (
+                      <div className="rounded-xl border border-indigo-100 bg-white p-3 space-y-2">
+                        <div className="text-[10px] font-extrabold uppercase tracking-wider text-indigo-700 flex items-center justify-between">
+                          <span>Pratinjau Tata Letak Berurutan (Teks, Rumus, Tabel &amp; Multi-Gambar)</span>
+                          {q.gambarTambahan && q.gambarTambahan.length > 0 && (
+                            <span className="bg-indigo-50 px-2 py-0.5 rounded text-[10px]">
+                              +{q.gambarTambahan.length} Gambar Tambahan
+                            </span>
+                          )}
+                        </div>
+                        <ExamRichContent
+                          soal={q}
+                          displayNumber={idx + 1}
+                          imageLoadErrors={previewImageErrors}
+                          imageRetryNonce={previewImageRetryNonce}
+                          compact={true}
+                          onImageError={(key) =>
+                            setPreviewImageErrors((prev) => ({ ...prev, [key]: true }))
+                          }
+                          onRetryImage={(key) => {
+                            setPreviewImageErrors((prev) => {
+                              const next = { ...prev };
+                              delete next[key];
+                              return next;
+                            });
+                            setPreviewImageRetryNonce((n) => n + 1);
+                          }}
+                          onOpenLightbox={(payload) =>
+                            setAdminLightbox({
+                              isOpen: true,
+                              imageUrl: payload.imageUrl,
+                              title: payload.title,
+                              caption: payload.caption,
+                            })
+                          }
+                        />
+                      </div>
+                    )}
+
+                    {/* Pedoman Penilaian untuk Uraian */}
+                    {q.tipe === 'uraian' && (
+                      <div className="space-y-1">
+                        <label className="text-[11px] font-bold text-slate-600">
+                          Pedoman / Kunci Penilaian Uraian (Opsional):
+                        </label>
+                        <input
+                          type="text"
+                          value={q.pedomanPenilaian || ''}
+                          onChange={(e) => {
+                            const updated = [...parsedSoalList];
+                            updated[idx].pedomanPenilaian = e.target.value;
+                            setParsedSoalList(updated);
+                          }}
+                          placeholder="Contoh: Jawaban memuat pengertian fotosintesis dan 2 contoh zat hasil..."
+                          className="w-full p-2.5 rounded-xl border border-slate-200 bg-white text-xs focus:border-blue-600 outline-none"
+                        />
+                      </div>
+                    )}
+
                     {/* Multiple Choice Options */}
                     {q.tipe === 'pilihan_ganda' && (
                       <div className="space-y-2.5 pt-1">
@@ -1946,7 +2264,19 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
                         </span>
                       </td>
                       <td className="p-3 font-semibold text-amber-700">
-                        {s.jumlahPelanggaran || 0} kali
+                        {(s.jumlahPelanggaran || 0) > 0 && s.logPelanggaran?.length > 0 ? (
+                          <button
+                            type="button"
+                            onClick={() => setViolationDetailSession(s)}
+                            className="px-2 py-1 rounded-lg bg-amber-50 hover:bg-amber-100 border border-amber-200 text-amber-800 font-bold text-[11px] inline-flex items-center gap-1 cursor-pointer"
+                            title="Lihat rincian catatan pelanggaran"
+                          >
+                            <ShieldAlert className="w-3 h-3" />
+                            <span>{s.jumlahPelanggaran} kali</span>
+                          </button>
+                        ) : (
+                          <span>{s.jumlahPelanggaran || 0} kali</span>
+                        )}
                       </td>
                       <td className="p-3">
                         {s.status === 'terkunci' && (
@@ -2029,6 +2359,7 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
                   <th className="p-3">No.</th>
                   <th className="p-3">Nama Siswa</th>
                   <th className="p-3">Kelas</th>
+                  <th className="p-3">B / S / K</th>
                   <th className="p-3">Nilai PG</th>
                   <th className="p-3">Nilai Uraian</th>
                   <th className="p-3">Nilai Akhir</th>
@@ -2043,7 +2374,25 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
                     <tr key={s.id} className="hover:bg-slate-50">
                       <td className="p-3 font-semibold text-slate-500">{idx + 1}</td>
                       <td className="p-3 font-bold text-slate-800">
-                        <div>{s.namaSiswa}</div>
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span>{s.namaSiswa}</span>
+                          {s.gradedBy && (
+                            <span
+                              className={`text-[9px] font-extrabold px-1.5 py-0.5 rounded uppercase ${
+                                s.gradedBy === 'backend'
+                                  ? 'bg-emerald-50 text-emerald-700 border border-emerald-200'
+                                  : 'bg-slate-100 text-slate-600 border border-slate-200'
+                              }`}
+                            >
+                              {s.gradedBy === 'backend' ? 'Server' : 'Lokal'}
+                            </span>
+                          )}
+                          {s.pendingSubmitSync && (
+                            <span className="text-[9px] font-extrabold px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 border border-amber-200">
+                              Pending Sync
+                            </span>
+                          )}
+                        </div>
                         {s.adaUraianBelumDinilai && (
                           <span className="inline-block mt-0.5 text-[10px] font-bold text-amber-700 bg-amber-50 px-1.5 py-0.5 rounded border border-amber-200">
                             Perlu Koreksi Uraian
@@ -2051,6 +2400,13 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
                         )}
                       </td>
                       <td className="p-3 text-slate-600">{s.kelas}</td>
+                      <td className="p-3 font-mono text-[11px] font-bold text-slate-700">
+                        <span className="text-emerald-700">{s.jumlahBenar ?? '-'}</span>
+                        {' / '}
+                        <span className="text-red-600">{s.jumlahSalah ?? '-'}</span>
+                        {' / '}
+                        <span className="text-slate-500">{s.jumlahKosong ?? '-'}</span>
+                      </td>
                       <td className="p-3 font-semibold">{s.nilaiPg}</td>
                       <td className="p-3 font-semibold">{s.nilaiUraian}</td>
                       <td className="p-3 font-extrabold text-blue-700 text-sm">{s.nilaiAkhir}</td>
@@ -2086,7 +2442,7 @@ export const UjianOnlineView: React.FC<UjianOnlineViewProps> = ({ currentUser })
                 })}
                 {sessionList.length === 0 && (
                   <tr>
-                    <td colSpan={8} className="p-8 text-center text-slate-400">
+                    <td colSpan={9} className="p-8 text-center text-slate-400">
                       Belum ada rekapan nilai untuk ujian ini.
                     </td>
                   </tr>
@@ -2728,6 +3084,255 @@ Atau tabel kunci jawaban..."
                 <span>{isSavingGrades ? 'Menyimpan...' : 'Simpan Nilai Uraian'}</span>
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: PRATINJAU TAMPILAN SISWA (DESKTOP & ANDROID MOBILE 375px) */}
+      {showStudentPreviewModal && parsedSoalList.length > 0 && (() => {
+        const safeIdx = Math.max(0, Math.min(parsedSoalList.length - 1, studentPreviewIndex));
+        const previewSoal = parsedSoalList[safeIdx];
+        const previewChoices =
+          previewSoal.tipe === 'pilihan_ganda' ? buildDisplayedChoicesForQuestion(previewSoal) : [];
+
+        return (
+          <div className="fixed inset-0 z-50 bg-slate-950/75 backdrop-blur-xs flex items-center justify-center p-2 sm:p-4">
+            <div className="max-w-4xl w-full bg-white rounded-3xl overflow-hidden shadow-2xl border border-slate-200 flex flex-col max-h-[92vh]">
+              <div className="p-4 sm:p-5 bg-slate-900 text-white flex flex-wrap items-center justify-between gap-3">
+                <div>
+                  <span className="text-[10px] font-extrabold uppercase tracking-wider text-blue-300">
+                    Simulasi Tampilan Lembar Ujian Siswa
+                  </span>
+                  <h3 className="text-sm sm:text-base font-extrabold">
+                    {formJudul || 'Pratinjau Naskah Ujian'} ({safeIdx + 1} / {parsedSoalList.length})
+                  </h3>
+                </div>
+
+                <div className="flex items-center gap-2">
+                  <div className="bg-white/10 p-1 rounded-xl flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setStudentPreviewViewport('desktop')}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer ${
+                        studentPreviewViewport === 'desktop' ? 'bg-blue-600 text-white' : 'text-slate-300 hover:text-white'
+                      }`}
+                    >
+                      <Monitor className="w-3.5 h-3.5" />
+                      <span>Desktop</span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setStudentPreviewViewport('mobile')}
+                      className={`px-2.5 py-1 rounded-lg text-xs font-bold flex items-center gap-1 cursor-pointer ${
+                        studentPreviewViewport === 'mobile' ? 'bg-blue-600 text-white' : 'text-slate-300 hover:text-white'
+                      }`}
+                    >
+                      <Smartphone className="w-3.5 h-3.5" />
+                      <span>HP Android (375px)</span>
+                    </button>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowStudentPreviewModal(false)}
+                    className="p-1.5 rounded-xl text-slate-300 hover:text-white hover:bg-white/10 cursor-pointer"
+                  >
+                    <X className="w-5 h-5" />
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex-1 overflow-y-auto bg-slate-100 p-4 flex justify-center">
+                <div
+                  className={`bg-white rounded-3xl border border-slate-200 shadow-sm p-5 sm:p-6 space-y-5 transition-all ${
+                    studentPreviewViewport === 'mobile' ? 'w-[375px] max-w-full' : 'w-full max-w-2xl'
+                  }`}
+                >
+                  <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                    <span className="px-3 py-1 rounded-xl bg-blue-50 text-blue-800 text-xs font-extrabold">
+                      Soal Nomor {safeIdx + 1}
+                    </span>
+                    <span className="text-[11px] font-bold text-slate-500 uppercase">
+                      {previewSoal.tipe === 'pilihan_ganda' ? 'Pilihan Ganda' : 'Uraian / Esai'}
+                    </span>
+                  </div>
+
+                  <ExamRichContent
+                    soal={previewSoal}
+                    displayNumber={safeIdx + 1}
+                    imageLoadErrors={previewImageErrors}
+                    imageRetryNonce={previewImageRetryNonce}
+                    onImageError={(key) =>
+                      setPreviewImageErrors((prev) => ({ ...prev, [key]: true }))
+                    }
+                    onRetryImage={(key) => {
+                      setPreviewImageErrors((prev) => {
+                        const next = { ...prev };
+                        delete next[key];
+                        return next;
+                      });
+                      setPreviewImageRetryNonce((n) => n + 1);
+                    }}
+                    onOpenLightbox={(payload) =>
+                      setAdminLightbox({
+                        isOpen: true,
+                        imageUrl: payload.imageUrl,
+                        title: payload.title,
+                        caption: payload.caption,
+                      })
+                    }
+                  />
+
+                  {previewSoal.tipe === 'pilihan_ganda' ? (
+                    <div className="space-y-2.5 pt-2">
+                      {previewChoices.map((choice) => (
+                        <div
+                          key={choice.originalKey}
+                          className="p-3 rounded-2xl border-2 border-slate-200 bg-white flex items-start gap-3"
+                        >
+                          <span className="w-7 h-7 rounded-lg bg-slate-100 text-slate-700 text-xs font-extrabold flex items-center justify-center flex-shrink-0">
+                            {choice.displayLetter}
+                          </span>
+                          <div className="flex-1 space-y-1.5 min-w-0">
+                            {choice.text && (
+                              <span className="text-xs sm:text-sm font-medium text-slate-800 block break-words">
+                                {renderMathAndTextInline(choice.text)}
+                              </span>
+                            )}
+                            {choice.imageUrl && (
+                              <img
+                                src={choice.imageUrl}
+                                alt={`Pilihan ${choice.displayLetter}`}
+                                className="max-h-36 max-w-full rounded-xl border border-slate-200 bg-slate-50 p-1 object-contain"
+                              />
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="p-4 rounded-2xl border border-dashed border-slate-300 bg-slate-50 text-xs text-slate-400">
+                      Area kotak jawaban esai siswa akan muncul di sini...
+                    </div>
+                  )}
+                </div>
+              </div>
+
+              <div className="p-4 bg-white border-t border-slate-200 flex items-center justify-between gap-2">
+                <button
+                  type="button"
+                  disabled={safeIdx === 0}
+                  onClick={() => setStudentPreviewIndex((i) => Math.max(0, i - 1))}
+                  className="px-4 py-2 bg-slate-100 hover:bg-slate-200 disabled:opacity-40 text-slate-700 rounded-xl text-xs font-bold cursor-pointer"
+                >
+                  &larr; Soal Sebelumnya
+                </button>
+                <span className="text-xs font-bold text-slate-500">
+                  Butir {safeIdx + 1} dari {parsedSoalList.length}
+                </span>
+                <button
+                  type="button"
+                  disabled={safeIdx >= parsedSoalList.length - 1}
+                  onClick={() => setStudentPreviewIndex((i) => Math.min(parsedSoalList.length - 1, i + 1))}
+                  className="px-4 py-2 bg-blue-700 hover:bg-blue-600 disabled:opacity-40 text-white rounded-xl text-xs font-bold cursor-pointer"
+                >
+                  Soal Berikutnya &rarr;
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
+
+      {/* MODAL KONFIRMASI PENERBITAN SAAT ADA KUNCI/GAMBAR BELUM LENGKAP */}
+      {publishConfirmModal && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="max-w-md w-full bg-white rounded-3xl p-6 sm:p-7 space-y-4 shadow-2xl border border-amber-200">
+            <div className="flex items-start gap-3">
+              <div className="w-11 h-11 rounded-2xl bg-amber-100 text-amber-700 flex items-center justify-center flex-shrink-0">
+                <AlertTriangle className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-extrabold text-slate-900">
+                  Periksa Sebelum Menerbitkan Ujian
+                </h3>
+                <p className="text-xs text-slate-600 mt-1">
+                  Ditemukan catatan kelengkapan berikut pada naskah soal:
+                </p>
+              </div>
+            </div>
+
+            <ul className="list-disc pl-5 text-xs text-amber-900 bg-amber-50 p-3.5 rounded-2xl border border-amber-200 space-y-1.5">
+              {publishConfirmModal.warnings.map((w, idx) => (
+                <li key={idx}>{w}</li>
+              ))}
+            </ul>
+
+            <div className="flex flex-wrap justify-end gap-2 pt-2">
+              <button
+                type="button"
+                onClick={() => setPublishConfirmModal(null)}
+                className="px-4 py-2 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-bold cursor-pointer"
+              >
+                Periksa &amp; Lengkapi Dulu
+              </button>
+              <button
+                type="button"
+                onClick={() => handleSaveExam('aktif', true)}
+                className="px-4 py-2 bg-blue-700 hover:bg-blue-600 text-white rounded-xl text-xs font-bold cursor-pointer"
+              >
+                Tetap Terbitkan Ujian
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL RINCIAN LOG PELANGGARAN SISWA */}
+      {violationDetailSession && (
+        <div className="fixed inset-0 z-50 bg-slate-950/70 backdrop-blur-xs flex items-center justify-center p-4">
+          <div className="max-w-lg w-full bg-white rounded-3xl p-6 space-y-4 shadow-2xl border border-slate-200">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div>
+                <span className="text-[10px] font-extrabold uppercase tracking-wider text-amber-700">
+                  Log Pengawasan Anti-Kecurangan
+                </span>
+                <h3 className="text-base font-extrabold text-slate-900">
+                  {violationDetailSession.namaSiswa} ({violationDetailSession.kelas})
+                </h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setViolationDetailSession(null)}
+                className="p-1.5 rounded-xl text-slate-400 hover:bg-slate-100 cursor-pointer"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="max-h-72 overflow-y-auto space-y-2">
+              {(violationDetailSession.logPelanggaran || []).map((log, lIdx) => (
+                <div
+                  key={lIdx}
+                  className="p-3 rounded-2xl bg-amber-50/80 border border-amber-200 text-xs space-y-0.5"
+                >
+                  <div className="flex items-center justify-between font-bold text-amber-900">
+                    <span>{log.jenis.replace(/_/g, ' ').toUpperCase()}</span>
+                    <span className="text-[11px] font-mono text-amber-700">
+                      {log.waktu ? new Date(log.waktu).toLocaleTimeString('id-ID') : '-'}
+                    </span>
+                  </div>
+                  <p className="text-slate-700">{log.keterangan}</p>
+                </div>
+              ))}
+            </div>
+
+            <button
+              type="button"
+              onClick={() => setViolationDetailSession(null)}
+              className="w-full py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 rounded-xl text-xs font-bold cursor-pointer"
+            >
+              Tutup
+            </button>
           </div>
         </div>
       )}

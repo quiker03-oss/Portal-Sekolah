@@ -1,6 +1,18 @@
 import mammoth from 'mammoth';
 import JSZip from 'jszip';
-import { SoalUjian } from '../types';
+import * as XLSX from 'xlsx';
+import { KontenElemenSoal, SoalUjian } from '../types';
+import {
+  extractEmbeddedChoicesFromStem,
+  isLikelyExamInstructionLine,
+  isValidOptionProgression,
+  parseOptionPrefix,
+  parseQuestionNumberPrefix,
+  splitInlineChoiceLine,
+  stripRedundantOptionLabel,
+  validateParsedQuestionsStructure,
+  validateUploadedFileHeader,
+} from '../utils/questionFormatValidator';
 
 export interface ExtractedImageAsset {
   id: string;
@@ -151,6 +163,144 @@ async function extractImagesFromDocx(
 }
 
 /**
+ * Converts Word OOXML <m:oMath> / <m:oMathPara> equation blocks into readable inline/block math text
+ * so equations are never silently dropped by Mammoth.
+ */
+function convertOmmlNodeToText(xmlChunk: string): string {
+  if (!xmlChunk) return '';
+  let out = xmlChunk;
+
+  const extractPlain = (s: string): string => {
+    const tokens: string[] = [];
+    const re = /<m:t[^>]*>([\s\S]*?)<\/m:t>|<w:t[^>]*>([\s\S]*?)<\/w:t>/gi;
+    let m: RegExpExecArray | null;
+    while ((m = re.exec(s)) !== null) {
+      tokens.push(m[1] ?? m[2] ?? '');
+    }
+    if (tokens.length > 0) return tokens.join('');
+    return s.replace(/<[^>]+>/g, '');
+  };
+
+  // Fractions: <m:f> ... <m:num>A</m:num> <m:den>B</m:den> </m:f> -> (A)/(B)
+  for (let pass = 0; pass < 4 && /<m:f\b/i.test(out); pass++) {
+    out = out.replace(/<m:f\b[^>]*>([\s\S]*?)<\/m:f>/gi, (_m, inner) => {
+      const numMatch = inner.match(/<m:num\b[^>]*>([\s\S]*?)<\/m:num>/i);
+      const denMatch = inner.match(/<m:den\b[^>]*>([\s\S]*?)<\/m:den>/i);
+      const num = numMatch ? convertOmmlNodeToText(numMatch[1]).trim() : '';
+      const den = denMatch ? convertOmmlNodeToText(denMatch[1]).trim() : '';
+      return `(${num})/(${den})`;
+    });
+  }
+
+  // Radicals / square roots: <m:rad> ... <m:deg>n</m:deg> <m:e>x</m:e> </m:rad>
+  for (let pass = 0; pass < 4 && /<m:rad\b/i.test(out); pass++) {
+    out = out.replace(/<m:rad\b[^>]*>([\s\S]*?)<\/m:rad>/gi, (_m, inner) => {
+      const degMatch = inner.match(/<m:deg\b[^>]*>([\s\S]*?)<\/m:deg>/i);
+      const baseMatch = inner.match(/<m:e\b[^>]*>([\s\S]*?)<\/m:e>/i);
+      const deg = degMatch ? convertOmmlNodeToText(degMatch[1]).trim() : '';
+      const base = baseMatch ? convertOmmlNodeToText(baseMatch[1]).trim() : '';
+      return deg ? `^{${deg}}√(${base})` : `√(${base})`;
+    });
+  }
+
+  // Sub-superscript: <m:sSubSup>
+  for (let pass = 0; pass < 4 && /<m:sSubSup\b/i.test(out); pass++) {
+    out = out.replace(/<m:sSubSup\b[^>]*>([\s\S]*?)<\/m:sSubSup>/gi, (_m, inner) => {
+      const eMatch = inner.match(/<m:e\b[^>]*>([\s\S]*?)<\/m:e>/i);
+      const subMatch = inner.match(/<m:sub\b[^>]*>([\s\S]*?)<\/m:sub>/i);
+      const supMatch = inner.match(/<m:sup\b[^>]*>([\s\S]*?)<\/m:sup>/i);
+      const base = eMatch ? convertOmmlNodeToText(eMatch[1]).trim() : '';
+      const sub = subMatch ? convertOmmlNodeToText(subMatch[1]).trim() : '';
+      const sup = supMatch ? convertOmmlNodeToText(supMatch[1]).trim() : '';
+      return `${base}${sub ? `_{${sub}}` : ''}${sup ? `^{${sup}}` : ''}`;
+    });
+  }
+
+  // Superscript: <m:sSup>
+  for (let pass = 0; pass < 4 && /<m:sSup\b/i.test(out); pass++) {
+    out = out.replace(/<m:sSup\b[^>]*>([\s\S]*?)<\/m:sSup>/gi, (_m, inner) => {
+      const eMatch = inner.match(/<m:e\b[^>]*>([\s\S]*?)<\/m:e>/i);
+      const supMatch = inner.match(/<m:sup\b[^>]*>([\s\S]*?)<\/m:sup>/i);
+      const base = eMatch ? convertOmmlNodeToText(eMatch[1]).trim() : '';
+      const sup = supMatch ? convertOmmlNodeToText(supMatch[1]).trim() : '';
+      return `${base}^{${sup}}`;
+    });
+  }
+
+  // Subscript: <m:sSub>
+  for (let pass = 0; pass < 4 && /<m:sSub\b/i.test(out); pass++) {
+    out = out.replace(/<m:sSub\b[^>]*>([\s\S]*?)<\/m:sSub>/gi, (_m, inner) => {
+      const eMatch = inner.match(/<m:e\b[^>]*>([\s\S]*?)<\/m:e>/i);
+      const subMatch = inner.match(/<m:sub\b[^>]*>([\s\S]*?)<\/m:sub>/i);
+      const base = eMatch ? convertOmmlNodeToText(eMatch[1]).trim() : '';
+      const sub = subMatch ? convertOmmlNodeToText(subMatch[1]).trim() : '';
+      return `${base}_{${sub}}`;
+    });
+  }
+
+  // Delimiters: <m:d>
+  for (let pass = 0; pass < 3 && /<m:d\b/i.test(out); pass++) {
+    out = out.replace(/<m:d\b[^>]*>([\s\S]*?)<\/m:d>/gi, (_m, inner) => {
+      const begMatch = inner.match(/<m:begChr\s+m:val="([^"]*)"/i);
+      const endMatch = inner.match(/<m:endChr\s+m:val="([^"]*)"/i);
+      const beg = begMatch ? begMatch[1] : '(';
+      const end = endMatch ? endMatch[1] : ')';
+      const eMatches = [...inner.matchAll(/<m:e\b[^>]*>([\s\S]*?)<\/m:e>/gi)].map((em) =>
+        convertOmmlNodeToText(em[1]).trim()
+      );
+      return `${beg}${eMatches.join(', ')}${end}`;
+    });
+  }
+
+  return extractPlain(out)
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function escapeXmlText(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+/**
+ * Rewrites Word .docx XML so embedded <m:oMathPara> and <m:oMath> equations become readable <w:r><w:t>
+ * elements before mammoth converts the document to HTML.
+ */
+async function preprocessDocxEquations(arrayBuffer: ArrayBuffer): Promise<ArrayBuffer> {
+  try {
+    const zip = await JSZip.loadAsync(arrayBuffer);
+    const docFile = zip.file('word/document.xml');
+    if (!docFile) return arrayBuffer;
+    const xml = await docFile.async('string');
+    if (!xml.includes('<m:oMath')) return arrayBuffer;
+
+    let modified = xml.replace(/<m:oMathPara\b[^>]*>([\s\S]*?)<\/m:oMathPara>/gi, (full) => {
+      const mathText = convertOmmlNodeToText(full);
+      if (!mathText) return '';
+      return `<w:r><w:t xml:space="preserve">[[FORMULA_BLOCK:${escapeXmlText(mathText)}]]</w:t></w:r>`;
+    });
+
+    modified = modified.replace(/<m:oMath\b[^>]*>([\s\S]*?)<\/m:oMath>/gi, (full) => {
+      const mathText = convertOmmlNodeToText(full);
+      if (!mathText) return '';
+      return `<w:r><w:t xml:space="preserve"> ${escapeXmlText(mathText)} </w:t></w:r>`;
+    });
+
+    if (modified === xml) return arrayBuffer;
+    zip.file('word/document.xml', modified);
+    return await zip.generateAsync({ type: 'arraybuffer' });
+  } catch {
+    return arrayBuffer;
+  }
+}
+
+/**
  * Helper to convert a pdfjs image object into a PNG Data URI.
  */
 function pdfImageObjToDataUrl(imgObj: any): string | null {
@@ -253,12 +403,24 @@ function buildPdfPageText(items: any[]): string {
     const flushRow = () => {
       if (rowItems.length === 0) return;
       rowItems.sort((a, b) => a.x - b.x);
-      const joined = rowItems
-        .map((r) => r.str)
-        .join(' ')
-        .replace(/[ \t]+/g, ' ')
-        .trim();
-      if (joined) lines.push(joined);
+      // Emit standalone image items cleanly while keeping inline option images attached where helpful
+      const textParts: string[] = [];
+      const imgParts: string[] = [];
+      for (const item of rowItems) {
+        if (item.str.includes('[[IMAGE_DATA:')) {
+          imgParts.push(item.str.trim());
+        } else {
+          textParts.push(item.str);
+        }
+      }
+      const joinedText = textParts.join(' ').replace(/[ \t]+/g, ' ').trim();
+      if (joinedText && imgParts.length > 0) {
+        lines.push(`${joinedText} ${imgParts.join(' ')}`.trim());
+      } else if (joinedText) {
+        lines.push(joinedText);
+      } else if (imgParts.length > 0) {
+        lines.push(...imgParts);
+      }
       rowItems = [];
     };
 
@@ -390,8 +552,17 @@ async function extractFromPdf(arrayBuffer: ArrayBuffer): Promise<{
     for (let i = 1; i <= pdf.numPages; i++) {
       const page = await pdf.getPage(i);
       const textContent = await page.getTextContent();
-      const pageText = buildPdfPageText(textContent.items as any[]);
       const extractedOnPage: string[] = [];
+      const positionedImageItems: Array<{ str: string; transform: number[]; hasEOL: boolean }> = [];
+
+      const multiplyMatrix = (m1: number[], m2: number[]): number[] => [
+        m1[0] * m2[0] + m1[2] * m2[1],
+        m1[1] * m2[0] + m1[3] * m2[1],
+        m1[0] * m2[2] + m1[2] * m2[3],
+        m1[1] * m2[2] + m1[3] * m2[3],
+        m1[0] * m2[4] + m1[2] * m2[5] + m1[4],
+        m1[1] * m2[4] + m1[3] * m2[5] + m1[5],
+      ];
 
       if (typeof document !== 'undefined') {
         try {
@@ -403,9 +574,9 @@ async function extractFromPdf(arrayBuffer: ArrayBuffer): Promise<{
               fn === OPS.paintImageMaskXObject ||
               fn === OPS.paintInlineImageXObject
           );
-          const isLowTextPage = pageText.trim().length < 80;
+          const prePageText = buildPdfPageText(textContent.items as any[]);
+          const isLowTextPage = prePageText.trim().length < 80;
 
-          // Render canvas when page has images or looks scanned (up to 25 pages for low-text PDFs)
           if (hasImageOps || (isLowTextPage && i <= 25)) {
             const viewport = page.getViewport({ scale: 1.4 });
             const canvas = document.createElement('canvas');
@@ -438,10 +609,21 @@ async function extractFromPdf(arrayBuffer: ArrayBuffer): Promise<{
               }
 
               const seenObjIds = new Set<string>();
+              let ctm = [1, 0, 0, 1, 0, 0];
+              const ctmStack: number[][] = [];
+
               for (let opIdx = 0; opIdx < opList.fnArray.length; opIdx++) {
                 const fn = opList.fnArray[opIdx];
-                if (fn === OPS.paintImageXObject || fn === OPS.paintImageMaskXObject) {
-                  const objId = opList.argsArray[opIdx]?.[0];
+                const args = opList.argsArray[opIdx];
+
+                if (fn === OPS.save) {
+                  ctmStack.push([...ctm]);
+                } else if (fn === OPS.restore) {
+                  ctm = ctmStack.pop() || [1, 0, 0, 1, 0, 0];
+                } else if (fn === OPS.transform && Array.isArray(args) && args.length >= 6) {
+                  ctm = multiplyMatrix(ctm, args.slice(0, 6).map(Number));
+                } else if (fn === OPS.paintImageXObject || fn === OPS.paintImageMaskXObject) {
+                  const objId = args?.[0];
                   if (!objId || seenObjIds.has(String(objId))) continue;
                   seenObjIds.add(String(objId));
 
@@ -454,6 +636,15 @@ async function extractFromPdf(arrayBuffer: ArrayBuffer): Promise<{
                     const dataUrl = pdfImageObjToDataUrl(imgObj);
                     if (dataUrl) {
                       extractedOnPage.push(dataUrl);
+                      const imgCenterX = ctm[4] + 0.5 * (ctm[0] + ctm[2]);
+                      const imgTopY = Math.max(ctm[5], ctm[5] + ctm[3]);
+                      const imgMidY = ctm[5] + 0.5 * (ctm[1] + ctm[3]);
+                      const anchorY = Number.isFinite(imgTopY) ? imgTopY : Number.isFinite(imgMidY) ? imgMidY : 0;
+                      positionedImageItems.push({
+                        str: `[[IMAGE_DATA:${dataUrl}]]`,
+                        transform: [1, 0, 0, 1, Number.isFinite(imgCenterX) ? imgCenterX : 0, anchorY],
+                        hasEOL: true,
+                      });
                       assets.push({
                         id: `pdf_p${i}_img_${extractedOnPage.length}`,
                         url: dataUrl,
@@ -474,10 +665,17 @@ async function extractFromPdf(arrayBuffer: ArrayBuffer): Promise<{
                     );
                   }
                 } else if (fn === OPS.paintInlineImageXObject) {
-                  const inlineImg = opList.argsArray[opIdx]?.[0];
+                  const inlineImg = args?.[0];
                   const dataUrl = pdfImageObjToDataUrl(inlineImg);
                   if (dataUrl) {
                     extractedOnPage.push(dataUrl);
+                    const imgCenterX = ctm[4] + 0.5 * (ctm[0] + ctm[2]);
+                    const imgTopY = Math.max(ctm[5], ctm[5] + ctm[3]);
+                    positionedImageItems.push({
+                      str: `[[IMAGE_DATA:${dataUrl}]]`,
+                      transform: [1, 0, 0, 1, Number.isFinite(imgCenterX) ? imgCenterX : 0, Number.isFinite(imgTopY) ? imgTopY : 0],
+                      hasEOL: true,
+                    });
                     assets.push({
                       id: `pdf_p${i}_inline_${extractedOnPage.length}`,
                       url: dataUrl,
@@ -501,8 +699,9 @@ async function extractFromPdf(arrayBuffer: ArrayBuffer): Promise<{
         pageImages[i] = extractedOnPage;
       }
 
-      const imageMarkersText = extractedOnPage.map((uri) => `\n[[IMAGE_DATA:${uri}]]`).join('\n');
-      fullText += `\n[--- HALAMAN ${i} ---]\n${pageText}${imageMarkersText}\n`;
+      const combinedItems = [...(textContent.items as any[]), ...positionedImageItems];
+      const pageTextWithSpatialImages = buildPdfPageText(combinedItems);
+      fullText += `\n[--- HALAMAN ${i} ---]\n${pageTextWithSpatialImages}\n`;
     }
 
     return {
@@ -921,25 +1120,12 @@ function splitInlineMultipleChoices(lines: string[]): string[] {
       expanded.push(line);
       continue;
     }
-
-    // Check if the line starts with an option ("A. ...", "a) ...", "A.10 ...") OR contains >= 2 distinct choices inline
-    const startsWithOpt = /^\(?[A-Ea-e][\.\)]\s*\S/.test(line);
-    const hasMultipleChoices =
-      /\(?[AaCc][\.\)]\s*\S+[\s\t]+\(?[BbDd][\.\)]\s*\S+/.test(line) ||
-      (startsWithOpt && /\s{1,}(?=\(?[B-Eb-e][\.\)]\s*\S)/.test(line));
-
-    if (hasMultipleChoices) {
-      const parts = line
-        .split(/(?<=\S)\s+(?=\(?[A-Ea-e][\.\)]\s*\S)/)
-        .map((p) => p.trim())
-        .filter(Boolean);
-      if (parts.length > 1) {
-        expanded.push(...parts);
-        continue;
-      }
+    const splitParts = splitInlineChoiceLine(line);
+    if (splitParts.length > 1) {
+      expanded.push(...splitParts);
+    } else {
+      expanded.push(line);
     }
-
-    expanded.push(line);
   }
 
   return expanded;
@@ -1109,29 +1295,161 @@ export function parseQuestionsFromText(
   let currentPilihan: Record<string, string> = {};
   let currentPilihanGambar: Record<string, string> = {};
   let currentPertanyaanLines: string[] = [];
-  let currentAttachedImage: string | undefined = undefined;
-  let currentImagePosIndex: number = -1;
+  let currentStemImages: Array<{ url: string; caption?: string; posIndex: number }> = [];
+  let currentElements: KontenElemenSoal[] = [];
+  let pendingTableLines: string[] = [];
+  let pendingImagePosIndex: number = -1;
   let currentPosisiGambar: 'atas' | 'tengah' | 'bawah' = 'atas';
   let currentUkuranGambar: 'kecil' | 'sedang' | 'besar' | 'asli' = 'sedang';
   let currentImageWarning: string | undefined = undefined;
   let currentImageStatus: 'ok' | 'warning' | 'error' | undefined = undefined;
   let activeOptionLetter: string | null = null;
+  let justAttachedStemImage = false;
+  let elemCounter = 0;
+
+  const flushPendingTable = () => {
+    if (pendingTableLines.length === 0) return;
+    currentElements.push({
+      id: `el_${Date.now()}_${++elemCounter}`,
+      tipe: 'tabel',
+      markdown: pendingTableLines.join('\n'),
+    });
+    pendingTableLines = [];
+  };
+
+  const pushStemTextLine = (txt: string) => {
+    if (!txt) return;
+    // Check if markdown table line
+    if (/^\|.*\|$/.test(txt)) {
+      pendingTableLines.push(txt);
+      currentPertanyaanLines.push(txt);
+      justAttachedStemImage = false;
+      return;
+    }
+
+    flushPendingTable();
+
+    // Check if standalone formula block marker [[FORMULA_BLOCK:...]]
+    const formulaMatch = txt.match(/^\[\[FORMULA_BLOCK:([\s\S]+?)\]\]$/);
+    if (formulaMatch) {
+      const expr = formulaMatch[1].trim();
+      currentElements.push({
+        id: `el_${Date.now()}_${++elemCounter}`,
+        tipe: 'rumus',
+        isi: expr,
+      });
+      currentPertanyaanLines.push(expr);
+      justAttachedStemImage = false;
+      return;
+    }
+
+    // If an image was just added and this line is an explicit caption (e.g. "Gambar 1. ..."), attach caption cleanly
+    if (
+      justAttachedStemImage &&
+      /^(?:gambar|gbr\.?|diagram|grafik|peta|ilustrasi|sumber)\s*\d*[\.\:\-]?\s+/i.test(txt) &&
+      txt.length <= 160
+    ) {
+      const lastImgEl = [...currentElements].reverse().find((el) => el.tipe === 'gambar');
+      if (lastImgEl && lastImgEl.tipe === 'gambar' && !lastImgEl.caption) {
+        lastImgEl.caption = txt;
+        if (currentStemImages.length > 0) {
+          currentStemImages[currentStemImages.length - 1].caption = txt;
+        }
+        currentPertanyaanLines.push(txt);
+        justAttachedStemImage = false;
+        return;
+      }
+    }
+
+    const cleanTxt = txt.replace(/\[\[FORMULA_BLOCK:([\s\S]+?)\]\]/g, '$1');
+    currentPertanyaanLines.push(cleanTxt);
+    const lastEl = currentElements[currentElements.length - 1];
+    if (lastEl && lastEl.tipe === 'teks') {
+      lastEl.isi = `${lastEl.isi}\n${cleanTxt}`;
+    } else {
+      currentElements.push({
+        id: `el_${Date.now()}_${++elemCounter}`,
+        tipe: 'teks',
+        isi: cleanTxt,
+      });
+    }
+    justAttachedStemImage = false;
+  };
+
+  const pushStemImage = (imgUrl: string) => {
+    if (!imgUrl) return;
+    flushPendingTable();
+    const posIdx = currentPertanyaanLines.length;
+    if (currentStemImages.length === 0) {
+      pendingImagePosIndex = posIdx;
+      currentPosisiGambar = posIdx === 0 ? 'atas' : 'tengah';
+      currentImageStatus = 'ok';
+    }
+    currentStemImages.push({ url: imgUrl, posIndex: posIdx });
+    currentElements.push({
+      id: `el_${Date.now()}_${++elemCounter}`,
+      tipe: 'gambar',
+      url: imgUrl,
+      ukuran: currentUkuranGambar,
+    });
+    justAttachedStemImage = true;
+  };
 
   const finalizeSoal = () => {
     if (!currentSoal) return;
+    flushPendingTable();
 
-    const pertanyaanText = currentPertanyaanLines.join('\n').trim();
-    if (!pertanyaanText && Object.keys(currentPilihan).length === 0 && !currentAttachedImage) return;
+    let pertanyaanText = currentPertanyaanLines.join('\n').trim();
+    if (
+      !pertanyaanText &&
+      Object.keys(currentPilihan).length === 0 &&
+      currentStemImages.length === 0 &&
+      Object.keys(currentPilihanGambar).length === 0
+    ) {
+      return;
+    }
+
+    // Rescue any inline A./B./C./D. options that stayed attached inside the question stem
+    if (Object.keys(currentPilihan).length < 2 && pertanyaanText) {
+      const rescued = extractEmbeddedChoicesFromStem(pertanyaanText);
+      if (rescued.extractedChoices) {
+        pertanyaanText = rescued.cleanStem;
+        currentPilihan = rescued.extractedChoices;
+        if (currentElements.length === 1 && currentElements[0].tipe === 'teks') {
+          currentElements[0].isi = rescued.cleanStem;
+        }
+      }
+    }
+
+    // Clean any accidental double prefixes inside options (e.g. "A. Jakarta" -> "Jakarta")
+    for (const optKey of Object.keys(currentPilihan)) {
+      currentPilihan[optKey] = stripRedundantOptionLabel(optKey, currentPilihan[optKey]);
+    }
 
     const optKeys = Object.keys(currentPilihan);
     const hasOptions = optKeys.length >= 2 || Object.keys(currentPilihanGambar).length >= 2;
     const tipe = hasOptions ? 'pilihan_ganda' : 'uraian';
 
+    const primaryImgObj = currentStemImages[0];
+    const primaryImage = primaryImgObj?.url;
+    const extraImages =
+      currentStemImages.length > 1
+        ? currentStemImages.slice(1).map((item) => ({
+            url: item.url,
+            caption: item.caption,
+            posisi: (item.posIndex === 0
+              ? 'atas'
+              : item.posIndex < currentPertanyaanLines.length
+              ? 'tengah'
+              : 'bawah') as 'atas' | 'tengah' | 'bawah',
+          }))
+        : undefined;
+
     let finalPos: 'atas' | 'tengah' | 'bawah' = currentPosisiGambar;
-    if (currentAttachedImage && currentImagePosIndex >= 0) {
-      if (currentImagePosIndex === 0) {
+    if (primaryImage && pendingImagePosIndex >= 0) {
+      if (pendingImagePosIndex === 0) {
         finalPos = 'atas';
-      } else if (currentImagePosIndex < currentPertanyaanLines.length) {
+      } else if (pendingImagePosIndex < currentPertanyaanLines.length) {
         finalPos = 'tengah';
       } else {
         finalPos = 'bawah';
@@ -1160,21 +1478,29 @@ export function parseQuestionsFromText(
       kunci ||
       (tipe === 'pilihan_ganda' ? trailingKeys[docNomor] || trailingKeys[nomorSoal] || '' : '');
 
+    // Keep kontenElemen whenever question has multiple visual blocks, tables, formulas, or interleaved image+text
+    const hasRichElements = currentElements.some(
+      (el) => el.tipe === 'tabel' || el.tipe === 'rumus' || el.tipe === 'gambar'
+    );
+
     soalList.push({
       id: `soal-${Date.now()}-${nomorSoal}`,
       nomor: nomorSoal,
       tipe,
       pertanyaan:
         pertanyaanText ||
-        (currentAttachedImage ? '(Perhatikan gambar berikut)' : `Soal nomor ${nomorSoal}`),
+        (primaryImage ? '(Perhatikan gambar berikut)' : `Soal nomor ${nomorSoal}`),
+      kontenElemen: hasRichElements ? [...currentElements] : undefined,
       pilihan: hasOptions ? currentPilihan : undefined,
       pilihanGambar: Object.keys(currentPilihanGambar).length > 0 ? currentPilihanGambar : undefined,
       kunciJawaban: finalKunci,
       bobot: currentSoal.bobot || (tipe === 'pilihan_ganda' ? 1 : 2),
-      gambar: currentAttachedImage,
-      gambarPosisi: currentAttachedImage ? finalPos : undefined,
-      gambarUkuran: currentAttachedImage ? currentUkuranGambar : undefined,
-      gambarStatus: currentImageStatus || (currentAttachedImage ? 'ok' : undefined),
+      gambar: primaryImage,
+      gambarCaption: primaryImgObj?.caption,
+      gambarTambahan: extraImages,
+      gambarPosisi: primaryImage ? finalPos : undefined,
+      gambarUkuran: primaryImage ? currentUkuranGambar : undefined,
+      gambarStatus: currentImageStatus || (primaryImage ? 'ok' : undefined),
       gambarWarning: currentImageWarning,
       pedomanPenilaian:
         tipe === 'uraian'
@@ -1193,14 +1519,23 @@ export function parseQuestionsFromText(
     currentPilihan = {};
     currentPilihanGambar = {};
     currentPertanyaanLines = [];
-    currentAttachedImage = undefined;
-    currentImagePosIndex = -1;
+    currentStemImages = [];
+    currentElements = [];
+    pendingTableLines = [];
+    pendingImagePosIndex = -1;
     currentPosisiGambar = 'atas';
     currentUkuranGambar = 'sedang';
     currentImageWarning = undefined;
     currentImageStatus = undefined;
     activeOptionLetter = null;
+    justAttachedStemImage = false;
   };
+
+  let inInstructionBlock = false;
+  let sectionStarted = false;
+  let justSawSectionHeader = false;
+  let inSubStatementList = false;
+  let subListLastNum = 0;
 
   for (let i = 0; i < questionLines.length; i++) {
     const rawLine = questionLines[i];
@@ -1238,34 +1573,106 @@ export function parseQuestionsFromText(
       lineImages.length === 0 &&
       (rawLine.includes('[[IMAGE]]') || rawLine.includes('[IMAGE:') || rawLine.includes('[Gambar'))
     ) {
-      if (currentSoal && !currentAttachedImage && nextImageIdx < imageUris.length) {
-        currentAttachedImage = imageUris[nextImageIdx++];
-        currentImagePosIndex = currentPertanyaanLines.length;
-        currentImageStatus = 'ok';
+      if (currentSoal && currentStemImages.length === 0 && nextImageIdx < imageUris.length) {
+        pushStemImage(imageUris[nextImageIdx++]);
       }
       continue;
     }
 
-    // Ignore Roman numeral section headers (e.g. "I. Pilihan Ganda", "II. Uraian")
-    if (/^(?:[IVX]{1,4}|BAGIAN\s+[A-Z0-9]+)\s*[\.\:\)]\s+(?:PILIHAN|URAIAN|ESAI|ESSAY|ISIAN|JAWABLAH)/i.test(line)) {
-      finalizeSoal();
+    // Detect Petunjuk Umum / Tata Tertib header before questions start
+    if (
+      !sectionStarted &&
+      soalList.length === 0 &&
+      !currentSoal &&
+      /^(?:petunjuk(?:\s+umum|\s+pengerjaan|\s+soal)?|tata\s+tertib|aturan\s+ujian)\s*[:\-]?$/i.test(
+        line.replace(/^[#*_\s]+|[#*_\s]+$/g, '')
+      )
+    ) {
+      inInstructionBlock = true;
       continue;
     }
 
-    // Match Question Start:
-    // "1. Pertanyaan", "1 . Pertanyaan", "1) Pertanyaan", "(1) Pertanyaan", "[1] Pertanyaan", "No. 1: Pertanyaan", "Soal 1. Pertanyaan", "1.Pertanyaan"
-    // Guard against decimals ("1.5", "3.14") via (?![0-9]) after delimiter
-    const qMatch = line.match(
-      /^(?:soal\s*(?:no\.?|nomor)?\s*|no\.?\s*|nomor\s*)?[\(\[]?(\d{1,3})\s*[\.\)\:\]]\s*(?![0-9])(.*)/i
-    );
-    const isOptionShape = /^[\(\[]?[A-Ea-e]\s*[\.\)\]]/.test(line);
-    const optMatch = line.match(/^[\(\[]?([A-Ea-e])\s*[\.\)\]]\s*(.*)/);
-    const keyMatch = line.match(/^(?:kunci(?:\s+jawaban)?|jawaban(?:\s+benar)?|kj)\s*[:=\-]\s*\(?([A-Ea-e])\)?/i);
-    const parsedNum = qMatch ? parseInt(qMatch[1], 10) : 0;
-    const isLikelyQuestionNumber = Boolean(qMatch) && parsedNum >= 1 && parsedNum <= 500;
-
-    if (qMatch && isLikelyQuestionNumber && !isOptionShape) {
+    // Ignore Roman numeral / Bagian section headers (e.g. "I. Pilihan Ganda", "II. Uraian", "B. Jawablah...")
+    if (
+      /^(?:(?:[IVX]{1,4}|[A-D]|BAGIAN\s+[A-Z0-9]+)\s*[\.\:\)]\s*)?(?:PILIHAN\s+GANDA|SOAL\s+PILIHAN\s+GANDA|SOAL\s+URAIAN|SOAL\s+ISIAN|URAIAN(?:\s+SINGKAT)?|ESAI|ESSAY|ISIAN(?:\s+SINGKAT)?|JAWABLAH(?:\s+PERTANYAAN|\s+DENGAN)?)/i.test(
+        line
+      )
+    ) {
       finalizeSoal();
+      inInstructionBlock = false;
+      sectionStarted = true;
+      justSawSectionHeader = true;
+      inSubStatementList = false;
+      subListLastNum = 0;
+      continue;
+    }
+
+    const qParsed = parseQuestionNumberPrefix(line);
+    const optParsed = parseOptionPrefix(line);
+    const keyMatch = line.match(/^(?:kunci(?:\s+jawaban)?|jawaban(?:\s+benar)?|kj)\s*[:=\-]\s*\(?([A-Ea-e])\)?/i);
+
+    if (qParsed && !optParsed) {
+      const parsedNum = qParsed.nomor;
+      const delimiterChar = qParsed.delimiter;
+      const cleanQText = qParsed.content;
+
+      // Skip Petunjuk Umum / Tata Tertib numbered rules at the top of exam sheets
+      if (
+        !sectionStarted &&
+        soalList.length === 0 &&
+        !currentSoal &&
+        (inInstructionBlock || isLikelyExamInstructionLine(cleanQText))
+      ) {
+        continue;
+      }
+
+      // Guard against numbered statements inside a question ("Perhatikan pernyataan: 1) ... 2) ...")
+      const hasChoicesInCurrent = Object.keys(currentPilihan).length >= 2;
+      const lastStemLine = currentPertanyaanLines[currentPertanyaanLines.length - 1] || '';
+      const stemLeadsIntoList =
+        /[:：]$|(?:berikut(?:\s+ini)?|di\s*bawah\s+ini|pernyataan|ciri-?ciri|sifat-?sifat|langkah-?langkah|hal-?hal|pasangan)\s*[:\.\-]?$/i.test(
+          lastStemLine
+        );
+      const isParenDelimiter = delimiterChar === ')' || /^\(\d+\)/.test(line);
+      const currentDocNum = currentSoal?.nomor || 0;
+
+      // If parsedNum matches the next main question (currentDocNum + 1) AND looks like a full question stem after >=3 sub-statements, start the new question instead of swallowing it!
+      const looksLikeNextMainQuestion =
+        parsedNum === currentDocNum + 1 &&
+        !isParenDelimiter &&
+        subListLastNum >= 2 &&
+        (/[?\…]$|\.\.\.$/.test(cleanQText) || cleanQText.length >= 45);
+
+      const startsSubList =
+        Boolean(currentSoal) &&
+        !hasChoicesInCurrent &&
+        !justSawSectionHeader &&
+        !looksLikeNextMainQuestion &&
+        ((stemLeadsIntoList && (parsedNum === 1 || parsedNum <= currentDocNum)) ||
+          (isParenDelimiter && (parsedNum === 1 || parsedNum <= currentDocNum)));
+
+      const continuesSubList =
+        Boolean(currentSoal) &&
+        !hasChoicesInCurrent &&
+        inSubStatementList &&
+        !looksLikeNextMainQuestion &&
+        parsedNum === subListLastNum + 1 &&
+        parsedNum <= 8;
+
+      if ((startsSubList || continuesSubList) && currentSoal) {
+        inSubStatementList = true;
+        subListLastNum = parsedNum;
+        pushStemTextLine(line);
+        continue;
+      }
+
+      finalizeSoal();
+      inInstructionBlock = false;
+      sectionStarted = true;
+      justSawSectionHeader = false;
+      inSubStatementList = false;
+      subListLastNum = 0;
+
       const num = parsedNum;
       currentSoal = {
         nomor: num,
@@ -1273,15 +1680,15 @@ export function parseQuestionsFromText(
         bobot: 1,
       };
       activeOptionLetter = null;
-      const cleanQText = qMatch[2].trim();
-      currentPertanyaanLines = cleanQText ? [cleanQText] : [];
+      if (cleanQText) {
+        pushStemTextLine(cleanQText);
+      }
 
       if (lineImages.length > 0) {
-        currentAttachedImage = lineImages[0];
-        currentImagePosIndex = cleanQText ? 1 : 0;
-        currentPosisiGambar = cleanQText ? 'tengah' : 'atas';
-        currentImageStatus = 'ok';
-      } else if (!currentAttachedImage && nextImageIdx < imageUris.length) {
+        for (const imgUri of lineImages) {
+          pushStemImage(imgUri);
+        }
+      } else if (currentStemImages.length === 0 && nextImageIdx < imageUris.length) {
         const lowerQ = cleanQText.toLowerCase();
         if (
           rawText.indexOf('[[IMAGE_DATA:') === -1 &&
@@ -1292,8 +1699,7 @@ export function parseQuestionsFromText(
             lowerQ.includes('ilustrasi') ||
             lowerQ.includes('peta'))
         ) {
-          currentAttachedImage = imageUris[nextImageIdx++];
-          currentImagePosIndex = 0;
+          pushStemImage(imageUris[nextImageIdx++]);
           currentImageStatus = 'warning';
           currentImageWarning =
             'Gambar dipasangkan otomatis berdasarkan konteks teks; harap periksa kecocokan gambar dengan soal.';
@@ -1303,11 +1709,16 @@ export function parseQuestionsFromText(
       continue;
     }
 
-    if (optMatch && currentSoal) {
-      const letter = optMatch[1].toUpperCase();
-      const optText = optMatch[2].trim();
+    if (
+      optParsed &&
+      currentSoal &&
+      isValidOptionProgression(Object.keys(currentPilihan), optParsed.letter)
+    ) {
+      inSubStatementList = false;
+      subListLastNum = 0;
+      const letter = optParsed.letter;
+      const optText = optParsed.content;
 
-      // Prevent section heading like "B. Jawablah pertanyaan uraian berikut!" from overwriting option B
       if (
         currentPilihan[letter] &&
         /(?:jawablah|uraian|esai|essay|isian singkat|isian)/i.test(optText)
@@ -1333,7 +1744,11 @@ export function parseQuestionsFromText(
     if (currentSoal) {
       if (line) {
         if (Object.keys(currentPilihan).length === 0) {
-          currentPertanyaanLines.push(line);
+          // If a closing prompt line follows sub-statements ("Pernyataan yang benar adalah..."), close the sub-statement run
+          if (inSubStatementList && !/[:：]$/.test(line)) {
+            inSubStatementList = false;
+          }
+          pushStemTextLine(line);
         } else if (activeOptionLetter) {
           currentPilihan[activeOptionLetter] = `${currentPilihan[activeOptionLetter]} ${line}`.trim();
         }
@@ -1346,16 +1761,7 @@ export function parseQuestionsFromText(
               currentPilihanGambar[activeOptionLetter] = imgUri;
             }
           } else {
-            if (!currentAttachedImage) {
-              currentAttachedImage = imgUri;
-              currentImagePosIndex = currentPertanyaanLines.length;
-              currentPosisiGambar = currentPertanyaanLines.length === 0 ? 'atas' : 'tengah';
-              currentImageStatus = 'ok';
-            } else {
-              imageWarnings.push(
-                `Soal ${soalList.length + 1} memiliki lebih dari satu gambar di naskah. Gambar tambahan tersedia di Galeri Dokumen ("Atur / Crop -> Gambar Tersedia").`
-              );
-            }
+            pushStemImage(imgUri);
           }
         }
       }
@@ -1503,6 +1909,163 @@ async function callBackendParserInBatches(
 }
 
 /**
+ * Checks whether regex-extracted questions look coherent and trustworthy compared to raw text.
+ */
+function areRegexParsedQuestionsTrustworthy(soalList: SoalUjian[], rawText: string): boolean {
+  if (!Array.isArray(soalList) || soalList.length === 0) return false;
+  const cleanLen = rawText.replace(/\s+/g, ' ').trim().length;
+  if (cleanLen > 600 && soalList.length < 2) return false;
+
+  const placeholderCount = soalList.filter((q) => /^Soal nomor \d+$/i.test(q.pertanyaan.trim())).length;
+  if (placeholderCount > Math.max(1, Math.floor(soalList.length * 0.25))) return false;
+
+  const veryShortCount = soalList.filter((q) => q.pertanyaan.trim().length < 10 && !q.gambar).length;
+  if (veryShortCount > Math.max(1, Math.floor(soalList.length * 0.35))) return false;
+
+  // If raw document clearly contains many A./B./C./D. options, ensure extracted PG choices aren't mostly broken
+  const optionMarkersInDoc = (rawText.match(/(?:^|\n|\s)[A-D][\.\)]\s+\S/g) || []).length;
+  const pgCount = soalList.filter((q) => q.tipe === 'pilihan_ganda').length;
+  if (optionMarkersInDoc >= 12 && pgCount === 0) return false;
+
+  // Check if many PG questions ended up with < 3 choices despite doc having options
+  const brokenPgCount = soalList.filter(
+    (q) => q.tipe === 'pilihan_ganda' && Object.keys(q.pilihan || {}).length < 3
+  ).length;
+  if (pgCount >= 3 && brokenPgCount > Math.floor(pgCount * 0.4)) return false;
+
+  return true;
+}
+
+/**
+ * Applies final structural validation & annotates question verification flags on minor pattern issues.
+ */
+function finalizeValidatedParseResult(
+  baseResult: Omit<ParseDocumentResult, 'kunciDitemukanCount' | 'kunciBelumDitemukanCount' | 'siapDiterbitkan'>,
+  rawTextForCheck?: string
+): ParseDocumentResult {
+  const structure = validateParsedQuestionsStructure(baseResult.soalList, rawTextForCheck);
+
+  if (!structure.isValidFormat) {
+    return {
+      ...baseResult,
+      success: false,
+      soalList: [],
+      kunciDitemukanCount: 0,
+      kunciBelumDitemukanCount: 0,
+      siapDiterbitkan: false,
+      error: structure.fatalError || baseResult.error || 'Format soal pada dokumen tidak sesuai pola standar.',
+    };
+  }
+
+  const annotatedSoal = baseResult.soalList.map((q) => {
+    const qIssues = structure.questionIssues.get(q.nomor);
+    if (!qIssues || qIssues.length === 0) return q;
+    const combinedNote = [q.catatanVerifikasi, ...qIssues].filter(Boolean).join(' | ');
+    return {
+      ...q,
+      perluVerifikasi: true,
+      catatanVerifikasi: combinedNote,
+    };
+  });
+
+  const pgQuestions = annotatedSoal.filter((s) => s.tipe === 'pilihan_ganda');
+  const kunciDitemukanCount = pgQuestions.filter((s) => Boolean(s.kunciJawaban)).length;
+  const kunciBelumDitemukanCount = pgQuestions.length - kunciDitemukanCount;
+
+  const mergedWarnings = Array.from(
+    new Set([...(baseResult.imageWarnings || []), ...structure.warnings])
+  );
+
+  return {
+    ...baseResult,
+    success: true,
+    soalList: annotatedSoal,
+    imageWarnings: mergedWarnings,
+    kunciDitemukanCount,
+    kunciBelumDitemukanCount,
+    siapDiterbitkan: kunciBelumDitemukanCount === 0,
+  };
+}
+
+/**
+ * Splits long text into <= 4,200 char question-boundary batches when calling Gemini fallback.
+ */
+async function callBackendParserTextInBatches(
+  rawText: string,
+  fileName: string
+): Promise<{
+  success: boolean;
+  data?: { judul?: string; mataPelajaran?: string; kelas?: string; petunjukUmum?: string; soalList: any[] };
+  error?: string;
+}> {
+  const clean = rawText.trim();
+  if (!clean) return { success: false, error: 'Teks kosong.' };
+  if (clean.length <= 4200) {
+    return await callBackendParserFallback({ text: clean, fileName });
+  }
+
+  const lines = clean.split('\n');
+  const chunks: string[] = [];
+  let buf = '';
+  for (const line of lines) {
+    const isQ = /^\s*\d{1,3}\s*[\.\)]\s+/.test(line);
+    if (buf.length > 2600 && isQ && buf.length + line.length + 1 > 4200) {
+      chunks.push(buf.trim());
+      buf = line;
+    } else if (buf.length + line.length + 1 > 4200 && buf.trim()) {
+      chunks.push(buf.trim());
+      buf = line;
+    } else {
+      buf = buf ? `${buf}\n${line}` : line;
+    }
+  }
+  if (buf.trim()) chunks.push(buf.trim());
+
+  let mergedJudul: string | undefined;
+  let mergedMapel: string | undefined;
+  let mergedKelas: string | undefined;
+  let mergedPetunjuk: string | undefined;
+  const mergedSoal: any[] = [];
+  let lastError: string | undefined;
+
+  for (const chunk of chunks) {
+    const prevQ = mergedSoal[mergedSoal.length - 1];
+    const tailCtx = prevQ
+      ? `Soal terakhir sebelumnya bernomor ${prevQ.nomor}: "${String(prevQ.pertanyaan || '').slice(0, 120)}"`
+      : undefined;
+    const res = await callBackendParserFallback({
+      text: chunk,
+      fileName,
+      ...(tailCtx ? { previousTailContext: tailCtx } : {}),
+    } as any);
+
+    if (res.success && res.data) {
+      if (!mergedJudul && res.data.judul) mergedJudul = res.data.judul;
+      if (!mergedMapel && res.data.mataPelajaran) mergedMapel = res.data.mataPelajaran;
+      if (!mergedKelas && res.data.kelas) mergedKelas = res.data.kelas;
+      if (!mergedPetunjuk && res.data.petunjukUmum) mergedPetunjuk = res.data.petunjukUmum;
+      if (Array.isArray(res.data.soalList)) mergedSoal.push(...res.data.soalList);
+    } else if (res.error) {
+      lastError = res.error;
+    }
+  }
+
+  if (mergedSoal.length > 0) {
+    return {
+      success: true,
+      data: {
+        judul: mergedJudul,
+        mataPelajaran: mergedMapel,
+        kelas: mergedKelas,
+        petunjukUmum: mergedPetunjuk,
+        soalList: mergedSoal.map((q, idx) => ({ ...q, nomor: idx + 1 })),
+      },
+    };
+  }
+  return { success: false, error: lastError || 'AI text parser tidak menemukan soal.' };
+}
+
+/**
  * Downscales an uploaded image file so base64 stays safely under Vercel's 4.5MB body limit.
  */
 async function prepareImageFileForUpload(
@@ -1602,6 +2165,34 @@ export async function parseExamDocument(
     const filename = file.name.toLowerCase();
     const arrayBuffer = await file.arrayBuffer();
 
+    const precheck = validateUploadedFileHeader(file.name, arrayBuffer, [
+      'docx',
+      'doc',
+      'pdf',
+      'xlsx',
+      'xls',
+      'txt',
+      'csv',
+      'jpg',
+      'jpeg',
+      'png',
+      'webp',
+    ]);
+    if (!precheck.valid) {
+      return {
+        success: false,
+        soalList: [],
+        extractedImagesCount: 0,
+        failedImagesCount: 0,
+        imageWarnings: precheck.warnings,
+        extractedImages: [],
+        kunciDitemukanCount: 0,
+        kunciBelumDitemukanCount: 0,
+        siapDiterbitkan: false,
+        error: precheck.errorMessage || 'Format berkas tidak valid atau tidak didukung.',
+      };
+    }
+
     // ------------------------------------------------------------------------
     // 1. WORD (.DOCX & LEGACY .DOC) PARSER
     // ------------------------------------------------------------------------
@@ -1613,51 +2204,51 @@ export async function parseExamDocument(
         const legacyText = extractReadableTextFromLegacyDoc(arrayBuffer);
         const { soalList, metadata } = parseQuestionsFromText(legacyText);
 
-        if (soalList.length > 0) {
-          const pgQuestions = soalList.filter((s) => s.tipe === 'pilihan_ganda');
-          const kunciDitemukanCount = pgQuestions.filter((s) => Boolean(s.kunciJawaban)).length;
-          return {
-            success: true,
-            judul: metadata.judul,
-            mataPelajaran: metadata.mapel,
-            kelas: metadata.kelas,
-            petunjukUmum: metadata.petunjuk,
-            soalList,
-            extractedImagesCount: 0,
-            failedImagesCount: 0,
-            imageWarnings: [
-              'Berkas terdeteksi sebagai format lama (.doc 97-2003). Untuk pembacaan gambar & tabel maksimal, disarankan menyimpannya sebagai .docx atau .pdf.',
-            ],
-            extractedImages: [],
-            originalText: legacyText,
-            kunciDitemukanCount,
-            kunciBelumDitemukanCount: pgQuestions.length - kunciDitemukanCount,
-            siapDiterbitkan: pgQuestions.length - kunciDitemukanCount === 0,
-          };
+        if (soalList.length > 0 && areRegexParsedQuestionsTrustworthy(soalList, legacyText)) {
+          return finalizeValidatedParseResult(
+            {
+              success: true,
+              judul: metadata.judul,
+              mataPelajaran: metadata.mapel,
+              kelas: metadata.kelas,
+              petunjukUmum: metadata.petunjuk,
+              soalList,
+              extractedImagesCount: 0,
+              failedImagesCount: 0,
+              imageWarnings: [
+                ...precheck.warnings,
+                'Berkas terdeteksi sebagai format lama (.doc 97-2003). Untuk pembacaan gambar & tabel maksimal, disarankan menyimpannya sebagai .docx atau .pdf.',
+              ],
+              extractedImages: [],
+              originalText: legacyText,
+            },
+            legacyText
+          );
         }
 
         if (legacyText.trim().length > 40) {
           const aiRes = await callBackendParserFallback({ text: legacyText, fileName: file.name });
           if (aiRes.success && aiRes.data?.soalList?.length > 0) {
             const formatted = formatAiParsedSoalList(aiRes.data.soalList, false);
-            const pgQuestions = formatted.filter((s) => s.tipe === 'pilihan_ganda');
-            const kunciDitemukanCount = pgQuestions.filter((s) => Boolean(s.kunciJawaban)).length;
-            return {
-              success: true,
-              judul: aiRes.data.judul,
-              mataPelajaran: aiRes.data.mataPelajaran,
-              kelas: aiRes.data.kelas,
-              petunjukUmum: aiRes.data.petunjukUmum,
-              soalList: formatted,
-              extractedImagesCount: 0,
-              failedImagesCount: 0,
-              imageWarnings: [],
-              extractedImages: [],
-              originalText: legacyText,
-              kunciDitemukanCount,
-              kunciBelumDitemukanCount: pgQuestions.length - kunciDitemukanCount,
-              siapDiterbitkan: pgQuestions.length - kunciDitemukanCount === 0,
-            };
+            return finalizeValidatedParseResult(
+              {
+                success: true,
+                judul: aiRes.data.judul,
+                mataPelajaran: aiRes.data.mataPelajaran,
+                kelas: aiRes.data.kelas,
+                petunjukUmum: aiRes.data.petunjukUmum,
+                soalList: formatted,
+                extractedImagesCount: 0,
+                failedImagesCount: 0,
+                imageWarnings: [
+                  ...precheck.warnings,
+                  ...(Array.isArray(aiRes.data.validationWarnings) ? aiRes.data.validationWarnings : []),
+                ],
+                extractedImages: [],
+                originalText: legacyText,
+              },
+              legacyText
+            );
           }
         }
 
@@ -1681,6 +2272,8 @@ export async function parseExamDocument(
       const { imageMap, assets: docxAssets, failedCount: zipFailedCount, warnings: zipWarnings } =
         await extractImagesFromDocx(arrayBuffer);
 
+      const preprocessedDocxBuffer = await preprocessDocxEquations(arrayBuffer);
+
       let rawDocxText = '';
       let rawDocxHtml = '';
       let htmlFailedImages = 0;
@@ -1690,8 +2283,8 @@ export async function parseExamDocument(
         Boolean((process as any)?.versions?.node) &&
         typeof Buffer !== 'undefined';
       const mammothInput: any = isNodeRuntime
-        ? { buffer: Buffer.from(arrayBuffer) }
-        : { arrayBuffer };
+        ? { buffer: Buffer.from(preprocessedDocxBuffer) }
+        : { arrayBuffer: preprocessedDocxBuffer };
 
       try {
         const mammothResult = await mammoth.extractRawText(mammothInput);
@@ -1726,12 +2319,28 @@ export async function parseExamDocument(
       // Direct OOXML fallback via JSZip if mammoth did not yield readable text
       if (!rawDocxText || rawDocxText.trim().length < 10) {
         try {
-          const fallbackZip = await JSZip.loadAsync(arrayBuffer);
+          const fallbackZip = await JSZip.loadAsync(preprocessedDocxBuffer);
           const docXmlFile = fallbackZip.file('word/document.xml');
+          const relsXmlFile = fallbackZip.file('word/_rels/document.xml.rels');
+          const relIdToTarget: Record<string, string> = {};
+          if (relsXmlFile) {
+            const relsXml = await relsXmlFile.async('string');
+            const relRe = /<Relationship\b[^>]*Id="([^"]+)"[^>]*Target="([^"]+)"/gi;
+            let rm: RegExpExecArray | null;
+            while ((rm = relRe.exec(relsXml)) !== null) {
+              const filename = rm[2].split('/').pop() || rm[2];
+              if (imageMap[filename]) relIdToTarget[rm[1]] = imageMap[filename];
+              else if (imageMap[`word/${rm[2]}`]) relIdToTarget[rm[1]] = imageMap[`word/${rm[2]}`];
+            }
+          }
+
           if (docXmlFile) {
             const docXml = await docXmlFile.async('string');
-            const cleanXmlText = (chunk: string) =>
-              chunk
+            const cleanXmlText = (chunk: string) => {
+              const withImgs = chunk.replace(/<a:blip\b[^>]*r:embed="([^"]+)"[^>]*\/?>/gi, (_bm, rId) =>
+                relIdToTarget[rId] ? `\n[[IMAGE_DATA:${relIdToTarget[rId]}]]\n` : ''
+              );
+              return withImgs
                 .replace(/<w:tab\s*\/?>/gi, ' ')
                 .replace(/<w:br\s*\/?>/gi, '\n')
                 .replace(/<[^>]+>/g, '')
@@ -1742,6 +2351,7 @@ export async function parseExamDocument(
                 .replace(/&#39;/g, "'")
                 .replace(/[ \t]+/g, ' ')
                 .trim();
+            };
 
             const outHtmlBlocks: string[] = [];
             const blockRe = /<w:tbl\b[^>]*>[\s\S]*?<\/w:tbl>|<w:p\b[^>]*>[\s\S]*?<\/w:p>/g;
@@ -1783,72 +2393,68 @@ export async function parseExamDocument(
       const allWarnings = Array.from(new Set([...zipWarnings, ...imageWarnings]));
       const totalFailedImages = zipFailedCount + htmlFailedImages + lineFailedImages;
       const attachedImageCount = soalList.reduce(
-        (acc, q) => acc + (q.gambar ? 1 : 0) + (q.pilihanGambar ? Object.keys(q.pilihanGambar).length : 0),
+        (acc, q) =>
+          acc +
+          (q.gambar ? 1 : 0) +
+          (Array.isArray(q.gambarTambahan) ? q.gambarTambahan.length : 0) +
+          (q.pilihanGambar ? Object.keys(q.pilihanGambar).length : 0),
         0
       );
       const totalExtractedImages = Math.max(docxAssets.length, attachedImageCount);
 
-      if (soalList.length > 0) {
-        const pgQuestions = soalList.filter((s) => s.tipe === 'pilihan_ganda');
-        const kunciDitemukanCount = pgQuestions.filter((s) => Boolean(s.kunciJawaban)).length;
-        const kunciBelumDitemukanCount = pgQuestions.length - kunciDitemukanCount;
-
-        return {
-          success: true,
-          judul: metadata.judul,
-          mataPelajaran: metadata.mapel,
-          kelas: metadata.kelas,
-          petunjukUmum: metadata.petunjuk,
-          soalList,
-          extractedImagesCount: totalExtractedImages,
-          failedImagesCount: totalFailedImages,
-          imageWarnings: allWarnings,
-          extractedImages: docxAssets,
-          originalText: rawDocxText.replace(/\[\[IMAGE_DATA:[^\]]+\]\]/g, '[Gambar Tersemat]'),
-          originalHtml: rawDocxHtml,
-          kunciDitemukanCount,
-          kunciBelumDitemukanCount,
-          siapDiterbitkan: kunciBelumDitemukanCount === 0,
-        };
+      if (soalList.length > 0 && areRegexParsedQuestionsTrustworthy(soalList, rawDocxText)) {
+        return finalizeValidatedParseResult(
+          {
+            success: true,
+            judul: metadata.judul,
+            mataPelajaran: metadata.mapel,
+            kelas: metadata.kelas,
+            petunjukUmum: metadata.petunjuk,
+            soalList,
+            extractedImagesCount: totalExtractedImages,
+            failedImagesCount: totalFailedImages,
+            imageWarnings: [...precheck.warnings, ...allWarnings],
+            extractedImages: docxAssets,
+            originalText: rawDocxText.replace(/\[\[IMAGE_DATA:[^\]]+\]\]/g, '[Gambar Tersemat]'),
+            originalHtml: rawDocxHtml,
+          },
+          rawDocxText
+        );
       }
 
-      // Smart AI text fallback when DOCX uses custom/unusual numbering format
+      // Smart AI text fallback when DOCX uses custom numbering or regex results look incomplete
       if (rawDocxText.trim().length > 20) {
         const cleanTextForAi = rawDocxText.replace(/\[\[IMAGE_DATA:[^\]]+\]\]/g, '[GAMBAR]');
-        const aiRes = await callBackendParserFallback({
-          text: cleanTextForAi,
-          fileName: file.name,
-        });
+        const aiRes = await callBackendParserTextInBatches(cleanTextForAi, file.name);
         if (aiRes.success && aiRes.data?.soalList?.length > 0) {
           let formatted = formatAiParsedSoalList(aiRes.data.soalList, false);
           if (rawDocxText.toLowerCase().includes('kunci')) {
             formatted = applyAnswerKeysFromText(formatted, rawDocxText).updatedSoalList;
           }
-          const pgQuestions = formatted.filter((s) => s.tipe === 'pilihan_ganda');
-          const kunciDitemukanCount = pgQuestions.filter((s) => Boolean(s.kunciJawaban)).length;
-          return {
-            success: true,
-            judul: aiRes.data.judul || metadata.judul,
-            mataPelajaran: aiRes.data.mataPelajaran || metadata.mapel,
-            kelas: aiRes.data.kelas || metadata.kelas,
-            petunjukUmum: aiRes.data.petunjukUmum || metadata.petunjuk,
-            soalList: formatted,
-            extractedImagesCount: totalExtractedImages,
-            failedImagesCount: totalFailedImages,
-            imageWarnings:
-              docxAssets.length > 0
-                ? [
-                    ...allWarnings,
-                    `Terdapat ${docxAssets.length} gambar di dokumen Word. Silakan cek kecocokannya atau pasang lewat "+ Tambah Gambar -> Gambar Tersedia".`,
-                  ]
-                : allWarnings,
-            extractedImages: docxAssets,
-            originalText: rawDocxText.replace(/\[\[IMAGE_DATA:[^\]]+\]\]/g, '[Gambar Tersemat]'),
-            originalHtml: rawDocxHtml,
-            kunciDitemukanCount,
-            kunciBelumDitemukanCount: pgQuestions.length - kunciDitemukanCount,
-            siapDiterbitkan: pgQuestions.length - kunciDitemukanCount === 0,
-          };
+          return finalizeValidatedParseResult(
+            {
+              success: true,
+              judul: aiRes.data.judul || metadata.judul,
+              mataPelajaran: aiRes.data.mataPelajaran || metadata.mapel,
+              kelas: aiRes.data.kelas || metadata.kelas,
+              petunjukUmum: aiRes.data.petunjukUmum || metadata.petunjuk,
+              soalList: formatted,
+              extractedImagesCount: totalExtractedImages,
+              failedImagesCount: totalFailedImages,
+              imageWarnings:
+                docxAssets.length > 0
+                  ? [
+                      ...precheck.warnings,
+                      ...allWarnings,
+                      `Terdapat ${docxAssets.length} gambar di dokumen Word. Silakan cek kecocokannya atau pasang lewat "+ Tambah Gambar -> Gambar Tersedia".`,
+                    ]
+                  : [...precheck.warnings, ...allWarnings],
+              extractedImages: docxAssets,
+              originalText: rawDocxText.replace(/\[\[IMAGE_DATA:[^\]]+\]\]/g, '[Gambar Tersemat]'),
+              originalHtml: rawDocxHtml,
+            },
+            cleanTextForAi
+          );
         }
       }
 
@@ -1870,27 +2476,25 @@ export async function parseExamDocument(
           const ocrDocxRes = await callBackendParserInBatches(docxPages, file.name);
           if (ocrDocxRes.success && ocrDocxRes.data?.soalList?.length) {
             const formatted = formatAiParsedSoalList(ocrDocxRes.data.soalList, true);
-            const pgQuestions = formatted.filter((s) => s.tipe === 'pilihan_ganda');
-            const kunciDitemukanCount = pgQuestions.filter((s) => Boolean(s.kunciJawaban)).length;
-            return {
-              success: true,
-              judul: ocrDocxRes.data.judul || metadata.judul,
-              mataPelajaran: ocrDocxRes.data.mataPelajaran || metadata.mapel,
-              kelas: ocrDocxRes.data.kelas || metadata.kelas,
-              petunjukUmum: ocrDocxRes.data.petunjukUmum || metadata.petunjuk,
-              soalList: formatted,
-              extractedImagesCount: totalExtractedImages,
-              failedImagesCount: totalFailedImages,
-              imageWarnings: allWarnings,
-              extractedImages: docxAssets,
-              originalText:
-                rawDocxText.replace(/\[\[IMAGE_DATA:[^\]]+\]\]/g, '[Gambar Tersemat]') ||
-                'Dokumen Word berisi gambar soal (OCR diterapkan)',
-              originalHtml: rawDocxHtml,
-              kunciDitemukanCount,
-              kunciBelumDitemukanCount: pgQuestions.length - kunciDitemukanCount,
-              siapDiterbitkan: pgQuestions.length - kunciDitemukanCount === 0,
-            };
+            return finalizeValidatedParseResult(
+              {
+                success: true,
+                judul: ocrDocxRes.data.judul || metadata.judul,
+                mataPelajaran: ocrDocxRes.data.mataPelajaran || metadata.mapel,
+                kelas: ocrDocxRes.data.kelas || metadata.kelas,
+                petunjukUmum: ocrDocxRes.data.petunjukUmum || metadata.petunjuk,
+                soalList: formatted,
+                extractedImagesCount: totalExtractedImages,
+                failedImagesCount: totalFailedImages,
+                imageWarnings: [...precheck.warnings, ...allWarnings],
+                extractedImages: docxAssets,
+                originalText:
+                  rawDocxText.replace(/\[\[IMAGE_DATA:[^\]]+\]\]/g, '[Gambar Tersemat]') ||
+                  'Dokumen Word berisi gambar soal (OCR diterapkan)',
+                originalHtml: rawDocxHtml,
+              },
+              rawDocxText
+            );
           }
         }
       }
@@ -1935,9 +2539,7 @@ export async function parseExamDocument(
 
       if (ocrRes.success && ocrRes.data?.soalList?.length > 0) {
         const formatted = formatAiParsedSoalList(ocrRes.data.soalList, true);
-        const pgQuestions = formatted.filter((s) => s.tipe === 'pilihan_ganda');
-        const kunciDitemukanCount = pgQuestions.filter((s) => Boolean(s.kunciJawaban)).length;
-        return {
+        return finalizeValidatedParseResult({
           success: true,
           judul: ocrRes.data.judul,
           mataPelajaran: ocrRes.data.mataPelajaran,
@@ -1946,13 +2548,12 @@ export async function parseExamDocument(
           soalList: formatted,
           extractedImagesCount: 1,
           failedImagesCount: 0,
-          imageWarnings: [],
+          imageWarnings: Array.isArray(ocrRes.data.validationWarnings)
+            ? ocrRes.data.validationWarnings
+            : [],
           extractedImages: imgAssets,
           originalText: `Berkas Gambar Naskah: ${file.name} (OCR Diterapkan)`,
-          kunciDitemukanCount,
-          kunciBelumDitemukanCount: pgQuestions.length - kunciDitemukanCount,
-          siapDiterbitkan: pgQuestions.length - kunciDitemukanCount === 0,
-        };
+        });
       }
 
       return {
@@ -1989,12 +2590,12 @@ export async function parseExamDocument(
         .trim();
       const rasterAssetsOnly = pdfAssets.filter((a) => a.source === 'pdf');
 
-      // 3a. Local deterministic text extraction
+      // 3a. Local deterministic text extraction (validated for structural integrity)
       if (cleanDigitalText.length > 30) {
         const { soalList, metadata, imageWarnings: parseImgWarnings, failedImagesCount: parseFailed } =
           parseQuestionsFromText(pdfText);
 
-        if (soalList.length > 0) {
+        if (soalList.length > 0 && areRegexParsedQuestionsTrustworthy(soalList, pdfText)) {
           const allWarnings = Array.from(new Set([...pdfImgWarnings, ...parseImgWarnings]));
           if (rasterAssetsOnly.length > 0) {
             allWarnings.push(
@@ -2002,59 +2603,50 @@ export async function parseExamDocument(
             );
           }
 
-          const pgQuestions = soalList.filter((s) => s.tipe === 'pilihan_ganda');
-          const kunciDitemukanCount = pgQuestions.filter((s) => Boolean(s.kunciJawaban)).length;
-          const kunciBelumDitemukanCount = pgQuestions.length - kunciDitemukanCount;
-
-          return {
-            success: true,
-            judul: metadata.judul,
-            mataPelajaran: metadata.mapel,
-            kelas: metadata.kelas,
-            petunjukUmum: metadata.petunjuk,
-            soalList,
-            extractedImagesCount: rasterAssetsOnly.length,
-            failedImagesCount: pdfImgFailed + parseFailed,
-            imageWarnings: Array.from(new Set(allWarnings)),
-            extractedImages: pdfAssets,
-            originalText: pdfText.replace(/\[\[IMAGE_DATA:[^\]]+\]\]/g, '[Gambar Tersemat Pada Halaman PDF]'),
-            pageCount,
-            kunciDitemukanCount,
-            kunciBelumDitemukanCount,
-            siapDiterbitkan: kunciBelumDitemukanCount === 0,
-          };
+          return finalizeValidatedParseResult(
+            {
+              success: true,
+              judul: metadata.judul,
+              mataPelajaran: metadata.mapel,
+              kelas: metadata.kelas,
+              petunjukUmum: metadata.petunjuk,
+              soalList,
+              extractedImagesCount: rasterAssetsOnly.length,
+              failedImagesCount: pdfImgFailed + parseFailed,
+              imageWarnings: Array.from(new Set(allWarnings)),
+              extractedImages: pdfAssets,
+              originalText: pdfText.replace(/\[\[IMAGE_DATA:[^\]]+\]\]/g, '[Gambar Tersemat Pada Halaman PDF]'),
+              pageCount,
+            },
+            pdfText
+          );
         }
 
-        // 3b. Digital PDF text exists and pages aren't mostly scanned -> AI text structuring fallback
+        // 3b. Digital PDF text exists and pages aren't mostly scanned -> batched AI text structuring fallback
         if (scannedPages.length === 0 || cleanDigitalText.length > 400) {
-          const textFallbackRes = await callBackendParserFallback({
-            text: cleanDigitalText,
-            fileName: file.name,
-          });
+          const textFallbackRes = await callBackendParserTextInBatches(cleanDigitalText, file.name);
           if (textFallbackRes.success && textFallbackRes.data?.soalList?.length > 0) {
             let formatted = formatAiParsedSoalList(textFallbackRes.data.soalList, false);
             if (cleanDigitalText.toLowerCase().includes('kunci')) {
               formatted = applyAnswerKeysFromText(formatted, cleanDigitalText).updatedSoalList;
             }
-            const pgQuestions = formatted.filter((s) => s.tipe === 'pilihan_ganda');
-            const kunciDitemukanCount = pgQuestions.filter((s) => Boolean(s.kunciJawaban)).length;
-            return {
-              success: true,
-              judul: textFallbackRes.data.judul || metadata.judul,
-              mataPelajaran: textFallbackRes.data.mataPelajaran || metadata.mapel,
-              kelas: textFallbackRes.data.kelas || metadata.kelas,
-              petunjukUmum: textFallbackRes.data.petunjukUmum || metadata.petunjuk,
-              soalList: formatted,
-              extractedImagesCount: rasterAssetsOnly.length,
-              failedImagesCount: pdfImgFailed,
-              imageWarnings: pdfImgWarnings,
-              extractedImages: pdfAssets,
-              originalText: pdfText.replace(/\[\[IMAGE_DATA:[^\]]+\]\]/g, '[Gambar Tersemat]'),
-              pageCount,
-              kunciDitemukanCount,
-              kunciBelumDitemukanCount: pgQuestions.length - kunciDitemukanCount,
-              siapDiterbitkan: pgQuestions.length - kunciDitemukanCount === 0,
-            };
+            return finalizeValidatedParseResult(
+              {
+                success: true,
+                judul: textFallbackRes.data.judul || metadata.judul,
+                mataPelajaran: textFallbackRes.data.mataPelajaran || metadata.mapel,
+                kelas: textFallbackRes.data.kelas || metadata.kelas,
+                petunjukUmum: textFallbackRes.data.petunjukUmum || metadata.petunjuk,
+                soalList: formatted,
+                extractedImagesCount: rasterAssetsOnly.length,
+                failedImagesCount: pdfImgFailed,
+                imageWarnings: pdfImgWarnings,
+                extractedImages: pdfAssets,
+                originalText: pdfText.replace(/\[\[IMAGE_DATA:[^\]]+\]\]/g, '[Gambar Tersemat]'),
+                pageCount,
+              },
+              cleanDigitalText
+            );
           }
         }
       }
@@ -2099,27 +2691,28 @@ export async function parseExamDocument(
         if (cleanDigitalText.toLowerCase().includes('kunci')) {
           formattedSoalList = applyAnswerKeysFromText(formattedSoalList, cleanDigitalText).updatedSoalList;
         }
-        const pgQuestions = formattedSoalList.filter((s) => s.tipe === 'pilihan_ganda');
-        const kunciDitemukanCount = pgQuestions.filter((s) => Boolean(s.kunciJawaban)).length;
-        const kunciBelumDitemukanCount = pgQuestions.length - kunciDitemukanCount;
-
-        return {
-          success: true,
-          judul: ocrRes.data.judul,
-          mataPelajaran: ocrRes.data.mataPelajaran,
-          kelas: ocrRes.data.kelas,
-          petunjukUmum: ocrRes.data.petunjukUmum,
-          soalList: formattedSoalList,
-          extractedImagesCount: rasterAssetsOnly.length,
-          failedImagesCount: pdfImgFailed,
-          imageWarnings: Array.from(new Set(scanWarnings)),
-          extractedImages: pdfAssets,
-          originalText: cleanDigitalText || 'Dokumen PDF Hasil Scan (OCR Diterapkan)',
-          pageCount,
-          kunciDitemukanCount,
-          kunciBelumDitemukanCount,
-          siapDiterbitkan: kunciBelumDitemukanCount === 0,
-        };
+        return finalizeValidatedParseResult(
+          {
+            success: true,
+            judul: ocrRes.data.judul,
+            mataPelajaran: ocrRes.data.mataPelajaran,
+            kelas: ocrRes.data.kelas,
+            petunjukUmum: ocrRes.data.petunjukUmum,
+            soalList: formattedSoalList,
+            extractedImagesCount: rasterAssetsOnly.length,
+            failedImagesCount: pdfImgFailed,
+            imageWarnings: Array.from(
+              new Set([
+                ...scanWarnings,
+                ...(Array.isArray(ocrRes.data.validationWarnings) ? ocrRes.data.validationWarnings : []),
+              ])
+            ),
+            extractedImages: pdfAssets,
+            originalText: cleanDigitalText || 'Dokumen PDF Hasil Scan (OCR Diterapkan)',
+            pageCount,
+          },
+          cleanDigitalText
+        );
       }
 
       return {
@@ -2144,35 +2737,252 @@ export async function parseExamDocument(
     }
 
     // ------------------------------------------------------------------------
-    // 3. TEXT / CSV / OTHER GENERIC FILES
+    // 3B. EXCEL SPREADSHEET PARSER (.XLSX, .XLS)
+    // ------------------------------------------------------------------------
+    if (filename.endsWith('.xlsx') || filename.endsWith('.xls')) {
+      const workbook = XLSX.read(new Uint8Array(arrayBuffer), { type: 'array' });
+      const excelSoal: SoalUjian[] = [];
+      const textDumpLines: string[] = [];
+      const excelWarnings: string[] = [...precheck.warnings];
+
+      for (const sheetName of workbook.SheetNames) {
+        const sheet = workbook.Sheets[sheetName];
+        if (!sheet) continue;
+        const rows = XLSX.utils.sheet_to_json<any[]>(sheet, { header: 1, defval: '' }) as any[][];
+        if (!rows || rows.length === 0) continue;
+
+        // Detect columnar exam spreadsheet header
+        let headerIdx = -1;
+        const colMap: Record<string, number> = {};
+        for (let r = 0; r < Math.min(10, rows.length); r++) {
+          const cells = (rows[r] || []).map((c) => String(c ?? '').trim().toLowerCase());
+          const qIdx = cells.findIndex((c) =>
+            /^(pertanyaan|soal|teks\s*soal|butir\s*soal|question)$/.test(c)
+          );
+          if (qIdx !== -1) {
+            headerIdx = r;
+            cells.forEach((h, cIdx) => {
+              if (/^(no|no\.?|nomor)$/.test(h)) colMap.no = cIdx;
+              else if (/^(pertanyaan|soal|teks\s*soal|butir\s*soal|question)$/.test(h)) colMap.pertanyaan = cIdx;
+              else if (/^(a|pilihan\s*a|opsi\s*a|jwb\s*a)$/.test(h)) colMap.A = cIdx;
+              else if (/^(b|pilihan\s*b|opsi\s*b|jwb\s*b)$/.test(h)) colMap.B = cIdx;
+              else if (/^(c|pilihan\s*c|opsi\s*c|jwb\s*c)$/.test(h)) colMap.C = cIdx;
+              else if (/^(d|pilihan\s*d|opsi\s*d|jwb\s*d)$/.test(h)) colMap.D = cIdx;
+              else if (/^(e|pilihan\s*e|opsi\s*e|jwb\s*e)$/.test(h)) colMap.E = cIdx;
+              else if (/^(kunci|kunci\s*jawaban|jawaban|kj|answer)$/.test(h)) colMap.kunci = cIdx;
+              else if (/^(tipe|jenis|type)$/.test(h)) colMap.tipe = cIdx;
+              else if (/^(bobot|skor|poin|nilai)$/.test(h)) colMap.bobot = cIdx;
+              else if (/^(gambar|image|url\s*gambar|foto)$/.test(h)) colMap.gambar = cIdx;
+              else if (/^(pedoman|pembahasan|rubrik)$/.test(h)) colMap.pedoman = cIdx;
+            });
+            break;
+          }
+        }
+
+        if (headerIdx !== -1 && colMap.pertanyaan !== undefined) {
+          for (let r = headerIdx + 1; r < rows.length; r++) {
+            const row = rows[r] || [];
+            const pertanyaan = String(row[colMap.pertanyaan] ?? '').trim();
+            if (!pertanyaan) continue;
+
+            const pilihan: Record<string, string> = {};
+            (['A', 'B', 'C', 'D', 'E'] as const).forEach((letter) => {
+              if (colMap[letter] !== undefined) {
+                const val = String(row[colMap[letter]] ?? '').trim();
+                if (val) pilihan[letter] = stripRedundantOptionLabel(letter, val);
+              }
+            });
+
+            const rawTipe = colMap.tipe !== undefined ? String(row[colMap.tipe] ?? '').toLowerCase() : '';
+            const hasOpts = Object.keys(pilihan).length >= 2;
+            const tipe: 'pilihan_ganda' | 'uraian' =
+              rawTipe.includes('uraian') || rawTipe.includes('esai') || !hasOpts
+                ? 'uraian'
+                : 'pilihan_ganda';
+
+            const rawKunci =
+              colMap.kunci !== undefined ? String(row[colMap.kunci] ?? '').trim().toUpperCase() : '';
+            const cleanKunci =
+              tipe === 'pilihan_ganda'
+                ? rawKunci.match(/^[A-E]/)?.[0] || rawKunci.replace(/[^A-E]/g, '').slice(0, 1)
+                : rawKunci;
+
+            const rawGambar =
+              colMap.gambar !== undefined ? String(row[colMap.gambar] ?? '').trim() : '';
+            const validGambar =
+              rawGambar && (rawGambar.startsWith('http') || rawGambar.startsWith('data:image/'))
+                ? rawGambar
+                : undefined;
+
+            const bobotVal =
+              colMap.bobot !== undefined ? Number(row[colMap.bobot]) : NaN;
+            const bobot = Number.isFinite(bobotVal) && bobotVal > 0 ? bobotVal : tipe === 'uraian' ? 2 : 1;
+            const nomor = excelSoal.length + 1;
+            const pedoman =
+              colMap.pedoman !== undefined ? String(row[colMap.pedoman] ?? '').trim() : '';
+
+            excelSoal.push({
+              id: `soal-xlsx-${Date.now()}-${nomor}`,
+              nomor,
+              tipe,
+              pertanyaan,
+              pilihan: tipe === 'pilihan_ganda' ? pilihan : undefined,
+              kunciJawaban: cleanKunci,
+              bobot,
+              gambar: validGambar,
+              gambarPosisi: validGambar ? 'atas' : undefined,
+              gambarUkuran: validGambar ? 'sedang' : undefined,
+              gambarStatus: validGambar ? 'ok' : undefined,
+              pedomanPenilaian:
+                tipe === 'uraian'
+                  ? pedoman || 'Kriteria: Kesesuaian konsep, kelengkapan uraian, ketepatan penalaran.'
+                  : undefined,
+              perluVerifikasi: tipe === 'pilihan_ganda' && !cleanKunci,
+              catatanVerifikasi:
+                tipe === 'pilihan_ganda' && !cleanKunci
+                  ? 'Kunci jawaban pada kolom Excel masih kosong. Silakan pilih kunci jawaban.'
+                  : undefined,
+            });
+          }
+        } else {
+          // Freeform vertical Excel layout fallback
+          for (const row of rows) {
+            const nonEmpty = row.map((c) => String(c ?? '').trim()).filter(Boolean);
+            if (nonEmpty.length === 0) continue;
+            if (
+              nonEmpty.length >= 2 &&
+              (/^\d+[\.\)]?$/.test(nonEmpty[0]) || /^\(?[A-Ea-e][\.\)]?$/.test(nonEmpty[0]))
+            ) {
+              const pfx = /[\.\)]$/.test(nonEmpty[0]) ? nonEmpty[0] : `${nonEmpty[0]}.`;
+              textDumpLines.push(`${pfx} ${nonEmpty.slice(1).join(' ')}`);
+            } else {
+              textDumpLines.push(nonEmpty.join(' '));
+            }
+          }
+        }
+      }
+
+      if (excelSoal.length > 0) {
+        return finalizeValidatedParseResult(
+          {
+            success: true,
+            judul: file.name.replace(/\.(xlsx|xls)$/i, '').replace(/[_-]+/g, ' ').trim(),
+            soalList: excelSoal,
+            extractedImagesCount: excelSoal.filter((q) => Boolean(q.gambar)).length,
+            failedImagesCount: 0,
+            imageWarnings: excelWarnings,
+            extractedImages: [],
+            originalText: excelSoal
+              .map((q) => `${q.nomor}. ${q.pertanyaan}`)
+              .join('\n'),
+          }
+        );
+      }
+
+      const excelRawText = textDumpLines.join('\n');
+      if (excelRawText.trim().length > 15) {
+        const { soalList, metadata, imageWarnings, failedImagesCount } =
+          parseQuestionsFromText(excelRawText);
+        if (soalList.length > 0) {
+          return finalizeValidatedParseResult(
+            {
+              success: true,
+              judul: metadata.judul,
+              mataPelajaran: metadata.mapel,
+              kelas: metadata.kelas,
+              petunjukUmum: metadata.petunjuk,
+              soalList,
+              extractedImagesCount: 0,
+              failedImagesCount,
+              imageWarnings: [...excelWarnings, ...imageWarnings],
+              extractedImages: [],
+              originalText: excelRawText,
+            },
+            excelRawText
+          );
+        }
+      }
+
+      return {
+        success: false,
+        soalList: [],
+        extractedImagesCount: 0,
+        failedImagesCount: 0,
+        imageWarnings: excelWarnings,
+        extractedImages: [],
+        originalText: excelRawText,
+        kunciDitemukanCount: 0,
+        kunciBelumDitemukanCount: 0,
+        siapDiterbitkan: false,
+        error:
+          'Format tabel Excel belum dikenali. Gunakan header kolom: No | Pertanyaan | A | B | C | D | Kunci (atau format baris bernomor 1., A., B., C., D.).',
+      };
+    }
+
+    // ------------------------------------------------------------------------
+    // 4. PLAIN TEXT / CSV PARSER (.TXT, .CSV)
     // ------------------------------------------------------------------------
     const textDecoder = new TextDecoder('utf-8');
     const rawText = textDecoder.decode(arrayBuffer);
     const { soalList, metadata, imageWarnings, failedImagesCount } = parseQuestionsFromText(rawText);
 
-    const pgQuestions = soalList.filter((s) => s.tipe === 'pilihan_ganda');
-    const kunciDitemukanCount = pgQuestions.filter((s) => Boolean(s.kunciJawaban)).length;
-    const kunciBelumDitemukanCount = pgQuestions.length - kunciDitemukanCount;
+    if (soalList.length > 0 && areRegexParsedQuestionsTrustworthy(soalList, rawText)) {
+      return finalizeValidatedParseResult(
+        {
+          success: true,
+          judul: metadata.judul,
+          mataPelajaran: metadata.mapel,
+          kelas: metadata.kelas,
+          petunjukUmum: metadata.petunjuk,
+          soalList,
+          extractedImagesCount: 0,
+          failedImagesCount,
+          imageWarnings,
+          extractedImages: [],
+          originalText: rawText,
+        },
+        rawText
+      );
+    }
 
-    return {
-      success: soalList.length > 0,
-      judul: metadata.judul,
-      mataPelajaran: metadata.mapel,
-      kelas: metadata.kelas,
-      soalList,
-      extractedImagesCount: 0,
-      failedImagesCount,
-      imageWarnings,
-      extractedImages: [],
-      originalText: rawText,
-      kunciDitemukanCount,
-      kunciBelumDitemukanCount,
-      siapDiterbitkan: kunciBelumDitemukanCount === 0,
-      error:
-        soalList.length === 0
-          ? 'Format dokumen belum memiliki struktur nomor soal yang terbaca.'
-          : undefined,
-    };
+    if (rawText.trim().length > 30) {
+      const aiTextRes = await callBackendParserTextInBatches(rawText, file.name);
+      if (aiTextRes.success && aiTextRes.data?.soalList?.length > 0) {
+        let formatted = formatAiParsedSoalList(aiTextRes.data.soalList, false);
+        if (rawText.toLowerCase().includes('kunci')) {
+          formatted = applyAnswerKeysFromText(formatted, rawText).updatedSoalList;
+        }
+        return finalizeValidatedParseResult(
+          {
+            success: true,
+            judul: aiTextRes.data.judul || metadata.judul,
+            mataPelajaran: aiTextRes.data.mataPelajaran || metadata.mapel,
+            kelas: aiTextRes.data.kelas || metadata.kelas,
+            petunjukUmum: aiTextRes.data.petunjukUmum || metadata.petunjuk,
+            soalList: formatted,
+            extractedImagesCount: 0,
+            failedImagesCount,
+            imageWarnings,
+            extractedImages: [],
+            originalText: rawText,
+          },
+          rawText
+        );
+      }
+    }
+
+    return finalizeValidatedParseResult(
+      {
+        success: false,
+        soalList: [],
+        extractedImagesCount: 0,
+        failedImagesCount,
+        imageWarnings,
+        extractedImages: [],
+        originalText: rawText,
+      },
+      rawText
+    );
   } catch (err: any) {
     console.error('[ExamDocumentParser Error]:', err);
     return {

@@ -54,6 +54,7 @@ export default async function handler(req: any, res: any) {
     mimeType,
     text,
     pages,
+    previousTailContext,
   } = body && typeof body === "object" ? body : {};
 
   const hasValidBase64 = typeof fileBase64 === "string" && fileBase64.trim().length > 0;
@@ -131,6 +132,7 @@ export default async function handler(req: any, res: any) {
       mimeType: resolvedMime,
       fileName: safeFileName,
       pages: hasValidPages ? normalizedPages : undefined,
+      previousTailContext: typeof previousTailContext === "string" && previousTailContext.trim() ? previousTailContext.trim() : undefined,
     });
 
     return res.status(200).json({

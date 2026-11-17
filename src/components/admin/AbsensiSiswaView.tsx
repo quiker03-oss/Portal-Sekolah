@@ -35,6 +35,7 @@ export const AbsensiSiswaView: React.FC = () => {
   const [activeTab, setActiveTab] = useState<'scan' | 'rekap'>('scan');
   const [scannerMode, setScannerMode] = useState<'physical' | 'camera'>('physical');
   const [kelasList] = useState<Kelas[]>(db.getKelasList());
+  const [siswaList, setSiswaList] = useState<Siswa[]>(db.getSiswaList());
   const [absensiList, setAbsensiList] = useState<AbsensiSiswa[]>(db.getAbsensiSiswaList());
 
   // Scanner state
@@ -58,8 +59,9 @@ export const AbsensiSiswaView: React.FC = () => {
   const isScanningRef = useRef<boolean>(false);
   const lastScanTimeRef = useRef<number>(0);
 
-  // Rekap filters
+  // Rekap filters & modes
   const [rekapPeriod, setRekapPeriod] = useState<'harian' | 'bulanan' | 'semester'>('harian');
+  const [rekapViewMode, setRekapViewMode] = useState<'detail' | 'per_siswa'>('per_siswa');
   const [filterTanggal, setFilterTanggal] = useState(getWibDateStr());
   const [filterBulan, setFilterBulan] = useState(getWibDateStr().slice(0, 7));
   const [filterKelas, setFilterKelas] = useState('');
@@ -67,16 +69,28 @@ export const AbsensiSiswaView: React.FC = () => {
   const [searchRekap, setSearchRekap] = useState('');
   const [showPrintModal, setShowPrintModal] = useState(false);
 
+  // Quick manual Izin / Sakit / Alpa input modal
+  const [showManualAbsenModal, setShowManualAbsenModal] = useState(false);
+  const [manualSiswaId, setManualSiswaId] = useState('');
+  const [manualTanggal, setManualTanggal] = useState(getWibDateStr());
+  const [manualStatus, setManualStatus] = useState<StatusAbsensi>('Izin');
+  const [manualKeterangan, setManualKeterangan] = useState('');
+
   const [isConfirmOpen, setIsConfirmOpen] = useState(false);
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
   const refreshData = () => {
     setAbsensiList(db.getAbsensiSiswaList());
+    setSiswaList(db.getSiswaList());
   };
 
   useEffect(() => {
     window.addEventListener('absensi_siswa_updated', refreshData);
-    return () => window.removeEventListener('absensi_siswa_updated', refreshData);
+    window.addEventListener('data_siswa_changed', refreshData);
+    return () => {
+      window.removeEventListener('absensi_siswa_updated', refreshData);
+      window.removeEventListener('data_siswa_changed', refreshData);
+    };
   }, []);
 
   // CAMERA SCANNER CONTROLS
@@ -273,34 +287,151 @@ export const AbsensiSiswaView: React.FC = () => {
     enabled: activeTab === 'scan',
   });
 
-  // REKAP FILTERING
-  const filteredRekap = absensiList.filter((item) => {
-    // 1. Period filter
+  // REKAP FILTERING (base without status filter for accurate summary counters)
+  const baseRekapWithoutStatus = absensiList.filter((item) => {
     let matchPeriod = true;
     if (rekapPeriod === 'harian') {
       matchPeriod = item.tanggal === filterTanggal;
     } else if (rekapPeriod === 'bulanan') {
       matchPeriod = item.tanggal.startsWith(filterBulan);
-    } // semester matches all in current semester term
+    }
 
-    // 2. Class filter
     const matchKelas = filterKelas
       ? item.kelas === filterKelas ||
         item.kelas.toLowerCase().replace(/[^a-z0-9]/g, '') === filterKelas.toLowerCase().replace(/[^a-z0-9]/g, '')
       : true;
 
-    // 3. Status filter
-    const matchStatus = filterStatus ? item.status === filterStatus : true;
-
-    // 4. Search
     const matchSearch =
       item.namaSiswa.toLowerCase().includes(searchRekap.toLowerCase()) ||
       item.qrId.toLowerCase().includes(searchRekap.toLowerCase());
 
-    return matchPeriod && matchKelas && matchStatus && matchSearch;
+    return matchPeriod && matchKelas && matchSearch;
   });
 
+  const filteredRekap = baseRekapWithoutStatus.filter((item) =>
+    filterStatus ? item.status === filterStatus : true
+  );
+
+  // Overall status counts for summary cards (Hadir, Terlambat, Izin, Sakit, Alpa)
+  const statusSummaryCounts = {
+    total: baseRekapWithoutStatus.length,
+    hadir: baseRekapWithoutStatus.filter((i) => i.status === 'Hadir').length,
+    terlambat: baseRekapWithoutStatus.filter((i) => i.status === 'Terlambat').length,
+    izin: baseRekapWithoutStatus.filter((i) => i.status === 'Izin').length,
+    sakit: baseRekapWithoutStatus.filter((i) => i.status === 'Sakit').length,
+    alpa: baseRekapWithoutStatus.filter((i) => i.status === 'Alpa').length,
+  };
+
+  // Per-student aggregated summary (shows Hadir, Terlambat, Izin, Sakit, Alpa per student)
+  const perStudentRekap = React.useMemo(() => {
+    const filteredStudents = siswaList.filter((s) => {
+      const matchKelas = filterKelas
+        ? s.kelas === filterKelas ||
+          s.kelas.toLowerCase().replace(/[^a-z0-9]/g, '') === filterKelas.toLowerCase().replace(/[^a-z0-9]/g, '')
+        : true;
+      const matchSearch =
+        s.namaLengkap.toLowerCase().includes(searchRekap.toLowerCase()) ||
+        (s.qrId || '').toLowerCase().includes(searchRekap.toLowerCase()) ||
+        (s.nisn || '').toLowerCase().includes(searchRekap.toLowerCase());
+      return matchKelas && matchSearch;
+    });
+
+    const rows = filteredStudents.map((s) => {
+      const recs = baseRekapWithoutStatus.filter((a) => a.siswaId === s.id || a.qrId === s.qrId);
+      const hadir = recs.filter((r) => r.status === 'Hadir').length;
+      const terlambat = recs.filter((r) => r.status === 'Terlambat').length;
+      const izin = recs.filter((r) => r.status === 'Izin').length;
+      const sakit = recs.filter((r) => r.status === 'Sakit').length;
+      const alpa = recs.filter((r) => r.status === 'Alpa').length;
+      const total = recs.length;
+      return {
+        siswaId: s.id,
+        qrId: s.qrId,
+        nisn: s.nisn || '-',
+        namaSiswa: s.namaLengkap,
+        kelas: s.kelas,
+        hadir,
+        terlambat,
+        izin,
+        sakit,
+        alpa,
+        total,
+      };
+    });
+
+    if (!filterStatus) return rows;
+    return rows.filter((r) => {
+      if (filterStatus === 'Hadir') return r.hadir > 0;
+      if (filterStatus === 'Terlambat') return r.terlambat > 0;
+      if (filterStatus === 'Izin') return r.izin > 0;
+      if (filterStatus === 'Sakit') return r.sakit > 0;
+      if (filterStatus === 'Alpa') return r.alpa > 0;
+      return true;
+    });
+  }, [siswaList, baseRekapWithoutStatus, filterKelas, searchRekap, filterStatus]);
+
+  const handleSaveManualStatus = (e: React.FormEvent) => {
+    e.preventDefault();
+    const siswa = siswaList.find((s) => s.id === manualSiswaId);
+    if (!siswa) {
+      toast.warning('Silakan pilih siswa terlebih dahulu.');
+      return;
+    }
+    const res = db.upsertAbsensiSiswa({
+      siswaId: siswa.id,
+      qrId: siswa.qrId,
+      namaSiswa: siswa.namaLengkap,
+      kelas: siswa.kelas,
+      tanggal: manualTanggal || getWibDateStr(),
+      jam: getWibTimeStr(),
+      status: manualStatus,
+      keterangan: manualKeterangan.trim() || undefined,
+    });
+    toast.success(
+      `${res.updated ? 'Status absensi diperbarui' : 'Absensi dicatat'}: ${siswa.namaLengkap} (${manualStatus})`
+    );
+    setShowManualAbsenModal(false);
+    setManualKeterangan('');
+    refreshData();
+  };
+
+  const handleQuickChangeStatus = (item: AbsensiSiswa, nextStatus: StatusAbsensi) => {
+    db.upsertAbsensiSiswa({
+      siswaId: item.siswaId,
+      qrId: item.qrId,
+      namaSiswa: item.namaSiswa,
+      kelas: item.kelas,
+      tanggal: item.tanggal,
+      jam: item.jam,
+      status: nextStatus,
+      keterangan: item.keterangan,
+    });
+    toast.success(`Status ${item.namaSiswa} diubah menjadi ${nextStatus}.`);
+    refreshData();
+  };
+
   const handleExportExcel = () => {
+    if (rekapViewMode === 'per_siswa') {
+      const data = perStudentRekap.map((r, idx) => ({
+        No: idx + 1,
+        'ID QR': r.qrId,
+        NISN: r.nisn,
+        'Nama Siswa': r.namaSiswa,
+        Kelas: r.kelas,
+        Hadir: r.hadir,
+        Terlambat: r.terlambat,
+        Izin: r.izin,
+        Sakit: r.sakit,
+        'Alpa / Alfa': r.alpa,
+        'Total Tercatat': r.total,
+      }));
+      exportToExcel(
+        data,
+        `Rekap_Jumlah_Absensi_Siswa_${rekapPeriod}_${new Date().toISOString().split('T')[0]}`
+      );
+      return;
+    }
+
     const data = filteredRekap.map((a, idx) => ({
       No: idx + 1,
       Tanggal: a.tanggal,
@@ -741,19 +872,36 @@ export const AbsensiSiswaView: React.FC = () => {
                 </div>
               </div>
 
-              {/* Action buttons: Print & Excel */}
-              <div className="flex items-center gap-2">
+              {/* Action buttons: Quick Input, Print & Excel */}
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => {
+                    const defaultStudent = siswaList.find((s) =>
+                      filterKelas ? s.kelas === filterKelas : true
+                    );
+                    setManualSiswaId(defaultStudent?.id || '');
+                    setManualTanggal(rekapPeriod === 'harian' ? filterTanggal : getWibDateStr());
+                    setManualStatus('Izin');
+                    setManualKeterangan('');
+                    setShowManualAbsenModal(true);
+                  }}
+                  className="px-3.5 py-1.5 rounded-xl bg-amber-500 hover:bg-amber-600 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-xs cursor-pointer"
+                >
+                  <UserCheck className="w-3.5 h-3.5" />
+                  <span>+ Catat Izin / Sakit / Alpa</span>
+                </button>
                 <button
                   id="btn-open-print-rekap-siswa"
                   onClick={() => setShowPrintModal(true)}
-                  className="px-3.5 py-1.5 rounded-xl bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-xs"
+                  className="px-3.5 py-1.5 rounded-xl bg-blue-700 hover:bg-blue-800 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-xs cursor-pointer"
                 >
                   <Printer className="w-3.5 h-3.5" />
                   <span>Cetak Rekap</span>
                 </button>
                 <button
                   onClick={handleExportExcel}
-                  className="px-3.5 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-xs"
+                  className="px-3.5 py-1.5 rounded-xl bg-emerald-700 hover:bg-emerald-800 text-white text-xs font-semibold flex items-center gap-1.5 transition-colors shadow-xs cursor-pointer"
                 >
                   <FileSpreadsheet className="w-3.5 h-3.5" />
                   <span>Export Excel</span>
@@ -825,7 +973,7 @@ export const AbsensiSiswaView: React.FC = () => {
                   <option value="Terlambat">Terlambat</option>
                   <option value="Izin">Izin</option>
                   <option value="Sakit">Sakit</option>
-                  <option value="Alpa">Alpa</option>
+                  <option value="Alpa">Alpa / Alfa</option>
                 </select>
               </div>
 
@@ -847,78 +995,397 @@ export const AbsensiSiswaView: React.FC = () => {
             </div>
           </div>
 
-          {/* Rekap Table */}
-          <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
-            <div className="overflow-x-auto">
-              <table className="w-full text-left text-xs">
-                <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 uppercase font-semibold text-[11px]">
-                  <tr>
-                    <th className="px-4 py-3 text-center w-12">No</th>
-                    <th className="px-4 py-3">Tanggal & Jam</th>
-                    <th className="px-4 py-3">ID Siswa</th>
-                    <th className="px-4 py-3">Nama Siswa</th>
-                    <th className="px-4 py-3">Kelas</th>
-                    <th className="px-4 py-3">Status</th>
-                    <th className="px-4 py-3">Keterangan</th>
-                    <th className="px-4 py-3 text-center w-20">Hapus</th>
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-100 text-slate-700">
-                  {filteredRekap.map((item, idx) => (
-                    <tr key={item.id} className="hover:bg-blue-50/40 transition-colors">
-                      <td className="px-4 py-3 text-center text-slate-400 font-medium">{idx + 1}</td>
-                      <td className="px-4 py-3">
-                        <span className="font-semibold text-slate-900 block">{item.tanggal}</span>
-                        <span className="text-[11px] text-slate-400 font-mono">{item.jam} WIB</span>
-                      </td>
-                      <td className="px-4 py-3">
-                        <span className="font-mono text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200 text-[11px]">
-                          {item.qrId}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 font-bold text-slate-900">{item.namaSiswa}</td>
-                      <td className="px-4 py-3">{item.kelas}</td>
-                      <td className="px-4 py-3">
-                        <span
-                          className={`px-2.5 py-0.5 rounded-full font-bold text-[10px] ${
-                            item.status === 'Hadir'
-                              ? 'bg-emerald-100 text-emerald-800'
-                              : item.status === 'Terlambat'
-                              ? 'bg-amber-100 text-amber-800'
-                              : item.status === 'Izin'
-                              ? 'bg-blue-100 text-blue-800'
-                              : item.status === 'Sakit'
-                              ? 'bg-indigo-100 text-indigo-800'
-                              : 'bg-rose-100 text-rose-800'
-                          }`}
-                        >
-                          {item.status}
-                        </span>
-                      </td>
-                      <td className="px-4 py-3 text-slate-500">{item.keterangan || '-'}</td>
-                      <td className="px-4 py-3 text-center">
-                        <button
-                          onClick={() => handleDeleteAbsensi(item.id)}
-                          className="p-1 rounded-lg text-rose-600 hover:bg-rose-50"
-                          title="Hapus baris absensi"
-                        >
-                          <Trash2 className="w-3.5 h-3.5" />
-                        </button>
-                      </td>
-                    </tr>
-                  ))}
+          {/* Summary Stat Strip: Total, Hadir, Terlambat, Izin, Sakit, Alpa */}
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-3">
+            <button
+              type="button"
+              onClick={() => setFilterStatus('')}
+              className={`p-3.5 rounded-2xl border text-left transition-all cursor-pointer ${
+                filterStatus === ''
+                  ? 'bg-slate-900 text-white border-slate-900 shadow-sm'
+                  : 'bg-white border-slate-200 hover:border-slate-300'
+              }`}
+            >
+              <span className={`text-[11px] font-bold uppercase tracking-wider block ${filterStatus === '' ? 'text-slate-300' : 'text-slate-500'}`}>
+                Total Tercatat
+              </span>
+              <span className="text-xl font-extrabold mt-0.5 block">{statusSummaryCounts.total}</span>
+            </button>
 
-                  {filteredRekap.length === 0 && (
-                    <tr>
-                      <td colSpan={8} className="text-center py-12 text-slate-400">
-                        Tidak ada rekaman data absensi untuk kriteria filter ini.
-                      </td>
-                    </tr>
-                  )}
-                </tbody>
-              </table>
-            </div>
+            <button
+              type="button"
+              onClick={() => setFilterStatus(filterStatus === 'Hadir' ? '' : 'Hadir')}
+              className={`p-3.5 rounded-2xl border text-left transition-all cursor-pointer ${
+                filterStatus === 'Hadir'
+                  ? 'bg-emerald-600 text-white border-emerald-600 shadow-sm'
+                  : 'bg-emerald-50/70 border-emerald-200 text-emerald-900 hover:bg-emerald-100/70'
+              }`}
+            >
+              <span className={`text-[11px] font-bold uppercase tracking-wider block ${filterStatus === 'Hadir' ? 'text-emerald-100' : 'text-emerald-700'}`}>
+                Hadir
+              </span>
+              <span className="text-xl font-extrabold mt-0.5 block">{statusSummaryCounts.hadir}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setFilterStatus(filterStatus === 'Terlambat' ? '' : 'Terlambat')}
+              className={`p-3.5 rounded-2xl border text-left transition-all cursor-pointer ${
+                filterStatus === 'Terlambat'
+                  ? 'bg-amber-600 text-white border-amber-600 shadow-sm'
+                  : 'bg-amber-50/70 border-amber-200 text-amber-900 hover:bg-amber-100/70'
+              }`}
+            >
+              <span className={`text-[11px] font-bold uppercase tracking-wider block ${filterStatus === 'Terlambat' ? 'text-amber-100' : 'text-amber-700'}`}>
+                Terlambat
+              </span>
+              <span className="text-xl font-extrabold mt-0.5 block">{statusSummaryCounts.terlambat}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setFilterStatus(filterStatus === 'Izin' ? '' : 'Izin')}
+              className={`p-3.5 rounded-2xl border text-left transition-all cursor-pointer ${
+                filterStatus === 'Izin'
+                  ? 'bg-blue-600 text-white border-blue-600 shadow-sm'
+                  : 'bg-blue-50/70 border-blue-200 text-blue-900 hover:bg-blue-100/70'
+              }`}
+            >
+              <span className={`text-[11px] font-bold uppercase tracking-wider block ${filterStatus === 'Izin' ? 'text-blue-100' : 'text-blue-700'}`}>
+                Izin
+              </span>
+              <span className="text-xl font-extrabold mt-0.5 block">{statusSummaryCounts.izin}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setFilterStatus(filterStatus === 'Sakit' ? '' : 'Sakit')}
+              className={`p-3.5 rounded-2xl border text-left transition-all cursor-pointer ${
+                filterStatus === 'Sakit'
+                  ? 'bg-indigo-600 text-white border-indigo-600 shadow-sm'
+                  : 'bg-indigo-50/70 border-indigo-200 text-indigo-900 hover:bg-indigo-100/70'
+              }`}
+            >
+              <span className={`text-[11px] font-bold uppercase tracking-wider block ${filterStatus === 'Sakit' ? 'text-indigo-100' : 'text-indigo-700'}`}>
+                Sakit
+              </span>
+              <span className="text-xl font-extrabold mt-0.5 block">{statusSummaryCounts.sakit}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setFilterStatus(filterStatus === 'Alpa' ? '' : 'Alpa')}
+              className={`p-3.5 rounded-2xl border text-left transition-all cursor-pointer ${
+                filterStatus === 'Alpa'
+                  ? 'bg-rose-600 text-white border-rose-600 shadow-sm'
+                  : 'bg-rose-50/70 border-rose-200 text-rose-900 hover:bg-rose-100/70'
+              }`}
+            >
+              <span className={`text-[11px] font-bold uppercase tracking-wider block ${filterStatus === 'Alpa' ? 'text-rose-100' : 'text-rose-700'}`}>
+                Alpa / Alfa
+              </span>
+              <span className="text-xl font-extrabold mt-0.5 block">{statusSummaryCounts.alpa}</span>
+            </button>
           </div>
+
+          {/* View Mode Toggle: Ringkasan Per Siswa vs Log Detail Harian */}
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div className="flex bg-slate-100 p-1 rounded-xl border border-slate-200">
+              <button
+                type="button"
+                onClick={() => setRekapViewMode('per_siswa')}
+                className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                  rekapViewMode === 'per_siswa'
+                    ? 'bg-white text-blue-700 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Rekap Jumlah Per Siswa (H / T / I / S / A)
+              </button>
+              <button
+                type="button"
+                onClick={() => setRekapViewMode('detail')}
+                className={`px-3.5 py-1.5 rounded-lg text-xs font-bold transition-all cursor-pointer ${
+                  rekapViewMode === 'detail'
+                    ? 'bg-white text-blue-700 shadow-xs'
+                    : 'text-slate-600 hover:text-slate-900'
+                }`}
+              >
+                Log Riwayat Harian ({filteredRekap.length})
+              </button>
+            </div>
+            <span className="text-[11px] text-slate-500">
+              Klik kartu status di atas untuk memfilter cepat berdasarkan Hadir, Izin, Sakit, atau Alpa.
+            </span>
+          </div>
+
+          {/* Rekap Table 1: PER SISWA (Jumlah Hadir, Terlambat, Izin, Sakit, Alpa) */}
+          {rekapViewMode === 'per_siswa' && (
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 uppercase font-semibold text-[11px]">
+                    <tr>
+                      <th className="px-4 py-3 text-center w-12">No</th>
+                      <th className="px-4 py-3">ID Siswa</th>
+                      <th className="px-4 py-3">Nama Siswa</th>
+                      <th className="px-4 py-3">Kelas</th>
+                      <th className="px-3 py-3 text-center text-emerald-700">Hadir</th>
+                      <th className="px-3 py-3 text-center text-amber-700">Terlambat</th>
+                      <th className="px-3 py-3 text-center text-blue-700">Izin</th>
+                      <th className="px-3 py-3 text-center text-indigo-700">Sakit</th>
+                      <th className="px-3 py-3 text-center text-rose-700">Alpa</th>
+                      <th className="px-3 py-3 text-center">Total</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 text-slate-700">
+                    {perStudentRekap.map((row, idx) => (
+                      <tr key={row.siswaId} className="hover:bg-blue-50/40 transition-colors">
+                        <td className="px-4 py-3 text-center text-slate-400 font-medium">{idx + 1}</td>
+                        <td className="px-4 py-3">
+                          <span className="font-mono text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200 text-[11px]">
+                            {row.qrId}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 font-bold text-slate-900">{row.namaSiswa}</td>
+                        <td className="px-4 py-3">{row.kelas}</td>
+                        <td className="px-3 py-3 text-center">
+                          <span className={`inline-block min-w-7 px-2 py-0.5 rounded-full font-bold text-[11px] ${row.hadir > 0 ? 'bg-emerald-100 text-emerald-800' : 'text-slate-400'}`}>
+                            {row.hadir}
+                          </span>
+                        </td>
+                        <td className="px-3 py-3 text-center">
+                          <span className={`inline-block min-w-7 px-2 py-0.5 rounded-full font-bold text-[11px] ${row.terlambat > 0 ? 'bg-amber-100 text-amber-800' : 'text-slate-400'}`}>
+                            {row.terlambat}
+                          </span>
+                        </td>
+                        <td className="px-3 py-3 text-center">
+                          <span className={`inline-block min-w-7 px-2 py-0.5 rounded-full font-bold text-[11px] ${row.izin > 0 ? 'bg-blue-100 text-blue-800' : 'text-slate-400'}`}>
+                            {row.izin}
+                          </span>
+                        </td>
+                        <td className="px-3 py-3 text-center">
+                          <span className={`inline-block min-w-7 px-2 py-0.5 rounded-full font-bold text-[11px] ${row.sakit > 0 ? 'bg-indigo-100 text-indigo-800' : 'text-slate-400'}`}>
+                            {row.sakit}
+                          </span>
+                        </td>
+                        <td className="px-3 py-3 text-center">
+                          <span className={`inline-block min-w-7 px-2 py-0.5 rounded-full font-bold text-[11px] ${row.alpa > 0 ? 'bg-rose-100 text-rose-800' : 'text-slate-400'}`}>
+                            {row.alpa}
+                          </span>
+                        </td>
+                        <td className="px-3 py-3 text-center font-bold text-slate-900">{row.total}</td>
+                      </tr>
+                    ))}
+
+                    {perStudentRekap.length === 0 && (
+                      <tr>
+                        <td colSpan={10} className="text-center py-12 text-slate-400">
+                          Tidak ada data siswa yang cocok dengan filter ini.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                  {perStudentRekap.length > 0 && (
+                    <tfoot className="bg-slate-50 border-t-2 border-slate-200 font-extrabold text-xs text-slate-900">
+                      <tr>
+                        <td colSpan={4} className="px-4 py-3 text-right uppercase tracking-wider text-slate-600">
+                          Jumlah Total Periode Ini:
+                        </td>
+                        <td className="px-3 py-3 text-center text-emerald-700">{statusSummaryCounts.hadir}</td>
+                        <td className="px-3 py-3 text-center text-amber-700">{statusSummaryCounts.terlambat}</td>
+                        <td className="px-3 py-3 text-center text-blue-700">{statusSummaryCounts.izin}</td>
+                        <td className="px-3 py-3 text-center text-indigo-700">{statusSummaryCounts.sakit}</td>
+                        <td className="px-3 py-3 text-center text-rose-700">{statusSummaryCounts.alpa}</td>
+                        <td className="px-3 py-3 text-center text-slate-900">{statusSummaryCounts.total}</td>
+                      </tr>
+                    </tfoot>
+                  )}
+                </table>
+              </div>
+            </div>
+          )}
+
+          {/* Rekap Table 2: DETAIL HARIAN */}
+          {rekapViewMode === 'detail' && (
+            <div className="bg-white rounded-2xl border border-slate-200 shadow-xs overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 uppercase font-semibold text-[11px]">
+                    <tr>
+                      <th className="px-4 py-3 text-center w-12">No</th>
+                      <th className="px-4 py-3">Tanggal & Jam</th>
+                      <th className="px-4 py-3">ID Siswa</th>
+                      <th className="px-4 py-3">Nama Siswa</th>
+                      <th className="px-4 py-3">Kelas</th>
+                      <th className="px-4 py-3">Status</th>
+                      <th className="px-4 py-3">Keterangan</th>
+                      <th className="px-4 py-3 text-center w-20">Hapus</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 text-slate-700">
+                    {filteredRekap.map((item, idx) => (
+                      <tr key={item.id} className="hover:bg-blue-50/40 transition-colors">
+                        <td className="px-4 py-3 text-center text-slate-400 font-medium">{idx + 1}</td>
+                        <td className="px-4 py-3">
+                          <span className="font-semibold text-slate-900 block">{item.tanggal}</span>
+                          <span className="text-[11px] text-slate-400 font-mono">{item.jam} WIB</span>
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className="font-mono text-blue-700 bg-blue-50 px-1.5 py-0.5 rounded border border-blue-200 text-[11px]">
+                            {item.qrId}
+                          </span>
+                        </td>
+                        <td className="px-4 py-3 font-bold text-slate-900">{item.namaSiswa}</td>
+                        <td className="px-4 py-3">{item.kelas}</td>
+                        <td className="px-4 py-3">
+                          <select
+                            value={item.status}
+                            onChange={(e) => handleQuickChangeStatus(item, e.target.value as StatusAbsensi)}
+                            className={`px-2.5 py-1 rounded-full font-bold text-[10px] border-0 cursor-pointer focus:ring-2 focus:ring-blue-500 ${
+                              item.status === 'Hadir'
+                                ? 'bg-emerald-100 text-emerald-800'
+                                : item.status === 'Terlambat'
+                                ? 'bg-amber-100 text-amber-800'
+                                : item.status === 'Izin'
+                                ? 'bg-blue-100 text-blue-800'
+                                : item.status === 'Sakit'
+                                ? 'bg-indigo-100 text-indigo-800'
+                                : 'bg-rose-100 text-rose-800'
+                            }`}
+                            title="Ubah status kehadiran"
+                          >
+                            <option value="Hadir">Hadir</option>
+                            <option value="Terlambat">Terlambat</option>
+                            <option value="Izin">Izin</option>
+                            <option value="Sakit">Sakit</option>
+                            <option value="Alpa">Alpa</option>
+                          </select>
+                        </td>
+                        <td className="px-4 py-3 text-slate-500">{item.keterangan || '-'}</td>
+                        <td className="px-4 py-3 text-center">
+                          <button
+                            onClick={() => handleDeleteAbsensi(item.id)}
+                            className="p-1 rounded-lg text-rose-600 hover:bg-rose-50 cursor-pointer"
+                            title="Hapus baris absensi"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </td>
+                      </tr>
+                    ))}
+
+                    {filteredRekap.length === 0 && (
+                      <tr>
+                        <td colSpan={8} className="text-center py-12 text-slate-400">
+                          Tidak ada rekaman data absensi untuk kriteria filter ini.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Modal Input Cepat Izin / Sakit / Alpa */}
+      {showManualAbsenModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-900/60 backdrop-blur-xs">
+          <form
+            onSubmit={handleSaveManualStatus}
+            className="bg-white w-full max-w-md rounded-3xl p-6 shadow-2xl border border-slate-200 space-y-4 animate-in zoom-in-95"
+          >
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div>
+                <h3 className="text-base font-extrabold text-slate-900">Catat Status Kehadiran Siswa</h3>
+                <p className="text-[11px] text-slate-500">Input cepat Izin, Sakit, atau Alpa tanpa memindai kartu QR</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowManualAbsenModal(false)}
+                className="p-1.5 rounded-lg text-slate-400 hover:text-slate-700 hover:bg-slate-100 cursor-pointer"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Pilih Siswa</label>
+                <select
+                  value={manualSiswaId}
+                  onChange={(e) => setManualSiswaId(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-medium focus:bg-white focus:outline-hidden focus:ring-2 focus:ring-blue-600"
+                  required
+                >
+                  <option value="">-- Pilih Siswa --</option>
+                  {siswaList
+                    .filter((s) => (filterKelas ? s.kelas === filterKelas : true))
+                    .map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.namaLengkap} ({s.kelas})
+                      </option>
+                    ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Tanggal</label>
+                  <input
+                    type="date"
+                    value={manualTanggal}
+                    onChange={(e) => setManualTanggal(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-medium"
+                    required
+                  />
+                </div>
+                <div>
+                  <label className="block font-bold text-slate-700 mb-1">Status</label>
+                  <select
+                    value={manualStatus}
+                    onChange={(e) => setManualStatus(e.target.value as StatusAbsensi)}
+                    className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl font-bold"
+                  >
+                    <option value="Izin">Izin</option>
+                    <option value="Sakit">Sakit</option>
+                    <option value="Alpa">Alpa / Alfa</option>
+                    <option value="Hadir">Hadir</option>
+                    <option value="Terlambat">Terlambat</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="block font-bold text-slate-700 mb-1">Keterangan (Opsional)</label>
+                <input
+                  type="text"
+                  value={manualKeterangan}
+                  onChange={(e) => setManualKeterangan(e.target.value)}
+                  placeholder="Misal: Surat dokter, acara keluarga, tanpa keterangan..."
+                  className="w-full px-3 py-2 bg-slate-50 border border-slate-200 rounded-xl"
+                />
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-2 border-t border-slate-100">
+              <button
+                type="button"
+                onClick={() => setShowManualAbsenModal(false)}
+                className="px-4 py-2 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-700 text-xs font-bold cursor-pointer"
+              >
+                Batal
+              </button>
+              <button
+                type="submit"
+                className="px-4 py-2 rounded-xl bg-blue-700 hover:bg-blue-800 text-white text-xs font-bold shadow-xs cursor-pointer"
+              >
+                Simpan Status
+              </button>
+            </div>
+          </form>
         </div>
       )}
 
@@ -926,7 +1393,11 @@ export const AbsensiSiswaView: React.FC = () => {
       <PrintRekapModal
         isOpen={showPrintModal}
         onClose={() => setShowPrintModal(false)}
-        title="LAPORAN REKAPITULASI PRESENSI KEHADIRAN SISWA"
+        title={
+          rekapViewMode === 'per_siswa'
+            ? 'REKAPITULASI JUMLAH KEHADIRAN SISWA (HADIR, IZIN, SAKIT, ALPA)'
+            : 'LAPORAN REKAPITULASI PRESENSI KEHADIRAN SISWA'
+        }
         subtitle={
           rekapPeriod === 'harian'
             ? `Tanggal Pelaksanaan: ${filterTanggal}`
@@ -941,57 +1412,78 @@ export const AbsensiSiswaView: React.FC = () => {
               rekapPeriod === 'harian'
                 ? `Harian (${filterTanggal})`
                 : rekapPeriod === 'bulanan'
-                ? `Bulanan (${filterBulan})`
+                ? `Bulan (${filterBulan})`
                 : 'Semester Aktif',
           },
           { label: 'Kelas / Rombel', value: filterKelas || 'Semua Rombongan Belajar' },
           { label: 'Filter Status', value: filterStatus || 'Semua Status Kehadiran' },
-          { label: 'Total Rekaman', value: `${filteredRekap.length} data siswa` },
+          {
+            label: 'Total Data',
+            value:
+              rekapViewMode === 'per_siswa'
+                ? `${perStudentRekap.length} siswa (${statusSummaryCounts.total} rekaman)`
+                : `${filteredRekap.length} rekaman siswa`,
+          },
         ]}
         summaryItems={[
-          { label: 'Hadir', count: filteredRekap.filter((i) => i.status === 'Hadir').length },
-          { label: 'Terlambat', count: filteredRekap.filter((i) => i.status === 'Terlambat').length },
-          { label: 'Izin', count: filteredRekap.filter((i) => i.status === 'Izin').length },
-          { label: 'Sakit', count: filteredRekap.filter((i) => i.status === 'Sakit').length },
-          { label: 'Alpa', count: filteredRekap.filter((i) => i.status === 'Alpa').length },
+          { label: 'Hadir', count: statusSummaryCounts.hadir },
+          { label: 'Terlambat', count: statusSummaryCounts.terlambat },
+          { label: 'Izin', count: statusSummaryCounts.izin },
+          { label: 'Sakit', count: statusSummaryCounts.sakit },
+          { label: 'Alpa', count: statusSummaryCounts.alpa },
         ]}
-        columns={[
-          {
-            header: 'No',
-            render: (_, idx) => idx + 1,
-            width: '35px',
-            align: 'center',
-          },
-          { header: 'Tanggal', key: 'tanggal', width: '85px' },
-          { header: 'Jam', key: 'jam', width: '65px', align: 'center' },
-          { header: 'NIS / ID', key: 'qrId', width: '90px' },
-          { header: 'Nama Lengkap Siswa', key: 'namaSiswa' },
-          { header: 'Kelas', key: 'kelas', width: '65px', align: 'center' },
-          {
-            header: 'Status',
-            render: (item) => (
-              <span
-                className={`font-bold ${
-                  item.status === 'Hadir'
-                    ? 'text-emerald-800'
-                    : item.status === 'Terlambat'
-                    ? 'text-amber-800'
-                    : item.status === 'Izin'
-                    ? 'text-blue-800'
-                    : item.status === 'Sakit'
-                    ? 'text-purple-800'
-                    : 'text-rose-800'
-                }`}
-              >
-                {item.status.toUpperCase()}
-              </span>
-            ),
-            width: '85px',
-            align: 'center',
-          },
-          { header: 'Keterangan', render: (item) => item.keterangan || '-' },
-        ]}
-        data={filteredRekap}
+        columns={
+          rekapViewMode === 'per_siswa'
+            ? [
+                { header: 'No', render: (_, idx) => idx + 1, width: '35px', align: 'center' },
+                { header: 'NIS / ID', key: 'qrId', width: '85px' },
+                { header: 'Nama Lengkap Siswa', key: 'namaSiswa' },
+                { header: 'Kelas', key: 'kelas', width: '65px', align: 'center' },
+                { header: 'Hadir', key: 'hadir', width: '50px', align: 'center' },
+                { header: 'Terlambat', key: 'terlambat', width: '65px', align: 'center' },
+                { header: 'Izin', key: 'izin', width: '45px', align: 'center' },
+                { header: 'Sakit', key: 'sakit', width: '45px', align: 'center' },
+                { header: 'Alpa', key: 'alpa', width: '45px', align: 'center' },
+                { header: 'Total', key: 'total', width: '50px', align: 'center' },
+              ]
+            : [
+                {
+                  header: 'No',
+                  render: (_, idx) => idx + 1,
+                  width: '35px',
+                  align: 'center',
+                },
+                { header: 'Tanggal', key: 'tanggal', width: '85px' },
+                { header: 'Jam', key: 'jam', width: '65px', align: 'center' },
+                { header: 'NIS / ID', key: 'qrId', width: '90px' },
+                { header: 'Nama Lengkap Siswa', key: 'namaSiswa' },
+                { header: 'Kelas', key: 'kelas', width: '65px', align: 'center' },
+                {
+                  header: 'Status',
+                  render: (item) => (
+                    <span
+                      className={`font-bold ${
+                        item.status === 'Hadir'
+                          ? 'text-emerald-800'
+                          : item.status === 'Terlambat'
+                          ? 'text-amber-800'
+                          : item.status === 'Izin'
+                          ? 'text-blue-800'
+                          : item.status === 'Sakit'
+                          ? 'text-purple-800'
+                          : 'text-rose-800'
+                      }`}
+                    >
+                      {item.status.toUpperCase()}
+                    </span>
+                  ),
+                  width: '85px',
+                  align: 'center',
+                },
+                { header: 'Keterangan', render: (item) => item.keterangan || '-' },
+              ]
+        }
+        data={rekapViewMode === 'per_siswa' ? perStudentRekap : filteredRekap}
         signRole2="Wali Kelas / Petugas Presensi"
       />
 
