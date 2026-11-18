@@ -41,8 +41,9 @@ export interface StructureValidationResult {
   };
 }
 
-// Abbreviations that must never be mistaken for choice labels (a.n., e.g., s.d., d.a., c.q., u.b., d.p.r., d.k.k., dll.)
-const ABBREVIATION_AFTER_LETTER_RE = /^(?:[a-z]{1,4}\.|dkk\b|dll\b|dsb\b|dst\b|tsb\b|karena\b|antara\b|yaitu\b|yakni\b|dan\b|atau\b|adalah\b)/i;
+// Abbreviations that must never be mistaken for lowercase prose option labels (a.n., e.g., s.d., d.a., c.q., u.b., d.p.r.)
+const LOWERCASE_ABBREV_AFTER_LETTER_RE = /^(?:[a-z]\.|karena\b|antara\b|yaitu\b|yakni\b|dan\b|atau\b|adalah\b)/;
+const UPPERCASE_ABBREV_PAIR_RE = /^(?:n\.|b\.|g\.|q\.|d\.)$/i;
 
 // Standard non-question exam headers/instructions
 const EXAM_INSTRUCTION_TEXT_RE =
@@ -70,15 +71,17 @@ export function parseQuestionNumberPrefix(line: string): ParsedQuestionNumberMat
 
   // Case 1: Explicit keyword prefix ("Soal No. 1", "No. 1", "Nomor 1.", "Soal 12 ...")
   const explicitMatch = trimmed.match(
-    /^(soal\s*(?:no\.?|nomor)?\s*|no\.?\s*|nomor\s*)[\(\[]?(\d{1,3})[\)\]]?\s*([\.\)\:\]]?)\s+(?![0-9])([\s\S]*)/i
+    /^(soal\s*(?:no\.?|nomor)?\s*|no\.?\s*|nomor\s*)[\(\[]?(\d{1,3})[\)\]]?\s*([\.\)\:\]]?)\s+([\s\S]*)/i
   );
   if (explicitMatch) {
     const num = parseInt(explicitMatch[2], 10);
-    if (num >= 1 && num <= 500) {
+    const delim = explicitMatch[3] || '.';
+    const content = explicitMatch[4].trim();
+    if (num >= 1 && num <= 500 && !/^[\.,]\d/.test(content)) {
       return {
         nomor: num,
-        delimiter: explicitMatch[3] || '.',
-        content: explicitMatch[4].trim(),
+        delimiter: delim,
+        content,
         rawPrefix: explicitMatch[0].slice(0, explicitMatch[0].length - explicitMatch[4].length).trim(),
         hasExplicitLabel: true,
       };
@@ -86,8 +89,10 @@ export function parseQuestionNumberPrefix(line: string): ParsedQuestionNumberMat
   }
 
   // Case 2: Standard numeric prefix ("1. ...", "1) ...", "(1) ...", "[1] ...", "1: ...")
+  // Note: Allow stems starting with digits when separated by whitespace (e.g. "1. 25 + 15 = ..."),
+  // while still rejecting contiguous decimals ("1.5"), times ("10:30"), or thousand separators ("2.000").
   const numericMatch = trimmed.match(
-    /^[\(\[]?(\d{1,3})\s*([\.\)\:\]])\s*(?![0-9])([\s\S]*)/
+    /^[\(\[]?(\d{1,3})\s*([\.\)\:\]])\s*([\s\S]*)/
   );
   if (numericMatch) {
     const num = parseInt(numericMatch[1], 10);
@@ -99,9 +104,15 @@ export function parseQuestionNumberPrefix(line: string): ParsedQuestionNumberMat
     // Reject decimal/thousand separators or academic subsection markers ("1.1", "2.000", "3,5")
     if (/^[\.,]\d/.test(content)) return null;
 
-    // Require either whitespace after delimiter, parenthesized/bracketed number, or meaningful text start
+    // Check space directly after delimiter
     const hasSpaceAfterDelimiter = /^[\(\[]?\d{1,3}\s*[\.\)\:\]]\s+/.test(trimmed);
     const isParenthesized = /^[\(\[]\d{1,3}[\)\]]/.test(trimmed);
+
+    // Without space after '.' or ':', numbers like "1.5" or "10:30" are decimals/times, not question numbers
+    if (!hasSpaceAfterDelimiter && !isParenthesized && (delimiter === '.' || delimiter === ':') && /^[0-9]/.test(content)) {
+      return null;
+    }
+
     if (!hasSpaceAfterDelimiter && !isParenthesized && delimiter === '.' && content.length > 0 && !/^[A-Za-z"'(“\[]/.test(content)) {
       return null;
     }
@@ -119,14 +130,15 @@ export function parseQuestionNumberPrefix(line: string): ParsedQuestionNumberMat
 }
 
 /**
- * Strictly parses a multiple-choice option prefix (`A.`, `(A)`, `[A]`, `A)`, `A:`, `a.`),
- * filtering out abbreviations like `a.n.`, `e.g.`, `d.p.r.`, `c.q.` or lowercase prose words.
+ * Strictly parses a multiple-choice option prefix (`A.`, `(A)`, `[A]`, `A)`, `A:`, `a.`, `A .`),
+ * filtering out abbreviations like `a.n.`, `e.g.`, `d.p.r.`, `c.q.` or lowercase prose words,
+ * while preserving valid options containing titles/abbreviations like `A. Dr. Soetomo`.
  */
 export function parseOptionPrefix(line: string): ParsedOptionPrefixMatch | null {
   const trimmed = (line || '').trim();
   if (!trimmed) return null;
 
-  const m = trimmed.match(/^([\(\[]?)([A-Ea-e])([\.\)\:\]])\s*([\s\S]*)/);
+  const m = trimmed.match(/^([\(\[]?)([A-Ea-e])\s?([\.\)\:\]])\s*([\s\S]*)/);
   if (!m) return null;
 
   const openBracket = m[1];
@@ -134,24 +146,31 @@ export function parseOptionPrefix(line: string): ParsedOptionPrefixMatch | null 
   const delimiter = m[3];
   const content = (m[4] || '').trim();
 
+  // If space occurred before delimiter (e.g. "A . Jakarta"), only allow uppercase A-E followed by '.' or ')'
+  const hadSpaceBeforeDelim = /^[\(\[]?[A-Ea-e]\s+[\.\)\:\]]/.test(trimmed);
+  if (hadSpaceBeforeDelim && (rawLetter !== rawLetter.toUpperCase() || (delimiter !== '.' && delimiter !== ')'))) {
+    return null;
+  }
+
   // Reject unclosed opening bracket mismatch e.g. "(A." without matching or weird punctuation combos
   if (openBracket === '(' && delimiter !== ')') return null;
   if (openBracket === '[' && delimiter !== ']') return null;
 
-  const hasSpaceAfter = /^[\(\[]?[A-Ea-e][\.\)\:\]]\s+/.test(trimmed);
+  const hasSpaceAfter = /^[\(\[]?[A-Ea-e]\s?[\.\)\:\]]\s+/.test(trimmed);
 
   // Reject common dot-abbreviations with no space such as "a.n.", "e.g.", "d.p.r.", "s.d."
   if (delimiter === '.' && !hasSpaceAfter && /^[a-z]\./i.test(content)) {
     return null;
   }
 
-  // Lowercase letter options ("a. ...", "b. ...") must have whitespace or paren delimiter and not match abbreviations
+  // Avoid rejecting "A. Dr. Soetomo", while still blocking lowercase prose like "a. karena..." or "a. n."
   if (rawLetter === rawLetter.toLowerCase()) {
     if (!hasSpaceAfter && !openBracket && delimiter !== ')') return null;
-    if (ABBREVIATION_AFTER_LETTER_RE.test(content)) return null;
+    if (LOWERCASE_ABBREV_AFTER_LETTER_RE.test(content)) return null;
+  } else if (!hasSpaceAfter && delimiter === '.' && UPPERCASE_ABBREV_PAIR_RE.test(content)) {
+    return null;
   }
 
-  // Reject isolated trailing initial without content unless paired with an image/placeholder later
   const letter = rawLetter.toUpperCase() as 'A' | 'B' | 'C' | 'D' | 'E';
 
   return {
@@ -199,7 +218,7 @@ export function splitInlineChoiceLine(line: string): string[] {
   }
 
   // Find candidate choice anchors along the line
-  const anchorRe = /(?:^|(?<=\s))([\(\[]?)([A-Ea-e])([\.\)\]])(?=\s+\S)/g;
+  const anchorRe = /(?:^|(?<=\s))([\(\[]?)([A-Ea-e])\s?([\.\)\]])(?=\s+\S)/g;
   const candidates: Array<{
     index: number;
     letter: 'A' | 'B' | 'C' | 'D' | 'E';
@@ -210,18 +229,20 @@ export function splitInlineChoiceLine(line: string): string[] {
   let m: RegExpExecArray | null;
   while ((m = anchorRe.exec(trimmed)) !== null) {
     const openBr = m[1];
+    const isUpper = m[2] === m[2].toUpperCase();
     const delim = m[3];
     if (openBr === '(' && delim !== ')') continue;
     if (openBr === '[' && delim !== ']') continue;
+    if (/\s/.test(m[0]) && (!isUpper || (delim !== '.' && delim !== ')'))) continue;
     const afterText = trimmed.slice(m.index + m[0].length).trimStart();
-    if (delim === '.' && ABBREVIATION_AFTER_LETTER_RE.test(afterText)) continue;
+    if (delim === '.' && !isUpper && LOWERCASE_ABBREV_AFTER_LETTER_RE.test(afterText)) continue;
 
     const beforeChars = m.index > 0 ? trimmed.slice(Math.max(0, m.index - 2), m.index) : '';
     const hasSpaceGapBefore = m.index === 0 || /\s{2}$|\t$/.test(beforeChars);
     candidates.push({
       index: m.index,
       letter: m[2].toUpperCase() as 'A' | 'B' | 'C' | 'D' | 'E',
-      isUpper: m[2] === m[2].toUpperCase(),
+      isUpper,
       hasSpaceGapBefore,
     });
   }
@@ -230,9 +251,9 @@ export function splitInlineChoiceLine(line: string): string[] {
     return [trimmed];
   }
 
-  // Look for a valid sequential run starting at 'A' (A -> B, optionally C, D, E) OR 'C' -> 'D' at line start
+  // Look for valid sequential runs OR common 2-column exam rows (A/C, B/D, C/D, D/E)
   const runStartsWithA = candidates.findIndex((c) => c.letter === 'A');
-  const runStartsWithC = candidates.findIndex((c) => c.letter === 'C' && c.index === 0);
+  const firstCand = candidates[0];
 
   let selectedSplits: number[] = [];
   if (runStartsWithA !== -1) {
@@ -253,7 +274,6 @@ export function splitInlineChoiceLine(line: string): string[] {
         expectedIdx++;
       }
     }
-    // Require at least A and B (and if A is mid-sentence, prefer either >=3 options A,B,C or explicit tab/2-space gap or stem ending in ?/...)
     if (seqIndices.length >= 2) {
       const stemBeforeA = trimmed.slice(0, seqIndices[0]).trim();
       const strongInlineCue =
@@ -265,12 +285,33 @@ export function splitInlineChoiceLine(line: string): string[] {
         selectedSplits = seqIndices;
       }
     }
-  } else if (runStartsWithC !== -1) {
-    const dCandidate = candidates.find((c, idx) => idx > runStartsWithC && c.letter === 'D');
-    if (dCandidate) {
-      selectedSplits = [candidates[runStartsWithC].index, dCandidate.index];
-      const eCandidate = candidates.find((c) => c.index > dCandidate.index && c.letter === 'E');
-      if (eCandidate) selectedSplits.push(eCandidate.index);
+
+    // 2-column vertical-first option row: "A. Jakarta     C. Surabaya"
+    if (selectedSplits.length < 2 && candidates[runStartsWithA].index === 0) {
+      const cCand = candidates.find((c, idx) => idx > runStartsWithA && c.letter === 'C' && c.hasSpaceGapBefore);
+      if (cCand) {
+        selectedSplits = [candidates[runStartsWithA].index, cCand.index];
+      }
+    }
+  } else if (firstCand && firstCand.index === 0) {
+    if (firstCand.letter === 'B') {
+      // 2-column vertical-first row 2: "B. Bandung     D. Medan"
+      const dCand = candidates.find((c, idx) => idx > 0 && c.letter === 'D' && c.hasSpaceGapBefore);
+      if (dCand) selectedSplits = [0, dCand.index];
+    } else if (firstCand.letter === 'C') {
+      // 2-column horizontal row 2: "C. Surabaya    D. Medan" (optionally E)
+      const dCand = candidates.find((c, idx) => idx > 0 && c.letter === 'D');
+      if (dCand) {
+        selectedSplits = [0, dCand.index];
+        const eCand = candidates.find((c) => c.index > dCand.index && c.letter === 'E');
+        if (eCand) selectedSplits.push(eCand.index);
+      } else {
+        const eCand = candidates.find((c, idx) => idx > 0 && c.letter === 'E' && c.hasSpaceGapBefore);
+        if (eCand) selectedSplits = [0, eCand.index];
+      }
+    } else if (firstCand.letter === 'D') {
+      const eCand = candidates.find((c, idx) => idx > 0 && c.letter === 'E' && c.hasSpaceGapBefore);
+      if (eCand) selectedSplits = [0, eCand.index];
     }
   }
 
@@ -431,14 +472,18 @@ export function validateUploadedFileHeader(
       );
     }
   } else if (ext === 'txt' || ext === 'csv') {
-    const nullByteCount = headBytes.filter((b) => b === 0).length;
-    if (nullByteCount > 4) {
-      return {
-        valid: false,
-        errorCode: 'BINARY_TEXT_CORRUPT',
-        errorMessage: `Berkas "${fileName}" berisi data biner yang tidak dapat dibaca sebagai teks. Simpan ulang naskah sebagai .txt (UTF-8), .docx, atau .pdf.`,
-        warnings,
-      };
+    const isUtf16LeBom = headBytes.length >= 2 && headBytes[0] === 0xff && headBytes[1] === 0xfe;
+    const isUtf16BeBom = headBytes.length >= 2 && headBytes[0] === 0xfe && headBytes[1] === 0xff;
+    if (!isUtf16LeBom && !isUtf16BeBom) {
+      const nullByteCount = headBytes.filter((b) => b === 0).length;
+      if (nullByteCount > 4) {
+        return {
+          valid: false,
+          errorCode: 'BINARY_TEXT_CORRUPT',
+          errorMessage: `Berkas "${fileName}" berisi data biner yang tidak dapat dibaca sebagai teks. Simpan ulang naskah sebagai .txt (UTF-8), .docx, atau .pdf.`,
+          warnings,
+        };
+      }
     }
   }
 
@@ -545,6 +590,8 @@ export function validateParsedQuestionsStructure(
           );
         }
       }
+    } else if (q.tipe === 'benar_salah' || q.tipe === 'isian_singkat') {
+      pgCount++;
     } else {
       uraianCount++;
     }

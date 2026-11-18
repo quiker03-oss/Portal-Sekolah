@@ -30,7 +30,6 @@ import { BellRing,
   Wallet,
   LayoutTemplate,
   FileQuestion,
-  FileSearch,
 } from 'lucide-react';
 
 // Subviews
@@ -51,7 +50,6 @@ import { BelOtomatisView } from './BelOtomatisView';
 import { ManajemenPenggunaView } from './ManajemenPenggunaView';
 import { UangKasView } from './UangKasView';
 import { UjianOnlineView } from './UjianOnlineView';
-import { AiSoalReaderView } from './AiSoalReaderView';
 
 interface AdminLayoutProps {
   currentUser: User;
@@ -160,7 +158,6 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
       label: 'Akademik & Presensi',
       items: [
         { id: 'ujian-online', label: 'Ujian Online (CBT)', icon: FileQuestion, visible: true },
-        { id: 'ai-pembaca-soal', label: 'AI Pembaca Soal', icon: FileSearch, visible: true },
         { id: 'kelas-mapel', label: 'Kelas & Mapel', icon: BookOpen, visible: true },
         { id: 'nilai-harian', label: 'Nilai Harian Siswa', icon: FileSpreadsheet, visible: true },
         { id: 'absensi-siswa', label: 'Presensi Siswa', icon: CalendarCheck, visible: true },
@@ -353,8 +350,6 @@ export const AdminLayout: React.FC<AdminLayoutProps> = ({
               {activeTab === 'qr-guru' && <QrCodeGuruView initialGuruId={targetQrId} />}
 
               {activeTab === 'ujian-online' && <UjianOnlineView currentUser={currentUser} />}
-
-              {activeTab === 'ai-pembaca-soal' && <AiSoalReaderView currentUser={currentUser} />}
 
               {activeTab === 'kelas-mapel' && <DataKelasMapelView />}
 

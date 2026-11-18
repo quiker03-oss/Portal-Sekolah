@@ -339,8 +339,30 @@ function normalizeParsedQuestions(rawList: any[]): {
         }
       }
 
-      const effectiveTipe =
-        (q.tipe === "pilihan_ganda" || Boolean(pilihan)) && pilihan ? "pilihan_ganda" : "uraian";
+      const rawTipe = typeof q.tipe === "string" ? q.tipe.trim().toLowerCase() : "";
+      const isBinaryTfChoices =
+        Boolean(pilihan) &&
+        Object.keys(pilihan || {}).length === 2 &&
+        /^(?:benar|betul|true|ya)$/i.test(pilihan?.A?.trim() || "") &&
+        /^(?:salah|false|tidak)$/i.test(pilihan?.B?.trim() || "");
+
+      let effectiveTipe: "pilihan_ganda" | "benar_salah" | "isian_singkat" | "uraian";
+      if (rawTipe === "benar_salah" || isBinaryTfChoices) {
+        effectiveTipe = "benar_salah";
+        if (!pilihan) {
+          pilihan = { A: "Benar", B: "Salah" };
+        }
+      } else if (pilihan && Object.keys(pilihan).length >= 2) {
+        effectiveTipe = "pilihan_ganda";
+      } else if (rawTipe === "isian_singkat" || rawTipe === "isian") {
+        effectiveTipe = "isian_singkat";
+      } else if (rawTipe === "uraian" || rawTipe === "esai" || rawTipe === "essay") {
+        effectiveTipe = "uraian";
+      } else if (/_{3,}|\.{4,}/.test(pertanyaan)) {
+        effectiveTipe = "isian_singkat";
+      } else {
+        effectiveTipe = "uraian";
+      }
 
       // Drop accidental exam rules/instructions parsed without choices
       if (
@@ -353,12 +375,33 @@ function normalizeParsedQuestions(rawList: any[]): {
       }
 
       let kunciJawaban = "";
-      if (typeof q.kunciJawaban === "string") {
-        const cleanKey = q.kunciJawaban.trim().toUpperCase();
-        if (effectiveTipe === "pilihan_ganda" && /^[A-E]$/.test(cleanKey) && pilihan?.[cleanKey]) {
-          kunciJawaban = cleanKey;
-        } else if (effectiveTipe === "uraian") {
-          kunciJawaban = q.kunciJawaban.trim();
+      if (typeof q.kunciJawaban === "string" && q.kunciJawaban.trim()) {
+        const rawKey = q.kunciJawaban.trim();
+        const upperKey = rawKey.toUpperCase();
+        if (effectiveTipe === "pilihan_ganda") {
+          const letterMatch = upperKey.match(/^\(?([A-E])(?:[\.\)\:]|\s|$)/);
+          const candidateLetter = letterMatch?.[1];
+          if (candidateLetter && pilihan?.[candidateLetter]) {
+            kunciJawaban = candidateLetter;
+          } else {
+            // Match exact choice text if AI returned option text instead of letter
+            const matchedEntry = Object.entries(pilihan || {}).find(
+              ([, v]) => v.trim().toLowerCase() === rawKey.toLowerCase()
+            );
+            if (matchedEntry) kunciJawaban = matchedEntry[0];
+          }
+        } else if (effectiveTipe === "benar_salah") {
+          if (/^(?:A|BENAR|BETUL|TRUE|B|YA)$/i.test(upperKey) && upperKey !== "B") {
+            kunciJawaban = "BENAR";
+          } else if (upperKey === "A" && /^(?:benar|betul|true|ya)$/i.test(pilihan?.A || "")) {
+            kunciJawaban = "BENAR";
+          } else if (/^(?:B|SALAH|FALSE|TIDAK|S)$/i.test(upperKey)) {
+            kunciJawaban = "SALAH";
+          } else {
+            kunciJawaban = upperKey;
+          }
+        } else {
+          kunciJawaban = rawKey;
         }
       }
 
@@ -366,9 +409,13 @@ function normalizeParsedQuestions(rawList: any[]): {
         nomor,
         tipe: effectiveTipe,
         pertanyaan,
-        pilihan,
+        pilihan: effectiveTipe === "pilihan_ganda" || effectiveTipe === "benar_salah" ? pilihan : undefined,
         kunciJawaban,
         bobot: Number(q.bobot) > 0 ? Number(q.bobot) : effectiveTipe === "uraian" ? 2 : 1,
+        pembahasan:
+          typeof q.pembahasan === "string" && q.pembahasan.trim()
+            ? q.pembahasan.trim()
+            : undefined,
         pedomanPenilaian:
           typeof q.pedomanPenilaian === "string" && q.pedomanPenilaian.trim()
             ? q.pedomanPenilaian.trim()
@@ -422,31 +469,15 @@ ATURAN WAJIB & MUTLAK (ANTI-HALUSINASI & HARUS SESUAI FILE ASLI):
 6. JIKA TATA LETAK 2 KOLOM: baca seluruh kolom KIRI dari atas ke bawah sampai selesai terlebih dahulu, lalu baca kolom KANAN dari atas ke bawah.
 7. JIKA ADA GAMBAR HALAMAN DAN TEKS PENDAMPING: utamakan APA YANG TERLIHAT PADA GAMBAR HALAMAN sebagai sumber kebenaran utama apabila teks pendamping memiliki spasi/simbol/kolom yang kurang rapi.
 8. DILARANG MENEBAK ATAU MENGARANG KUNCI JAWABAN. Kunci jawaban HANYA boleh diisi jika tertulis secara eksplisit pada dokumen. Jika tidak tertulis, WAJIB isi string kosong "".
-9. Untuk soal uraian / esai / isian tanpa pilihan ganda, set tipe: "uraian".
-10. Pertahankan tabel atau data angka dalam teks pertanyaan menggunakan format tabel Markdown (| Kolom 1 | Kolom 2 |).
-11. Jika dokumen/halaman hanya berisi tabel atau daftar kunci jawaban tanpa teks soal, kembalikan soalList: [].
-12. Kembalikan balasan HANYA dalam format JSON valid dengan struktur:
-{
-  "judul": "string judul ujian persis dokumen atau kosong jika tidak ada",
-  "mataPelajaran": "string nama mata pelajaran atau kosong jika tidak ada",
-  "kelas": "string kelas atau kosong jika tidak ada",
-  "petunjukUmum": "string petunjuk jika ada",
-  "soalList": [
-    {
-      "nomor": 1,
-      "tipe": "pilihan_ganda",
-      "pertanyaan": "teks pertanyaan lengkap persis dokumen",
-      "pilihan": {
-        "A": "teks pilihan A",
-        "B": "teks pilihan B",
-        "C": "teks pilihan C",
-        "D": "teks pilihan D"
-      },
-      "kunciJawaban": "",
-      "bobot": 1
-    }
-  ]
-}`;
+9. Klasifikasi "tipe" WAJIB akurat sesuai bentuk soal:
+   - "pilihan_ganda": soal memiliki pilihan jawaban huruf A, B, C, D (atau A-E).
+   - "benar_salah": soal pernyataan benar/salah (opsi Benar/Salah atau B/S).
+   - "isian_singkat": soal melengkapi titik-titik (.... / ____) atau isian singkat satu kata/angka tanpa pilihan A-E.
+   - "uraian": soal esai / uraian terbuka tanpa pilihan ganda.
+10. Jika dokumen mencantumkan "Pembahasan:", "Penjelasan:", atau "Pedoman Penilaian:", salin ke field "pembahasan" / "pedomanPenilaian".
+11. Pertahankan tabel atau data angka dalam teks pertanyaan menggunakan format tabel Markdown (| Kolom 1 | Kolom 2 |).
+12. Jika dokumen/halaman hanya berisi tabel atau daftar kunci jawaban tanpa teks soal, kembalikan soalList: [].
+13. Kembalikan balasan HANYA dalam format JSON valid sesuai skema.`;
 
   let contents: any;
   if (Array.isArray(params.pages) && params.pages.length > 0) {
@@ -533,6 +564,7 @@ ATURAN WAJIB & MUTLAK (ANTI-HALUSINASI & HARUS SESUAI FILE ASLI):
                 },
                 kunciJawaban: { type: Type.STRING },
                 bobot: { type: Type.NUMBER },
+                pembahasan: { type: Type.STRING },
                 pedomanPenilaian: { type: Type.STRING },
               },
               required: ["nomor", "tipe", "pertanyaan"],
@@ -566,377 +598,4 @@ ATURAN WAJIB & MUTLAK (ANTI-HALUSINASI & HARUS SESUAI FILE ASLI):
     ...(validationWarnings.length > 0 ? { validationWarnings } : {}),
     soalList: normalizedQuestions,
   };
-}
-
-/**
- * Extracts all questions verbatim from uploaded pages, images, or text chunks
- * for the AI Pembaca Soal Otomatis feature.
- */
-export async function readQuestionsForAiReaderWithGemini(params: {
-  text?: string;
-  fileBase64?: string;
-  mimeType?: string;
-  fileName: string;
-  pages?: PageImagePayload[];
-  chunkLabel?: string;
-  previousTailContext?: string;
-}): Promise<{
-  judul?: string;
-  soalList: Array<{
-    nomor: number;
-    nomorTeksAsli?: string;
-    halaman?: number;
-    tipe: "pilihan_ganda" | "uraian";
-    pertanyaan: string;
-    pilihan?: Record<string, string>;
-    kunciAsliDokumen?: string;
-    statusTerbaca: "terbaca" | "kurang_jelas" | "tidak_terbaca";
-    catatanPembacaan?: string;
-    mengandungVisual?: boolean;
-  }>;
-  peringatanHalaman: string[];
-}> {
-  const ai = getGeminiClient();
-
-  const tailSection = params.previousTailContext
-    ? `\nKONTEKS AKHIR BAGIAN SEBELUMNYA:\n${params.previousTailContext}\nJika bagian ini diawali lanjutan pertanyaan atau pilihan jawaban (A/B/C/D) untuk soal nomor terakhir tersebut, kembalikan dengan nomor yang sama agar sistem dapat menggabungkannya dengan utuh.\n`
-    : "";
-
-  const prompt = `Anda adalah sistem AI Pembaca Soal Otomatis berpresisi tinggi.
-Tugas Anda adalah membaca SELURUH isi berkas/halaman/bagian soal yang dilampirkan (${params.chunkLabel || params.fileName}) lalu menyalin semua butir soal yang ada dengan 100% setia pada dokumen asli.
-${tailSection}
-KETENTUAN MUTLAK (ANTI-HALUSINASI & KESETIAAN DOKUMEN):
-1. GAMBAR SEBAGAI SUMBER UTAMA: Apabila tersedia lampiran gambar halaman DAN teks digital pendamping, GAMBAR HALAMAN adalah sumber kebenaran utama. Jika teks digital memiliki spasi rusak, rumus pecahan terpecah, atau kolom tercampur, ikuti 100% apa yang terbaca di gambar halaman!
-2. TATA LETAK 2 KOLOM: Jika halaman memiliki 2 kolom soal, baca kolom KIRI dari atas ke bawah sampai selesai terlebih dahulu, baru kemudian kolom KANAN dari atas ke bawah.
-3. JANGAN MEMASUKKAN HEADER / PETUNJUK: Abaikan kop sekolah, identitas lembar ujian, tata tertib, dan poin "PETUNJUK UMUM" bernomor (seperti "1. Berdoalah...", "2. Tulislah nama...", "3. Dahulukan soal mudah...").
-4. JANGAN MEMECAH SUB-POIN DI DALAM SOAL: Jika sebuah soal memiliki daftar pernyataan bernomor atau angka (seperti "Perhatikan pernyataan berikut: 1) ... 2) ... 3) ..."), JANGAN dijadikan soal terpisah; tetap masukkan ke dalam pertanyaan soal induknya.
-5. Pertahankan nomor soal asli persis seperti dokumen (termasuk bila halaman dimulai dari nomor 11, 25, dst. — jangan mengubah menjadi nomor 1!) dan salin kalimat pertanyaan persis kata demi kata tanpa mengubah angka/rumus/maksud soal.
-6. JANGAN mengarang soal baru yang tidak ada di berkas.
-7. Kenali pilihan jawaban A, B, C, D (serta E jika memang tertulis di dokumen). JANGAN menambahkan opsi baru yang tidak tertulis.
-8. Jika terdapat tabel data soal, salin isi tabel dalam format Markdown (| Kolom | ... |) yang rapi pada pertanyaan. Jika ada diagram, grafik, ilustrasi, atau penanda [GAMBAR_DOCX_N], tandai mengandungVisual = true dan jelaskan data/label yang terbaca dari gambar di catatanPembacaan tanpa mengubah kalimat pertanyaan aslinya.
-9. Jika bagian ini HANYA berisi daftar/tabel Kunci Jawaban tanpa teks pertanyaan soal, kembalikan soalList: [] dan sebutkan ringkasan kunci jawaban yang terlihat pada peringatanHalaman.
-10. Jika dokumen memuat kunci jawaban eksplisit pada butir soal tersebut, tuliskan ke kunciAsliDokumen; jika tidak tertulis, isi string kosong "".
-11. Jika ada bagian/halaman/soal yang buram, terpotong, atau tidak terbaca dengan jelas, JANGAN menebak teks yang hilang; beri statusTerbaca = "kurang_jelas" atau "tidak_terbaca", isi catatanPembacaan, serta laporkan pada peringatanHalaman.
-12. Kembalikan respons HANYA dalam JSON valid.`;
-
-  const parts: any[] = [];
-  if (Array.isArray(params.pages) && params.pages.length > 0) {
-    for (const p of params.pages) {
-      if (p.pageNumber) {
-        parts.push({ text: `[Lampiran Gambar/Halaman ${p.pageNumber}]` });
-      }
-      parts.push({
-        inlineData: {
-          data: p.imageBase64,
-          mimeType: p.mimeType || "image/jpeg",
-        },
-      });
-    }
-    if (params.text && params.text.trim()) {
-      parts.push({
-        text: `Teks digital pendamping (hanya referensi tambahan — jika berbeda atau terpotong dibanding gambar, prioritaskan gambar di atas):\n${params.text.trim()}`,
-      });
-    }
-    parts.push({ text: prompt });
-  } else if (params.fileBase64 && params.mimeType) {
-    parts.push({
-      inlineData: {
-        data: params.fileBase64,
-        mimeType: params.mimeType,
-      },
-    });
-    if (params.text && params.text.trim()) {
-      parts.push({ text: `Teks pendamping:\n${params.text.trim()}` });
-    }
-    parts.push({ text: prompt });
-  } else if (params.text && params.text.trim()) {
-    parts.push({
-      text: `Isi Dokumen (${params.chunkLabel || params.fileName}):\n\n${params.text.trim()}\n\n---\n\n${prompt}`,
-    });
-  } else {
-    throw new Error("Tidak ada konten dokumen yang dapat dibaca oleh AI.");
-  }
-
-  const rawJson = await generateContentWithFallback(ai, {
-    contents: [{ role: "user", parts }],
-    config: {
-      responseMimeType: "application/json",
-      thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          judul: { type: Type.STRING },
-          peringatanHalaman: {
-            type: Type.ARRAY,
-            items: { type: Type.STRING },
-          },
-          soalList: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                nomor: { type: Type.INTEGER },
-                nomorTeksAsli: { type: Type.STRING },
-                halaman: { type: Type.INTEGER },
-                tipe: { type: Type.STRING },
-                pertanyaan: { type: Type.STRING },
-                pilihan: {
-                  type: Type.OBJECT,
-                  properties: {
-                    A: { type: Type.STRING },
-                    B: { type: Type.STRING },
-                    C: { type: Type.STRING },
-                    D: { type: Type.STRING },
-                    E: { type: Type.STRING },
-                  },
-                },
-                kunciAsliDokumen: { type: Type.STRING },
-                statusTerbaca: { type: Type.STRING },
-                catatanPembacaan: { type: Type.STRING },
-                mengandungVisual: { type: Type.BOOLEAN },
-              },
-              required: ["nomor", "tipe", "pertanyaan", "statusTerbaca"],
-            },
-          },
-        },
-        required: ["soalList"],
-      },
-    },
-  });
-
-  const parsed = cleanAndParseJson(rawJson);
-  const rawList = Array.isArray(parsed?.soalList) ? parsed.soalList : [];
-
-  let lastValidNomor = 0;
-  const normalized = rawList
-    .filter((item: any) => item && typeof item === "object")
-    .map((q: any, idx: number) => {
-      const parsedNum = Number(q.nomor);
-      const nomor =
-        Number.isFinite(parsedNum) && parsedNum > 0
-          ? Math.floor(parsedNum)
-          : lastValidNomor > 0
-          ? lastValidNomor + 1
-          : idx + 1;
-      lastValidNomor = nomor;
-
-      let pertanyaan = typeof q.pertanyaan === "string" ? q.pertanyaan.trim() : "";
-      pertanyaan = stripRedundantQuestionNumberPrefix(nomor, pertanyaan);
-
-      let pilihan = sanitizeChoiceMap(q.pilihan);
-
-      if (!pilihan && pertanyaan) {
-        const rescued = splitEmbeddedChoicesFromStem(pertanyaan);
-        if (rescued.choices) {
-          pertanyaan = stripRedundantQuestionNumberPrefix(nomor, rescued.stem);
-          pilihan = sanitizeChoiceMap(rescued.choices);
-        }
-      }
-
-      const hasChoices = Boolean(pilihan && Object.keys(pilihan).length >= 2);
-      const tipe: "pilihan_ganda" | "uraian" =
-        q.tipe === "uraian" || !hasChoices ? "uraian" : "pilihan_ganda";
-
-      if (
-        !hasChoices &&
-        pertanyaan.length < 180 &&
-        BACKEND_INSTRUCTION_RE.test(pertanyaan) &&
-        !/\?$/.test(pertanyaan)
-      ) {
-        return null;
-      }
-
-      let statusTerbaca: "terbaca" | "kurang_jelas" | "tidak_terbaca" =
-        q.statusTerbaca === "tidak_terbaca"
-          ? "tidak_terbaca"
-          : q.statusTerbaca === "kurang_jelas"
-          ? "kurang_jelas"
-          : "terbaca";
-
-      let catatanPembacaan =
-        typeof q.catatanPembacaan === "string" && q.catatanPembacaan.trim()
-          ? q.catatanPembacaan.trim()
-          : undefined;
-
-      if (!pertanyaan && hasChoices && statusTerbaca === "terbaca") {
-        statusTerbaca = "kurang_jelas";
-        catatanPembacaan =
-          catatanPembacaan || "Teks pertanyaan tidak terbaca, hanya pilihan jawaban yang ditemukan.";
-      }
-
-      return {
-        nomor,
-        nomorTeksAsli:
-          typeof q.nomorTeksAsli === "string" && q.nomorTeksAsli.trim()
-            ? q.nomorTeksAsli.trim()
-            : String(nomor),
-        halaman: Number.isFinite(Number(q.halaman)) && Number(q.halaman) > 0 ? Number(q.halaman) : undefined,
-        tipe,
-        pertanyaan,
-        pilihan: hasChoices ? pilihan : undefined,
-        kunciAsliDokumen:
-          typeof q.kunciAsliDokumen === "string" && q.kunciAsliDokumen.trim()
-            ? q.kunciAsliDokumen.trim()
-            : undefined,
-        statusTerbaca,
-        catatanPembacaan,
-        mengandungVisual: Boolean(q.mengandungVisual),
-      };
-    })
-    .filter(
-      (q: any): q is NonNullable<typeof q> =>
-        Boolean(q) &&
-        (q.pertanyaan.length > 0 ||
-          q.statusTerbaca === "tidak_terbaca" ||
-          (q.pilihan && Object.keys(q.pilihan).length >= 2))
-    );
-
-  const backendValidationWarnings = validateNormalizedQuestions(normalized);
-  const warnings = Array.isArray(parsed?.peringatanHalaman)
-    ? parsed.peringatanHalaman.filter((w: any) => typeof w === "string" && w.trim().length > 0)
-    : [];
-
-  return {
-    judul: typeof parsed?.judul === "string" && parsed.judul.trim() ? parsed.judul.trim() : undefined,
-    soalList: normalized,
-    peringatanHalaman: Array.from(new Set([...warnings, ...backendValidationWarnings])),
-  };
-}
-
-/**
- * Answers and explains a batch of extracted questions with step-by-step math workings.
- * Refuses to guess if a question is unreadable or lacks essential visual/textual context.
- */
-export async function answerQuestionsForAiReaderWithGemini(params: {
-  questions: Array<{
-    id: string;
-    nomor: number;
-    tipe: "pilihan_ganda" | "uraian";
-    pertanyaan: string;
-    pilihan?: Record<string, string | undefined>;
-    kunciAsliDokumen?: string;
-    statusTerbaca?: string;
-    mengandungVisual?: boolean;
-    catatanPembacaan?: string;
-  }>;
-  pageImages?: PageImagePayload[];
-}): Promise<{
-  answers: Array<{
-    id: string;
-    jawaban: string;
-    pembahasan: string;
-    langkahMatematika: string[];
-    statusJawaban: "terjawab" | "informasi_tidak_cukup" | "tidak_terbaca";
-  }>;
-}> {
-  const ai = getGeminiClient();
-
-  const questionListPrompt = params.questions
-    .map((q) => {
-      const opts = q.pilihan
-        ? Object.entries(q.pilihan)
-            .filter(([, v]) => Boolean(v && String(v).trim()))
-            .map(([k, v]) => `${k}. ${v}`)
-            .join("\n")
-        : "(Soal Uraian / Esai)";
-      return [
-        `ID: ${q.id}`,
-        `NOMOR SOAL: ${q.nomor}`,
-        `TIPE: ${q.tipe}`,
-        `STATUS TERBACA: ${q.statusTerbaca || "terbaca"}`,
-        q.mengandungVisual ? `CATATAN VISUAL: Soal ini merujuk pada gambar/tabel/diagram (${q.catatanPembacaan || "lihat lampiran halaman bila ada"})` : "",
-        q.kunciAsliDokumen ? `KUNCI TERTULIS DI DOKUMEN: ${q.kunciAsliDokumen}` : "",
-        `PERTANYAAN:\n${q.pertanyaan}`,
-        `PILIHAN:\n${opts}`,
-      ]
-        .filter(Boolean)
-        .join("\n");
-    })
-    .join("\n\n====================\n\n");
-
-  const prompt = `Anda adalah guru ahli dan pembahas soal akademik di Indonesia.
-Jawablah setiap soal di bawah ini secara AKURAT, OBJEKTIF, dan MUDAH DIPAHAMI berdasarkan isi soal (dan gambar halaman terlampir jika ada).
-
-ATURAN KETAT:
-1. Untuk soal pilihan ganda yang informasi soalnya lengkap dan dapat dipastikan jawabannya:
-   - Tuliskan jawaban diawali huruf pilihan yang benar diikuti teks pilihannya, misal: "B. Fotosintesis pada tumbuhan".
-   - Pastikan huruf pilihan yang dipilih benar-benar ada di daftar pilihan soal tersebut.
-2. Untuk setiap soal yang dapat dijawab, tuliskan PEMBAHASAN yang lengkap, jelas, dan mendidik.
-3. Khusus soal matematika, fisika, kimia hitungan, atau penalaran numerik: WAJIB tuliskan langkah penyelesaian bertahap yang runtut ke dalam array langkahMatematika (misal ["Diketahui: ...", "Rumus: ...", "Hitung: ...", "Kesimpulan: ..."]). Untuk soal non-hitungan, isi langkahMatematika: [].
-4. ANTI-HALUSINASI / DILARANG MENEBAK:
-   - Apabila soal berstatus "tidak_terbaca", teks terpotong/rusak, atau soal merujuk pada gambar/diagram/tabel yang TIDAK tersedia atau tidak cukup jelas untuk menentukan jawaban pasti, WAJIB set statusJawaban: "informasi_tidak_cukup" (atau "tidak_terbaca"), tulis jawaban: "Tidak dapat dijawab (informasi pada soal atau gambar belum mencukupi)", dan jelaskan informasi apa yang kurang di pembahasan.
-5. Kembalikan respons HANYA dalam JSON valid untuk seluruh ID soal yang dikirim.`;
-
-  const parts: any[] = [];
-  if (Array.isArray(params.pageImages) && params.pageImages.length > 0) {
-    for (const p of params.pageImages) {
-      if (p.pageNumber) {
-        parts.push({ text: `[Gambar Pendukung Halaman ${p.pageNumber}]` });
-      }
-      parts.push({
-        inlineData: {
-          data: p.imageBase64,
-          mimeType: p.mimeType || "image/jpeg",
-        },
-      });
-    }
-  }
-  parts.push({ text: `${prompt}\n\nDAFTAR SOAL YANG HARUS DIJAWAB:\n\n${questionListPrompt}` });
-
-  const rawJson = await generateContentWithFallback(ai, {
-    contents: [{ role: "user", parts }],
-    config: {
-      responseMimeType: "application/json",
-      thinkingConfig: { thinkingLevel: ThinkingLevel.MEDIUM },
-      responseSchema: {
-        type: Type.OBJECT,
-        properties: {
-          answers: {
-            type: Type.ARRAY,
-            items: {
-              type: Type.OBJECT,
-              properties: {
-                id: { type: Type.STRING },
-                jawaban: { type: Type.STRING },
-                pembahasan: { type: Type.STRING },
-                langkahMatematika: {
-                  type: Type.ARRAY,
-                  items: { type: Type.STRING },
-                },
-                statusJawaban: { type: Type.STRING },
-              },
-              required: ["id", "jawaban", "pembahasan", "statusJawaban"],
-            },
-          },
-        },
-        required: ["answers"],
-      },
-    },
-  });
-
-  const parsed = cleanAndParseJson(rawJson);
-  const rawAnswers = Array.isArray(parsed?.answers) ? parsed.answers : [];
-
-  const normalizedAnswers = rawAnswers
-    .filter((a: any) => a && typeof a === "object" && typeof a.id === "string")
-    .map((a: any) => {
-      const statusJawaban: "terjawab" | "informasi_tidak_cukup" | "tidak_terbaca" =
-        a.statusJawaban === "tidak_terbaca"
-          ? "tidak_terbaca"
-          : a.statusJawaban === "informasi_tidak_cukup"
-          ? "informasi_tidak_cukup"
-          : "terjawab";
-
-      return {
-        id: a.id,
-        jawaban: typeof a.jawaban === "string" ? a.jawaban.trim() : "",
-        pembahasan: typeof a.pembahasan === "string" ? a.pembahasan.trim() : "",
-        langkahMatematika: Array.isArray(a.langkahMatematika)
-          ? a.langkahMatematika.filter((s: any) => typeof s === "string" && s.trim().length > 0)
-          : [],
-        statusJawaban,
-      };
-    });
-
-  return { answers: normalizedAnswers };
 }

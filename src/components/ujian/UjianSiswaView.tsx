@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
 import jsQR from 'jsqr';
 import confetti from 'canvas-confetti';
 import { db } from '../../services/database';
@@ -10,8 +10,24 @@ import { ExamRichContent, renderMathAndTextInline } from './ExamRichContent';
 import {
   buildDisplayedChoicesForQuestion,
   checkExamScheduleWindow,
+  doesStudentMatchTargetClasses,
   getOrderedQuestionsForSession,
 } from '../../utils/examShuffleAndScore';
+import {
+  ServerClockState,
+  clearActiveExamPointer,
+  clearExamDraftSnapshot,
+  computeRemainingExamSeconds,
+  computeServerSyncSample,
+  getAuthoritativeNowFromClock,
+  loadActiveExamPointer,
+  loadExamDraftSnapshot,
+  loadPersistedClockOffset,
+  mergeDraftIntoSession,
+  saveActiveExamPointer,
+  saveExamDraftSnapshot,
+  savePersistedClockOffset,
+} from '../../utils/examSessionResilience';
 import {
   Clock,
   CheckCircle,
@@ -93,44 +109,127 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
   const [readyStarted, setReadyStarted] = useState(false);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [isCompleted, setIsCompleted] = useState(false);
-  const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'offline'>('saved');
+  const [saveStatus, setSaveStatus] = useState<'saved' | 'saving' | 'pending' | 'offline'>(
+    typeof navigator !== 'undefined' && !navigator.onLine ? 'offline' : 'saved'
+  );
+  const [isServerClockSynced, setIsServerClockSynced] = useState(false);
   const [pembahasanMap, setPembahasanMap] = useState<
-    Record<string, { kunciJawaban?: string; benar?: boolean }> | undefined
+    Record<string, { kunciJawaban?: string; benar?: boolean; pembahasan?: string }> | undefined
   >(undefined);
-  const serverOffsetMsRef = useRef<number>(0);
+
+  const clockStateRef = useRef<ServerClockState>({
+    offsetMs: loadPersistedClockOffset(),
+    anchorServerMs: 0,
+    anchorPerfMs: 0,
+    rttMs: 0,
+    syncedAtClientMs: 0,
+    hasServerSync: false,
+  });
   const essaySaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const dirtySyncRef = useRef<boolean>(false);
+  const isFlushingRef = useRef<boolean>(false);
+  const timeExpiredFiredRef = useRef<boolean>(false);
+  const prevFullscreenRef = useRef<boolean>(false);
+  const sesiRef = useRef<SesiUjianSiswa | null>(null);
+  const ujianRef = useRef<UjianOnline | null>(null);
+  const jawabanRef = useRef<{ [soalId: string]: DetailJawabanSiswa }>({});
+  const currentIndexRef = useRef<number>(0);
+  const readyStartedRef = useRef<boolean>(false);
 
-  const getAuthoritativeNowMs = () => Date.now() + serverOffsetMsRef.current;
+  useEffect(() => {
+    sesiRef.current = sesi;
+  }, [sesi]);
+  useEffect(() => {
+    ujianRef.current = ujian;
+  }, [ujian]);
+  useEffect(() => {
+    jawabanRef.current = jawabanState;
+  }, [jawabanState]);
+  useEffect(() => {
+    currentIndexRef.current = currentIndex;
+  }, [currentIndex]);
+  useEffect(() => {
+    readyStartedRef.current = readyStarted;
+  }, [readyStarted]);
 
-  const tryEnterFullscreen = async () => {
+  const getAuthoritativeNowMs = useCallback(() => {
+    return getAuthoritativeNowFromClock(clockStateRef.current);
+  }, []);
+
+  const applyServerTimeSample = useCallback(
+    (sampleInput: {
+      serverTimeMs: number;
+      reqStartPerfMs: number;
+      reqEndPerfMs: number;
+      reqEndClientMs: number;
+    }) => {
+      if (typeof sampleInput.serverTimeMs !== 'number' || !Number.isFinite(sampleInput.serverTimeMs)) {
+        return;
+      }
+      const nextClock = computeServerSyncSample(sampleInput);
+      clockStateRef.current = nextClock;
+      savePersistedClockOffset(nextClock.offsetMs);
+      setIsServerClockSynced(true);
+    },
+    []
+  );
+
+  const syncServerClock = useCallback(async () => {
+    if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+    try {
+      const reqStartPerfMs = typeof performance !== 'undefined' ? performance.now() : 0;
+      const resp = await fetch('/api/ujian/time', { cache: 'no-store' });
+      const reqEndPerfMs = typeof performance !== 'undefined' ? performance.now() : 0;
+      const reqEndClientMs = Date.now();
+      if (resp.ok) {
+        const json = await resp.json().catch(() => null);
+        if (typeof json?.serverTimeMs === 'number') {
+          applyServerTimeSample({
+            serverTimeMs: json.serverTimeMs,
+            reqStartPerfMs,
+            reqEndPerfMs,
+            reqEndClientMs,
+          });
+        }
+      }
+    } catch {}
+  }, [applyServerTimeSample]);
+
+  const tryEnterFullscreen = useCallback(async () => {
     try {
       const el: any = document.documentElement;
-      if (document.fullscreenElement) {
+      const doc: any = document;
+      if (doc.fullscreenElement || doc.webkitFullscreenElement) {
+        prevFullscreenRef.current = true;
         setIsFullscreen(true);
         return;
       }
       if (el.requestFullscreen) {
         await el.requestFullscreen();
+        prevFullscreenRef.current = true;
         setIsFullscreen(true);
       } else if (el.webkitRequestFullscreen) {
         el.webkitRequestFullscreen();
+        prevFullscreenRef.current = true;
         setIsFullscreen(true);
       }
     } catch {
-      // Browser/iOS may block fullscreen cleanly; exam stays fully playable
+      // Browser/iOS may block fullscreen without user gesture; exam stays playable with 1-tap re-entry bar
     }
-  };
+  }, []);
 
-  const tryExitFullscreen = () => {
+  const tryExitFullscreen = useCallback(() => {
     try {
+      prevFullscreenRef.current = false;
       const doc: any = document;
       if (doc.fullscreenElement && doc.exitFullscreen) {
         doc.exitFullscreen().catch(() => {});
       } else if (doc.webkitFullscreenElement && doc.webkitExitFullscreen) {
         doc.webkitExitFullscreen();
       }
+      setIsFullscreen(false);
     } catch {}
-  };
+  }, []);
 
   // Anti-cheat Proctoring Warning Modal
   const [cheatWarning, setCheatWarning] = useState<string | null>(null);
@@ -150,52 +249,249 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
   // Online / Offline State
   const [isOnline, setIsOnline] = useState<boolean>(typeof navigator !== 'undefined' ? navigator.onLine : true);
 
-  useEffect(() => {
-    const syncClock = async () => {
-      try {
-        const resp = await fetch('/api/ujian/time');
-        if (resp.ok) {
-          const json = await resp.json().catch(() => null);
-          if (typeof json?.serverTimeMs === 'number') {
-            serverOffsetMsRef.current = json.serverTimeMs - Date.now();
-          }
-        }
-      } catch {}
-    };
-    syncClock();
-  }, []);
+  // Synchronous local draft & active session pointer writer
+  const persistLocalDraftSync = useCallback(
+    (overrides?: {
+      sesiObj?: SesiUjianSiswa;
+      jawaban?: { [soalId: string]: DetailJawabanSiswa };
+      currentIndex?: number;
+      readyStarted?: boolean;
+      pendingCloudSync?: boolean;
+      pendingSubmitSync?: boolean;
+    }) => {
+      const targetSesi = overrides?.sesiObj || sesiRef.current;
+      if (!targetSesi) return;
+      const nextJawaban = overrides?.jawaban || jawabanRef.current || targetSesi.jawaban || {};
+      const nextIndex = overrides?.currentIndex ?? currentIndexRef.current;
+      const nextReady = overrides?.readyStarted ?? readyStartedRef.current;
+      const isPendingCloud = overrides?.pendingCloudSync ?? dirtySyncRef.current;
+      const isPendingSubmit = overrides?.pendingSubmitSync ?? targetSesi.pendingSubmitSync;
 
+      const isTerminalSynced =
+        (targetSesi.status === 'selesai' || targetSesi.status === 'waktu_habis') &&
+        !isPendingSubmit;
+
+      if (isTerminalSynced) {
+        clearActiveExamPointer(targetSesi.id);
+        clearExamDraftSnapshot(targetSesi.id);
+        return;
+      }
+
+      saveExamDraftSnapshot({
+        sessionId: targetSesi.id,
+        ujianId: targetSesi.ujianId,
+        schoolId: targetSesi.schoolId || db.getActiveSchoolId(),
+        status: targetSesi.status,
+        waktuMulai: targetSesi.waktuMulai,
+        jawaban: nextJawaban,
+        currentIndex: nextIndex,
+        readyStarted: nextReady,
+        pendingCloudSync: isPendingCloud,
+        pendingSubmitSync: isPendingSubmit,
+        lastLocalSavedAt: Date.now(),
+      });
+
+      saveActiveExamPointer({
+        sessionId: targetSesi.id,
+        ujianId: targetSesi.ujianId,
+        schoolId: targetSesi.schoolId || db.getActiveSchoolId(),
+        sessionToken: targetSesi.sessionToken,
+        currentIndex: nextIndex,
+        readyStarted: nextReady,
+        updatedAt: Date.now(),
+      });
+    },
+    []
+  );
+
+  // Confirmed Cloud Flush Helper
+  const flushCloudSync = useCallback(
+    async (explicitSession?: SesiUjianSiswa): Promise<boolean> => {
+      const baseSesi = explicitSession || sesiRef.current;
+      if (!baseSesi) return true;
+
+      if (essaySaveTimerRef.current) {
+        clearTimeout(essaySaveTimerRef.current);
+        essaySaveTimerRef.current = null;
+      }
+
+      const latestFromDb = db.getSesiById(baseSesi.id) || baseSesi;
+      const mergedJawaban = {
+        ...(latestFromDb.jawaban || {}),
+        ...(jawabanRef.current || {}),
+      };
+      // Ensure latest clientUpdatedAt wins per question
+      Object.keys(latestFromDb.jawaban || {}).forEach((qId) => {
+        const dbAns = latestFromDb.jawaban[qId];
+        const stateAns = jawabanRef.current?.[qId];
+        if (dbAns && stateAns) {
+          const dbTs = Number(dbAns.clientUpdatedAt) || 0;
+          const stTs = Number(stateAns.clientUpdatedAt) || 0;
+          mergedJawaban[qId] = stTs >= dbTs ? stateAns : dbAns;
+        }
+      });
+
+      const snapshotToSync: SesiUjianSiswa = {
+        ...latestFromDb,
+        status:
+          baseSesi.status === 'sedang_mengerjakan' && latestFromDb.status === 'terverifikasi'
+            ? 'sedang_mengerjakan'
+            : latestFromDb.status,
+        waktuMulai: latestFromDb.waktuMulai || baseSesi.waktuMulai,
+        jawaban: mergedJawaban,
+      };
+
+      const persistedLocal = db.saveSesiUjianLocal(snapshotToSync);
+
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        dirtySyncRef.current = true;
+        persistLocalDraftSync({ sesiObj: persistedLocal, pendingCloudSync: true });
+        setSaveStatus('offline');
+        return false;
+      }
+
+      if (isFlushingRef.current) return false;
+      isFlushingRef.current = true;
+      setSaveStatus('saving');
+
+      try {
+        const synced = await db.syncSesiUjianToCloud(persistedLocal, 8000);
+        if (synced) {
+          dirtySyncRef.current = false;
+          persistLocalDraftSync({ sesiObj: persistedLocal, pendingCloudSync: false });
+          setSaveStatus('saved');
+          return true;
+        } else {
+          dirtySyncRef.current = true;
+          persistLocalDraftSync({ sesiObj: persistedLocal, pendingCloudSync: true });
+          setSaveStatus(navigator.onLine ? 'pending' : 'offline');
+          return false;
+        }
+      } finally {
+        isFlushingRef.current = false;
+      }
+    },
+    [persistLocalDraftSync]
+  );
+
+  // Initial & reactive server clock calibration
+  useEffect(() => {
+    syncServerClock();
+
+    const handleExamTimeEvent = (e: Event) => {
+      const detail = (e as CustomEvent)?.detail;
+      if (detail && typeof detail.serverTimeMs === 'number') {
+        applyServerTimeSample(detail);
+      }
+    };
+
+    const handleVisibilityResync = () => {
+      if (!document.hidden) {
+        syncServerClock();
+      }
+    };
+
+    window.addEventListener('ujian_server_time_sync', handleExamTimeEvent);
+    document.addEventListener('visibilitychange', handleVisibilityResync);
+
+    const periodicSync = setInterval(() => {
+      if (sesiRef.current && readyStartedRef.current && !document.hidden) {
+        syncServerClock();
+      }
+    }, 30000);
+
+    return () => {
+      window.removeEventListener('ujian_server_time_sync', handleExamTimeEvent);
+      document.removeEventListener('visibilitychange', handleVisibilityResync);
+      clearInterval(periodicSync);
+    };
+  }, [syncServerClock, applyServerTimeSample]);
+
+  // Connection fluctuation listeners, background retry queue, & heartbeat
   useEffect(() => {
     const handleOnline = async () => {
       setIsOnline(true);
-      setSaveStatus('saved');
-      if (sesi && ujian) {
-        if (sesi.pendingSubmitSync) {
-          const synced = await db.submitUjianKeBackend(sesi.id).catch(() => null);
-          if (synced?.sesi) {
-            setSesi(synced.sesi);
-            if (synced.pembahasanMap) setPembahasanMap(synced.pembahasanMap);
+      syncServerClock();
+      const activeSesi = sesiRef.current;
+      if (!activeSesi) {
+        setSaveStatus('saved');
+        return;
+      }
+      if (activeSesi.pendingSubmitSync) {
+        const synced = await db.submitUjianKeBackend(activeSesi.id).catch(() => null);
+        if (synced?.sesi) {
+          setSesi(synced.sesi);
+          if (synced.pembahasanMap) setPembahasanMap(synced.pembahasanMap);
+          if (synced.syncedToServer) {
+            clearActiveExamPointer(synced.sesi.id);
+            clearExamDraftSnapshot(synced.sesi.id);
+            setSaveStatus('saved');
           }
-        } else {
-          db.saveSesiUjian({ ...sesi, jawaban: jawabanState }).catch(() => {});
         }
+      } else {
+        await flushCloudSync(activeSesi);
       }
     };
+
     const handleOffline = () => {
       setIsOnline(false);
+      dirtySyncRef.current = true;
+      persistLocalDraftSync({ pendingCloudSync: true });
       setSaveStatus('offline');
     };
 
     window.addEventListener('online', handleOnline);
     window.addEventListener('offline', handleOffline);
+
+    const retryInterval = setInterval(async () => {
+      const activeSesi = sesiRef.current;
+      if (!activeSesi || (typeof navigator !== 'undefined' && !navigator.onLine)) return;
+
+      if (activeSesi.pendingSubmitSync) {
+        const synced = await db.submitUjianKeBackend(activeSesi.id).catch(() => null);
+        if (synced?.sesi) {
+          setSesi(synced.sesi);
+          if (synced.pembahasanMap) setPembahasanMap(synced.pembahasanMap);
+          if (synced.syncedToServer) {
+            clearActiveExamPointer(synced.sesi.id);
+            clearExamDraftSnapshot(synced.sesi.id);
+            setSaveStatus('saved');
+          }
+        }
+      } else if (dirtySyncRef.current) {
+        await flushCloudSync(activeSesi);
+      }
+    }, 8000);
+
+    const heartbeatInterval = setInterval(() => {
+      const activeSesi = sesiRef.current;
+      if (
+        !activeSesi ||
+        !readyStartedRef.current ||
+        activeSesi.status === 'selesai' ||
+        activeSesi.status === 'waktu_habis' ||
+        activeSesi.status === 'terkunci'
+      ) {
+        return;
+      }
+      if (typeof navigator !== 'undefined' && navigator.onLine && !dirtySyncRef.current) {
+        db.syncSesiUjianToCloud(
+          db.saveSesiUjianLocal({ ...activeSesi, jawaban: jawabanRef.current }),
+          6000
+        ).catch(() => false);
+      }
+    }, 30000);
+
     return () => {
       window.removeEventListener('online', handleOnline);
       window.removeEventListener('offline', handleOffline);
+      clearInterval(retryInterval);
+      clearInterval(heartbeatInterval);
     };
-  }, [sesi, ujian, jawabanState]);
+  }, [flushCloudSync, persistLocalDraftSync, syncServerClock]);
 
   // --------------------------------------------------------------------------
-  // 1. URL ROUTING & CROSS-DEVICE FIRESTORE RESOLUTION
+  // 1. URL ROUTING, REFRESH AUTO-RESUME & CROSS-DEVICE FIRESTORE RESOLUTION
   // --------------------------------------------------------------------------
   useEffect(() => {
     let isCancelled = false;
@@ -232,18 +528,83 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
         setAvailableExams(db.getUjianList());
       }
 
+      const activePointer = loadActiveExamPointer();
+
+      // Priority 1: Explicit session token in URL
       if (targetToken) {
-        const resolvedSession = await db.resolveSessionFromFirestore({
-          token: targetToken,
-          schoolId: targetSchoolId || undefined,
-        });
+        const resolvedSession =
+          db.getSesiByToken(targetToken) ||
+          (await db.resolveSessionFromFirestore({
+            token: targetToken,
+            schoolId: targetSchoolId || undefined,
+          }));
         if (!isCancelled && resolvedSession) {
-          initSession(resolvedSession);
+          const matchedPointer =
+            activePointer && activePointer.sessionId === resolvedSession.id ? activePointer : null;
+          await initSession(resolvedSession, {
+            restoreQuestionIndex: matchedPointer?.currentIndex,
+            autoResumeActive:
+              Boolean(matchedPointer?.readyStarted) ||
+              resolvedSession.status === 'sedang_mengerjakan',
+          });
           setIsLoadingExam(false);
           return;
         }
       }
 
+      // Priority 2: Recover in-progress or pending-submit session after browser refresh
+      if (
+        activePointer &&
+        (!targetExamId || activePointer.ujianId === targetExamId)
+      ) {
+        if (activePointer.schoolId && !targetSchoolId) {
+          db.setActiveSchoolId(activePointer.schoolId);
+        }
+        let localSession = db.getSesiById(activePointer.sessionId);
+        if (!localSession && activePointer.sessionToken && navigator.onLine) {
+          localSession = await db.resolveSessionFromFirestore({
+            token: activePointer.sessionToken,
+            schoolId: activePointer.schoolId || undefined,
+          });
+        }
+
+        const draft = loadExamDraftSnapshot(activePointer.sessionId);
+        if (localSession) {
+          const mergedSession = mergeDraftIntoSession(localSession, draft);
+          const isStillRecoverable =
+            mergedSession.status === 'sedang_mengerjakan' ||
+            mergedSession.status === 'terverifikasi' ||
+            mergedSession.status === 'terkunci' ||
+            Boolean(mergedSession.pendingSubmitSync);
+
+          if (isStillRecoverable && !isCancelled) {
+            await initSession(mergedSession, {
+              restoreQuestionIndex: draft?.currentIndex ?? activePointer.currentIndex,
+              autoResumeActive:
+                Boolean(draft?.readyStarted ?? activePointer.readyStarted) ||
+                mergedSession.status === 'sedang_mengerjakan',
+            });
+            // If offline drafts were dirty, immediately attempt background sync
+            if (draft?.pendingCloudSync) {
+              dirtySyncRef.current = true;
+              setSaveStatus(navigator.onLine ? 'pending' : 'offline');
+              if (navigator.onLine) {
+                flushCloudSync(mergedSession).catch(() => {});
+              }
+            }
+            setIsLoadingExam(false);
+            return;
+          } else if (
+            mergedSession.status === 'selesai' ||
+            mergedSession.status === 'waktu_habis'
+          ) {
+            clearActiveExamPointer(mergedSession.id);
+            clearExamDraftSnapshot(mergedSession.id);
+          }
+        }
+      }
+
+      // Priority 3: Specific exam ID link
       if (targetExamId) {
         setSelectedExamId(targetExamId);
         const resolvedExam = await db.resolveExamFromFirestore(targetExamId, targetSchoolId || undefined);
@@ -259,7 +620,9 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
       } else {
         const list = db.getUjianList();
         if (!isCancelled && list.length > 0) {
-          const activeOne = list.find((u) => u.status === 'aktif' || u.status === 'terbit') || list[0];
+          const activeOne =
+            list.find((u) => u.status === 'aktif' || u.status === 'terbit' || u.status === 'terjadwal') ||
+            list[0];
           setSelectedExamId(activeOne.id);
           const sanitized = db.getUjianForStudent(activeOne.id);
           if (sanitized) setUjian(sanitized);
@@ -296,9 +659,13 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
         if (latestSesi) {
           // Automatically unlock student screen when teacher clicks "Buka Kunci" in Pengawasan
           if (sesi.status === 'terkunci' && latestSesi.status !== 'terkunci') {
-            setSesi(latestSesi);
+            const draft = loadExamDraftSnapshot(latestSesi.id);
+            const merged = mergeDraftIntoSession(latestSesi, draft);
+            setSesi(merged);
+            setJawabanState(merged.jawaban || {});
             toast.success('Sesi ujian Anda telah dibuka kembali oleh Guru Pengawas.');
           } else if (latestSesi.status === 'terkunci' && sesi.status !== 'terkunci') {
+            tryExitFullscreen();
             setSesi(latestSesi);
           }
         }
@@ -488,23 +855,10 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
 
       // 2. Validate student class matches exam target classes
       const examClasses = ujian.kelasTarget || [];
-      if (examClasses.length > 0) {
-        const studentClass = siswa.kelas || '';
-        const normStudentClass = studentClass.toLowerCase().replace(/[^a-z0-9]/g, '');
-        const isMatched = examClasses.some((c) => {
-          const normC = c.toLowerCase().replace(/[^a-z0-9]/g, '');
-          return (
-            normC === normStudentClass ||
-            normC === `kelas${normStudentClass}` ||
-            `kelas${normC}` === normStudentClass
-          );
-        });
-
-        if (!isMatched) {
-          throw new Error(
-            `Kartu QR terdaftar atas nama ${siswa.namaLengkap} (Kelas ${siswa.kelas || '-'}). Namun ujian ini dikhususkan untuk ${examClasses.join(', ')}. Anda tidak memiliki hak akses untuk mengerjakan ujian ini.`
-          );
-        }
+      if (examClasses.length > 0 && !doesStudentMatchTargetClasses(siswa.kelas, examClasses)) {
+        throw new Error(
+          `Kartu QR terdaftar atas nama ${siswa.namaLengkap} (Kelas ${siswa.kelas || '-'}). Namun ujian ini dikhususkan untuk ${examClasses.join(', ')}. Anda tidak memiliki hak akses untuk mengerjakan ujian ini.`
+        );
       }
 
       setVerifiedSiswa(siswa);
@@ -576,9 +930,14 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
   };
 
   // --------------------------------------------------------------------------
-  // 4. ACTIVE SESSION INITIALIZATION (Lock Question & Choice Ordering)
+  // 4. ACTIVE SESSION INITIALIZATION (Lock Question & Choice Ordering + Recovery)
   // --------------------------------------------------------------------------
-  const initSession = async (session: SesiUjianSiswa) => {
+  const initSession = async (
+    session: SesiUjianSiswa,
+    options?: { restoreQuestionIndex?: number; autoResumeActive?: boolean }
+  ) => {
+    timeExpiredFiredRef.current = false;
+
     let exam = db.getUjianForStudent(session.ujianId);
     if (!exam) {
       exam = await db.resolveExamFromFirestore(session.ujianId, session.schoolId);
@@ -588,51 +947,101 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
       return;
     }
 
+    // Reconcile any un-synced localStorage draft for this session first
+    const localDraft = loadExamDraftSnapshot(session.id);
+    const recoveredSession = mergeDraftIntoSession(session, localDraft);
+
     const sched = checkExamScheduleWindow(exam, getAuthoritativeNowMs());
-    if (!sched.allowed && session.status !== 'selesai' && session.status !== 'waktu_habis') {
+    if (
+      !sched.allowed &&
+      recoveredSession.status !== 'selesai' &&
+      recoveredSession.status !== 'waktu_habis' &&
+      !recoveredSession.pendingSubmitSync
+    ) {
       setVerificationError(sched.reason || 'Masa pengerjaan ujian belum dibuka atau telah berakhir.');
       return;
     }
 
-    const sessionSeedKey = session.id || session.siswaId;
+    const sessionSeedKey = recoveredSession.id || recoveredSession.siswaId;
     const { urutanSoalIds, urutanPilihanMap } = getOrderedQuestionsForSession(
       exam,
       sessionSeedKey,
-      session
+      recoveredSession
     );
 
     const needsOrderPersist =
-      !session.urutanSoalIds ||
-      session.urutanSoalIds.length === 0 ||
-      !session.urutanPilihanMap ||
-      Object.keys(session.urutanPilihanMap).length === 0;
+      !recoveredSession.urutanSoalIds ||
+      recoveredSession.urutanSoalIds.length === 0 ||
+      !recoveredSession.urutanPilihanMap ||
+      Object.keys(recoveredSession.urutanPilihanMap).length === 0;
 
-    let lockedSession = {
-      ...session,
+    let lockedSession: SesiUjianSiswa = {
+      ...recoveredSession,
       urutanSoalIds,
       urutanPilihanMap,
     };
 
-    if (needsOrderPersist) {
-      lockedSession = await db.saveSesiUjian(lockedSession).catch(() => lockedSession);
+    if (needsOrderPersist || localDraft?.pendingCloudSync) {
+      lockedSession = db.saveSesiUjianLocal(lockedSession);
+      if (navigator.onLine) {
+        db.syncSesiUjianToCloud(lockedSession, 6000).catch(() => false);
+      }
     }
+
+    const totalQuestions = urutanSoalIds.length || exam.soalList?.length || 1;
+    const safeRestoredIdx = Math.max(
+      0,
+      Math.min(
+        totalQuestions - 1,
+        Number(options?.restoreQuestionIndex ?? localDraft?.currentIndex ?? 0) || 0
+      )
+    );
 
     setSesi(lockedSession);
     setUjian(exam);
     setJawabanState(lockedSession.jawaban || {});
+    setCurrentIndex(safeRestoredIdx);
 
-    const durasiTotalSec = (exam.durasiMenit || 60) * 60;
-    if (lockedSession.waktuMulai) {
-      const startMs = new Date(lockedSession.waktuMulai).getTime();
-      const elapsedSec = Math.floor((getAuthoritativeNowMs() - startMs) / 1000);
-      setTimeLeftSeconds(Math.max(0, durasiTotalSec - elapsedSec));
-    } else {
-      setTimeLeftSeconds(durasiTotalSec);
-    }
+    const { remainingSec } = computeRemainingExamSeconds({
+      startIso: lockedSession.waktuMulai,
+      durasiMenit: exam.durasiMenit,
+      tanggalSelesai: exam.tanggalSelesai,
+      authoritativeNowMs: getAuthoritativeNowMs(),
+    });
+    setTimeLeftSeconds(remainingSec);
 
     if (lockedSession.status === 'selesai' || lockedSession.status === 'waktu_habis') {
       setReadyStarted(true);
       setIsCompleted(true);
+      if (exam.tampilkanNilaiLangsung && exam.tampilkanPembahasan && !lockedSession.pendingSubmitSync) {
+        db.submitUjianKeBackend(lockedSession.id)
+          .then((res) => {
+            if (res.pembahasanMap) setPembahasanMap(res.pembahasanMap);
+          })
+          .catch(() => {});
+      }
+      return;
+    }
+
+    const shouldResumeImmediately =
+      Boolean(options?.autoResumeActive) ||
+      (lockedSession.status === 'sedang_mengerjakan' && Boolean(lockedSession.waktuMulai));
+
+    if (shouldResumeImmediately) {
+      setReadyStarted(true);
+      persistLocalDraftSync({
+        sesiObj: lockedSession,
+        jawaban: lockedSession.jawaban || {},
+        currentIndex: safeRestoredIdx,
+        readyStarted: true,
+        pendingCloudSync: Boolean(localDraft?.pendingCloudSync),
+      });
+      // Attempt fullscreen quietly; if browser requires user gesture on reload, banner lets student enter with 1 tap
+      if (exam.modeFullscreen !== false) {
+        const doc: any = document;
+        prevFullscreenRef.current = Boolean(doc.fullscreenElement || doc.webkitFullscreenElement);
+        setIsFullscreen(prevFullscreenRef.current);
+      }
     } else {
       setReadyStarted(false);
     }
@@ -643,30 +1052,78 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
     if (ujian.modeFullscreen !== false) {
       await tryEnterFullscreen();
     }
+    let activeSesi = sesi;
     if (!sesi.waktuMulai || sesi.status === 'terverifikasi') {
       const startedSesi: SesiUjianSiswa = {
         ...sesi,
         status: 'sedang_mengerjakan',
         waktuMulai: sesi.waktuMulai || new Date(getAuthoritativeNowMs()).toISOString(),
       };
-      setSesi(startedSesi);
-      db.saveSesiUjian(startedSesi).catch(() => {});
+      activeSesi = db.saveSesiUjianLocal(startedSesi);
+      setSesi(activeSesi);
     }
     setReadyStarted(true);
+    persistLocalDraftSync({
+      sesiObj: activeSesi,
+      jawaban: jawabanRef.current,
+      currentIndex: currentIndexRef.current,
+      readyStarted: true,
+      pendingCloudSync: true,
+    });
+    flushCloudSync(activeSesi).catch(() => {});
   };
 
   // --------------------------------------------------------------------------
-  // 5. COUNTDOWN TIMER (Server-offset wall-clock synchronized)
+  // 5. PERSISTENT SERVER-SYNCHRONIZED COUNTDOWN TIMER
   // --------------------------------------------------------------------------
+  const handleTimeExpired = useCallback(async () => {
+    const activeSesi = sesiRef.current;
+    if (!activeSesi || timeExpiredFiredRef.current) return;
+    timeExpiredFiredRef.current = true;
+
+    if (essaySaveTimerRef.current) {
+      clearTimeout(essaySaveTimerRef.current);
+      essaySaveTimerRef.current = null;
+    }
+
+    setIsSubmitting(true);
+    try {
+      db.saveSesiUjianLocal({
+        ...activeSesi,
+        jawaban: jawabanRef.current,
+      });
+      const res = await db.submitUjianKeBackend(activeSesi.id);
+      if (res.sesi) {
+        setSesi(res.sesi);
+        if (res.syncedToServer) {
+          clearActiveExamPointer(res.sesi.id);
+          clearExamDraftSnapshot(res.sesi.id);
+        } else {
+          persistLocalDraftSync({
+            sesiObj: res.sesi,
+            pendingCloudSync: true,
+            pendingSubmitSync: true,
+          });
+        }
+      }
+      if (res.pembahasanMap) setPembahasanMap(res.pembahasanMap);
+    } finally {
+      tryExitFullscreen();
+      setIsCompleted(true);
+      setIsSubmitting(false);
+    }
+  }, [persistLocalDraftSync, tryExitFullscreen]);
+
   useEffect(() => {
     if (!sesi || !ujian || !readyStarted || isCompleted || sesi.status === 'terkunci') return;
 
-    const durasiTotalMs = (ujian.durasiMenit || 60) * 60 * 1000;
-    const startMs = sesi.waktuMulai ? new Date(sesi.waktuMulai).getTime() : getAuthoritativeNowMs();
-    const targetEndMs = startMs + durasiTotalMs;
-
     const tick = () => {
-      const remainingSec = Math.max(0, Math.ceil((targetEndMs - getAuthoritativeNowMs()) / 1000));
+      const { remainingSec } = computeRemainingExamSeconds({
+        startIso: sesi.waktuMulai,
+        durasiMenit: ujian.durasiMenit,
+        tanggalSelesai: ujian.tanggalSelesai,
+        authoritativeNowMs: getAuthoritativeNowMs(),
+      });
       setTimeLeftSeconds(remainingSec);
       if (remainingSec <= 0) {
         clearInterval(timer);
@@ -678,33 +1135,101 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
     const timer = setInterval(tick, 1000);
 
     return () => clearInterval(timer);
-  }, [sesi?.id, sesi?.status, sesi?.waktuMulai, ujian?.id, ujian?.durasiMenit, readyStarted, isCompleted]);
-
-  const handleTimeExpired = async () => {
-    if (!sesi) return;
-    setIsSubmitting(true);
-    try {
-      const res = await db.submitUjianKeBackend(sesi.id);
-      if (res.sesi) setSesi(res.sesi);
-      if (res.pembahasanMap) setPembahasanMap(res.pembahasanMap);
-    } finally {
-      tryExitFullscreen();
-      setIsCompleted(true);
-      setIsSubmitting(false);
-    }
-  };
+  }, [
+    sesi?.id,
+    sesi?.status,
+    sesi?.waktuMulai,
+    ujian?.id,
+    ujian?.durasiMenit,
+    ujian?.tanggalSelesai,
+    readyStarted,
+    isCompleted,
+    getAuthoritativeNowMs,
+    handleTimeExpired,
+  ]);
 
   // --------------------------------------------------------------------------
-  // 6. PROCTORING & FULLSCREEN MONITORING
+  // 6. FULLSCREEN MONITORING, HIDDEN/LOCKED NAVIGATION & ANTI-CHEAT GUARDS
   // --------------------------------------------------------------------------
+  const triggerViolation = useCallback(
+    (jenis: any, keterangan: string) => {
+      const activeSesi = sesiRef.current;
+      const activeUjian = ujianRef.current;
+      if (!activeSesi || isCompleted || activeSesi.status === 'terkunci') return;
+
+      const now = Date.now();
+      if (jenis !== 'copy_paste' && now - lastViolationAtRef.current < 2500) {
+        return;
+      }
+      lastViolationAtRef.current = now;
+
+      const maxViolations = Math.max(1, Number(activeUjian?.batasPelanggaran) || 3);
+      const optimisticCount = (activeSesi.jumlahPelanggaran || 0) + 1;
+      setCheatWarning(
+        `${keterangan} (Peringatan ke-${optimisticCount} dari batas ${maxViolations} kali)`
+      );
+
+      try {
+        sound.playError();
+      } catch {}
+
+      db.catatPelanggaranSiswa(activeSesi.id, jenis, keterangan)
+        .then((updatedSesi) => {
+          if (updatedSesi) {
+            setSesi(updatedSesi);
+          } else if (optimisticCount >= maxViolations) {
+            setSesi((prev) =>
+              prev ? { ...prev, status: 'terkunci', jumlahPelanggaran: optimisticCount } : null
+            );
+          }
+        })
+        .catch(() => {});
+    },
+    [isCompleted]
+  );
+
   useEffect(() => {
     if (!sesi || !readyStarted || isCompleted || sesi.status === 'terkunci') return;
+
+    // Trap browser Back button while exam is active (Hidden Navigation Enforcement)
+    try {
+      window.history.pushState({ cbtExamLocked: true }, '', window.location.href);
+    } catch {}
+
+    const handlePopState = () => {
+      try {
+        window.history.pushState({ cbtExamLocked: true }, '', window.location.href);
+      } catch {}
+      toast.warning(
+        'Navigasi browser dikunci selama ujian berlangsung. Gunakan tombol "Kumpulkan" saat selesai.'
+      );
+    };
+
+    const handleBeforeUnload = (e: BeforeUnloadEvent) => {
+      // Flush draft synchronously to localStorage before reload/close
+      persistLocalDraftSync({ pendingCloudSync: dirtySyncRef.current });
+      if (dirtySyncRef.current && navigator.onLine) {
+        flushCloudSync().catch(() => {});
+      }
+      e.preventDefault();
+      e.returnValue = '';
+    };
+
+    const handlePageHide = () => {
+      persistLocalDraftSync({ pendingCloudSync: dirtySyncRef.current });
+      if (dirtySyncRef.current && navigator.onLine) {
+        flushCloudSync().catch(() => {});
+      }
+    };
 
     const handleFsChange = () => {
       const doc: any = document;
       const active = Boolean(doc.fullscreenElement || doc.webkitFullscreenElement);
+      const wasFullscreen = prevFullscreenRef.current;
+      prevFullscreenRef.current = active;
       setIsFullscreen(active);
-      if (!active && ujian?.modeFullscreen !== false) {
+      // Only penalize exiting fullscreen when transitioning out of active fullscreen (never on page refresh restore)
+      if (wasFullscreen && !active && ujian?.modeFullscreen !== false) {
         triggerViolation(
           'keluar_fullscreen',
           'Anda keluar dari mode layar penuh ujian.'
@@ -714,6 +1239,10 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
 
     const handleVisibilityChange = () => {
       if (document.hidden) {
+        persistLocalDraftSync({ pendingCloudSync: dirtySyncRef.current });
+        if (dirtySyncRef.current && navigator.onLine) {
+          flushCloudSync().catch(() => {});
+        }
         triggerViolation(
           'pindah_tab',
           'Terdeteksi meninggalkan layar ujian atau membuka tab/aplikasi lain.'
@@ -725,70 +1254,102 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
       triggerViolation('jendela_blur', 'Jendela ujian kehilangan fokus aktif.');
     };
 
-    const handleCopyPaste = (e: ClipboardEvent) => {
+    const handleCopyPasteCut = (e: ClipboardEvent) => {
       e.preventDefault();
-      triggerViolation('copy_paste', 'Tindakan menyalin atau menempel teks dinonaktifkan selama ujian.');
+      triggerViolation(
+        'copy_paste',
+        'Tindakan menyalin, memotong, atau menempel teks dinonaktifkan selama ujian.'
+      );
     };
 
+    const handleContextMenu = (e: MouseEvent) => {
+      e.preventDefault();
+    };
+
+    const handleKeyDownLock = (e: KeyboardEvent) => {
+      const key = (e.key || '').toLowerCase();
+      const mod = e.ctrlKey || e.metaKey;
+      const isBlockedShortcut =
+        e.key === 'F12' ||
+        (mod && e.shiftKey && ['i', 'j', 'c'].includes(key)) ||
+        (mod && ['u', 's', 'p'].includes(key)) ||
+        (e.altKey && (e.key === 'ArrowLeft' || e.key === 'ArrowRight'));
+      if (isBlockedShortcut) {
+        e.preventDefault();
+      }
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    window.addEventListener('beforeunload', handleBeforeUnload);
+    window.addEventListener('pagehide', handlePageHide);
     document.addEventListener('fullscreenchange', handleFsChange);
     document.addEventListener('webkitfullscreenchange', handleFsChange);
     document.addEventListener('visibilitychange', handleVisibilityChange);
     window.addEventListener('blur', handleWindowBlur);
-    document.addEventListener('copy', handleCopyPaste);
-    document.addEventListener('paste', handleCopyPaste);
+    document.addEventListener('copy', handleCopyPasteCut);
+    document.addEventListener('cut', handleCopyPasteCut);
+    document.addEventListener('paste', handleCopyPasteCut);
+    document.addEventListener('contextmenu', handleContextMenu);
+    window.addEventListener('keydown', handleKeyDownLock);
 
     return () => {
+      window.removeEventListener('popstate', handlePopState);
+      window.removeEventListener('beforeunload', handleBeforeUnload);
+      window.removeEventListener('pagehide', handlePageHide);
       document.removeEventListener('fullscreenchange', handleFsChange);
       document.removeEventListener('webkitfullscreenchange', handleFsChange);
       document.removeEventListener('visibilitychange', handleVisibilityChange);
       window.removeEventListener('blur', handleWindowBlur);
-      document.removeEventListener('copy', handleCopyPaste);
-      document.removeEventListener('paste', handleCopyPaste);
+      document.removeEventListener('copy', handleCopyPasteCut);
+      document.removeEventListener('cut', handleCopyPasteCut);
+      document.removeEventListener('paste', handleCopyPasteCut);
+      document.removeEventListener('contextmenu', handleContextMenu);
+      window.removeEventListener('keydown', handleKeyDownLock);
     };
-  }, [sesi, ujian?.modeFullscreen, readyStarted, isCompleted]);
-
-  const triggerViolation = (jenis: any, keterangan: string) => {
-    if (!sesi || isCompleted || sesi.status === 'terkunci') return;
-
-    const now = Date.now();
-    if (jenis !== 'copy_paste' && now - lastViolationAtRef.current < 2500) {
-      return;
-    }
-    lastViolationAtRef.current = now;
-
-    const maxViolations = Math.max(1, Number(ujian?.batasPelanggaran) || 3);
-    const optimisticCount = (sesi.jumlahPelanggaran || 0) + 1;
-    setCheatWarning(`${keterangan} (Peringatan ke-${optimisticCount} dari batas ${maxViolations} kali)`);
-
-    try {
-      sound.playError();
-    } catch {}
-
-    db.catatPelanggaranSiswa(sesi.id, jenis, keterangan)
-      .then((updatedSesi) => {
-        if (updatedSesi) {
-          setSesi(updatedSesi);
-        } else if (optimisticCount >= maxViolations) {
-          setSesi((prev) => (prev ? { ...prev, status: 'terkunci', jumlahPelanggaran: optimisticCount } : null));
-        }
-      })
-      .catch(() => {});
-  };
+  }, [
+    sesi?.id,
+    sesi?.status,
+    ujian?.modeFullscreen,
+    readyStarted,
+    isCompleted,
+    triggerViolation,
+    persistLocalDraftSync,
+    flushCloudSync,
+  ]);
 
   // --------------------------------------------------------------------------
-  // 7. ANSWER SUBMISSION & SEQUENCE-GUARDED AUTOSAVE
+  // 7. ANSWER SUBMISSION & SEQUENCE-GUARDED RESILIENT AUTOSAVE
   // --------------------------------------------------------------------------
+  const goToQuestion = useCallback(
+    (nextIdx: number) => {
+      const clamped = Math.max(0, nextIdx);
+      setCurrentIndex(clamped);
+      currentIndexRef.current = clamped;
+      persistLocalDraftSync({
+        currentIndex: clamped,
+        pendingCloudSync: dirtySyncRef.current,
+      });
+      // Immediately flush any pending debounced text input when switching questions
+      if (essaySaveTimerRef.current) {
+        clearTimeout(essaySaveTimerRef.current);
+        essaySaveTimerRef.current = null;
+        flushCloudSync().catch(() => {});
+      }
+    },
+    [persistLocalDraftSync, flushCloudSync]
+  );
+
   const handleSelectAnswer = async (
     soalId: string,
     answerOriginalKeyOrText: string,
     displayLetter?: string,
     debounceWrite = false
   ) => {
-    if (!sesi || isCompleted || sesi.status === 'terkunci') return;
+    const activeSesi = sesiRef.current;
+    if (!activeSesi || isCompleted || activeSesi.status === 'terkunci') return;
 
     const nowTs = Date.now();
-    setSaveStatus('saving');
-    const existing = jawabanState[soalId] || { jawabanDipilih: '' };
+    const existing = jawabanRef.current[soalId] || { jawabanDipilih: '' };
     const updatedDetail: DetailJawabanSiswa = {
       ...existing,
       jawabanDipilih: answerOriginalKeyOrText,
@@ -798,53 +1359,100 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
       clientUpdatedAt: nowTs,
     };
 
-    setJawabanState((prev) => ({
-      ...prev,
+    const nextJawaban = {
+      ...jawabanRef.current,
       [soalId]: updatedDetail,
-    }));
-
-    const persistNow = async () => {
-      try {
-        await db.saveJawabanSiswa(sesi.id, soalId, updatedDetail);
-        setSaveStatus(navigator.onLine ? 'saved' : 'offline');
-      } catch {
-        setSaveStatus('offline');
-      }
     };
+    jawabanRef.current = nextJawaban;
+    setJawabanState(nextJawaban);
 
+    // 1. Synchronous instant local persistence (never loses data even on immediate F5)
+    dirtySyncRef.current = true;
+    const updatedLocal = db.saveJawabanSiswaLocalSync(activeSesi.id, soalId, updatedDetail);
+    persistLocalDraftSync({
+      sesiObj: updatedLocal || activeSesi,
+      jawaban: nextJawaban,
+      pendingCloudSync: true,
+    });
+
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      setSaveStatus('offline');
+      return;
+    }
+
+    setSaveStatus('saving');
+
+    // 2. Push to Firestore with confirmed status & backoff retry queue
     if (debounceWrite) {
       if (essaySaveTimerRef.current) clearTimeout(essaySaveTimerRef.current);
-      essaySaveTimerRef.current = setTimeout(persistNow, 350);
+      essaySaveTimerRef.current = setTimeout(() => {
+        essaySaveTimerRef.current = null;
+        flushCloudSync(updatedLocal || activeSesi);
+      }, 400);
     } else {
-      await persistNow();
+      await flushCloudSync(updatedLocal || activeSesi);
     }
   };
 
   const handleToggleRagu = async (soalId: string) => {
-    if (!sesi || isCompleted) return;
+    const activeSesi = sesiRef.current;
+    if (!activeSesi || isCompleted || activeSesi.status === 'terkunci') return;
 
     const nowTs = Date.now();
-    const existing = jawabanState[soalId] || { jawabanDipilih: '' };
+    const existing = jawabanRef.current[soalId] || { jawabanDipilih: '' };
     const updatedDetail: DetailJawabanSiswa = {
       ...existing,
       raguRagu: !existing.raguRagu,
       clientUpdatedAt: nowTs,
     };
 
-    setJawabanState((prev) => ({
-      ...prev,
+    const nextJawaban = {
+      ...jawabanRef.current,
       [soalId]: updatedDetail,
-    }));
-    await db.saveJawabanSiswa(sesi.id, soalId, updatedDetail);
+    };
+    jawabanRef.current = nextJawaban;
+    setJawabanState(nextJawaban);
+
+    dirtySyncRef.current = true;
+    const updatedLocal = db.saveJawabanSiswaLocalSync(activeSesi.id, soalId, updatedDetail);
+    persistLocalDraftSync({
+      sesiObj: updatedLocal || activeSesi,
+      jawaban: nextJawaban,
+      pendingCloudSync: true,
+    });
+
+    await flushCloudSync(updatedLocal || activeSesi);
   };
 
   const handleSubmitExam = async () => {
-    if (!sesi || !ujian) return;
+    const activeSesi = sesiRef.current;
+    if (!activeSesi || !ujian) return;
+    if (essaySaveTimerRef.current) {
+      clearTimeout(essaySaveTimerRef.current);
+      essaySaveTimerRef.current = null;
+    }
+
     setIsSubmitting(true);
     try {
-      const submitRes = await db.submitUjianKeBackend(sesi.id);
+      db.saveSesiUjianLocal({
+        ...activeSesi,
+        jawaban: jawabanRef.current,
+      });
+      const submitRes = await db.submitUjianKeBackend(activeSesi.id);
       if (submitRes.sesi) {
         setSesi(submitRes.sesi);
+        if (submitRes.syncedToServer) {
+          dirtySyncRef.current = false;
+          setSaveStatus('saved');
+          clearActiveExamPointer(submitRes.sesi.id);
+          clearExamDraftSnapshot(submitRes.sesi.id);
+        } else {
+          persistLocalDraftSync({
+            sesiObj: submitRes.sesi,
+            pendingCloudSync: true,
+            pendingSubmitSync: true,
+          });
+        }
       }
       if (submitRes.pembahasanMap) {
         setPembahasanMap(submitRes.pembahasanMap);
@@ -1263,7 +1871,12 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
             </p>
           </div>
           <button
-            onClick={onExit}
+            type="button"
+            onClick={() => {
+              tryExitFullscreen();
+              clearActiveExamPointer(sesi.id);
+              onExit();
+            }}
             className="w-full py-3 bg-slate-800 hover:bg-slate-700 text-white rounded-xl text-xs font-bold transition-all cursor-pointer"
           >
             Kembali ke Portal
@@ -1309,7 +1922,11 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
                   const res = await db.submitUjianKeBackend(sesi.id);
                   if (res.sesi) setSesi(res.sesi);
                   if (res.pembahasanMap) setPembahasanMap(res.pembahasanMap);
-                  if (res.syncedToServer) toast.success('Berhasil disinkronkan ke server!');
+                  if (res.syncedToServer && res.sesi) {
+                    clearActiveExamPointer(res.sesi.id);
+                    clearExamDraftSnapshot(res.sesi.id);
+                    toast.success('Berhasil disinkronkan ke server!');
+                  }
                 }}
                 className="px-2.5 py-1 bg-amber-600 text-white rounded-lg font-bold shrink-0 cursor-pointer"
               >
@@ -1374,36 +1991,56 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
           {ujian?.tampilkanNilaiLangsung && ujian?.tampilkanPembahasan && pembahasanMap && (
             <div className="text-left space-y-2">
               <h3 className="text-xs font-extrabold text-slate-700 uppercase tracking-wider">
-                Ringkasan Hasil Per Nomor
+                Ringkasan Hasil &amp; Pembahasan Per Nomor
               </h3>
-              <div className="max-h-52 overflow-y-auto space-y-1.5 pr-1">
+              <div className="max-h-64 overflow-y-auto space-y-2 pr-1">
                 {orderedSoalList.map((q, idx) => {
                   const ans = jawabanState[q.id];
                   const rev = pembahasanMap[q.id];
+                  const explanationText = rev?.pembahasan || q.pembahasan;
                   return (
                     <div
                       key={q.id}
-                      className="flex items-center justify-between text-xs px-3 py-2 rounded-xl border border-slate-200 bg-slate-50"
+                      className="text-xs px-3.5 py-2.5 rounded-xl border border-slate-200 bg-slate-50 space-y-1.5"
                     >
-                      <span className="font-bold text-slate-700">Soal No. {idx + 1}</span>
-                      <div className="flex items-center gap-2">
-                        <span className="text-slate-600">
-                          Pilihan: <strong>{ans?.opsiTampilDipilih || ans?.jawabanDipilih || '-'}</strong>
-                        </span>
-                        {rev?.benar === true ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold text-[10px]">
-                            <CheckCircle className="w-3 h-3" /> Benar
+                      <div className="flex items-center justify-between gap-2">
+                        <span className="font-bold text-slate-800">Soal No. {idx + 1}</span>
+                        <div className="flex items-center gap-2">
+                          <span className="text-slate-600 max-w-[140px] truncate">
+                            {q.tipe === 'isian_singkat' ? 'Jawaban: ' : q.tipe === 'benar_salah' ? 'Dipilih: ' : 'Pilihan: '}
+                            <strong>{ans?.opsiTampilDipilih || ans?.jawabanDipilih || '-'}</strong>
                           </span>
-                        ) : rev?.benar === false ? (
-                          <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-rose-100 text-rose-800 font-bold text-[10px]">
-                            <XCircle className="w-3 h-3" /> Salah
-                          </span>
-                        ) : (
-                          <span className="px-2 py-0.5 rounded-full bg-slate-200 text-slate-700 font-bold text-[10px]">
-                            Uraian
-                          </span>
-                        )}
+                          {rev?.benar === true ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-100 text-emerald-800 font-bold text-[10px]">
+                              <CheckCircle className="w-3 h-3" /> Benar
+                            </span>
+                          ) : rev?.benar === false ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-rose-100 text-rose-800 font-bold text-[10px]">
+                              <XCircle className="w-3 h-3" /> Salah
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 rounded-full bg-slate-200 text-slate-700 font-bold text-[10px]">
+                              {q.tipe === 'uraian' ? 'Uraian' : 'Tersimpan'}
+                            </span>
+                          )}
+                        </div>
                       </div>
+                      {(rev?.kunciJawaban || explanationText) && (
+                        <div className="pt-1 border-t border-slate-200/80 text-[11px] text-slate-600 space-y-0.5">
+                          {rev?.kunciJawaban && (
+                            <div>
+                              <span className="font-bold text-emerald-700">Kunci Jawaban: </span>
+                              <span className="font-semibold text-slate-800">{rev.kunciJawaban}</span>
+                            </div>
+                          )}
+                          {explanationText && (
+                            <div className="leading-relaxed">
+                              <span className="font-bold text-blue-700">Pembahasan: </span>
+                              <span>{explanationText}</span>
+                            </div>
+                          )}
+                        </div>
+                      )}
                     </div>
                   );
                 })}
@@ -1411,8 +2048,53 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
             </div>
           )}
 
+          {(() => {
+            const maxAttempts = Math.max(1, Number(ujian?.jumlahPercobaan) || 1);
+            const currentAttemptsCount = verifiedSiswa && ujian
+              ? db.getSesiListBySiswaAndUjian(ujian.id, verifiedSiswa.id).length
+              : Number(sesi.attemptNumber) || 1;
+            const remainingAttempts = maxAttempts - currentAttemptsCount;
+            const schedOk = ujian ? checkExamScheduleWindow(ujian, getAuthoritativeNowMs()).allowed : false;
+            if (remainingAttempts <= 0 || !schedOk || !ujian) return null;
+
+            return (
+              <button
+                type="button"
+                onClick={async () => {
+                  try {
+                    const targetSiswa =
+                      verifiedSiswa ||
+                      (await db.resolveSiswaForVerification(sesi.nisn || sesi.siswaId, sesi.schoolId));
+                    if (!targetSiswa) {
+                      toast.error('Data siswa tidak ditemukan untuk memulai percobaan baru.');
+                      return;
+                    }
+                    const nextSession = await db.createOrGetSesiUjian(ujian.id, targetSiswa, {
+                      forceNewAttempt: true,
+                    });
+                    setIsCompleted(false);
+                    setPembahasanMap(undefined);
+                    setCurrentIndex(0);
+                    await initSession(nextSession);
+                  } catch (err: any) {
+                    toast.error(err?.message || 'Gagal memulai ulang ujian.');
+                  }
+                }}
+                className="w-full py-3 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl text-xs font-bold transition-all shadow-sm flex items-center justify-center gap-2 cursor-pointer"
+              >
+                <RefreshCw className="w-3.5 h-3.5" />
+                <span>Kerjakan Ulang (Sisa Kesempatan: {remainingAttempts}x)</span>
+              </button>
+            );
+          })()}
+
           <button
+            type="button"
             onClick={() => {
+              if (!sesi.pendingSubmitSync) {
+                clearActiveExamPointer(sesi.id);
+                clearExamDraftSnapshot(sesi.id);
+              }
               tryExitFullscreen();
               onExit();
             }}
@@ -1486,7 +2168,10 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
           <div className="flex flex-col sm:flex-row gap-2.5">
             <button
               type="button"
-              onClick={onExit}
+              onClick={() => {
+                clearActiveExamPointer(sesi.id);
+                onExit();
+              }}
               className="sm:w-36 py-3 rounded-xl border border-slate-300 bg-white hover:bg-slate-50 text-slate-700 text-xs font-bold cursor-pointer"
             >
               Keluar
@@ -1542,17 +2227,17 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
 
   return (
     <div className="min-h-[100dvh] bg-slate-100 flex flex-col font-sans selection:bg-blue-600 selection:text-white overflow-x-hidden">
-      {/* Re-enter Fullscreen Banner if user exited fullscreen */}
+      {/* Re-enter Fullscreen Banner if user exited or reloaded without fullscreen gesture */}
       {ujian?.modeFullscreen !== false && !isFullscreen && (
         <div className="bg-amber-500 text-slate-950 px-3 py-2 text-xs font-bold flex items-center justify-between gap-2 z-50">
           <div className="flex items-center gap-2 min-w-0">
             <ShieldAlert className="w-4 h-4 shrink-0" />
-            <span className="truncate">Mode layar penuh sedang nonaktif.</span>
+            <span className="truncate">Mode layar penuh belum aktif. Ketuk tombol di kanan untuk mengaktifkan.</span>
           </div>
           <button
             type="button"
             onClick={tryEnterFullscreen}
-            className="px-3 py-1 rounded-lg bg-slate-950 text-white text-[11px] font-bold shrink-0 cursor-pointer flex items-center gap-1"
+            className="px-3 py-1.5 rounded-lg bg-slate-950 text-white text-[11px] font-bold shrink-0 cursor-pointer flex items-center gap-1 min-h-[34px]"
           >
             <Maximize2 className="w-3.5 h-3.5" />
             <span>Masuk Layar Penuh</span>
@@ -1560,14 +2245,14 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
         </div>
       )}
 
-      {/* Top Bar Navigation */}
-      <header className="sticky top-0 z-40 bg-white border-b border-slate-200 shadow-xs px-3 sm:px-6 pt-[env(safe-area-inset-top)] h-16 flex items-center justify-between gap-2">
+      {/* Top Bar (Portal Navigation Hidden During Active Exam) */}
+      <header className="sticky top-0 z-40 bg-white border-b border-slate-200 shadow-xs px-3 sm:px-6 pt-[env(safe-area-inset-top)] h-14 sm:h-16 flex items-center justify-between gap-2">
         <div className="flex items-center gap-2.5 min-w-0">
           <div className="w-9 h-9 rounded-xl bg-blue-700 text-white flex items-center justify-center font-bold text-sm shadow-xs shrink-0">
             <BookOpen className="w-5 h-5" />
           </div>
           <div className="min-w-0">
-            <h1 className="text-xs sm:text-sm font-extrabold text-slate-900 leading-tight truncate max-w-[160px] sm:max-w-xs md:max-w-md">
+            <h1 className="text-xs sm:text-sm font-extrabold text-slate-900 leading-tight truncate max-w-[140px] sm:max-w-xs md:max-w-md">
               {ujian?.judul}
             </h1>
             <div className="flex items-center gap-1.5 text-[11px] text-slate-500 mt-0.5 truncate">
@@ -1580,40 +2265,78 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
           </div>
         </div>
 
-        {/* Timer & Cloud Save Indicator */}
-        <div className="flex items-center gap-2 sm:gap-3 shrink-0">
+        {/* Persistent Server-Synced Timer & Auto-Save Status */}
+        <div className="flex items-center gap-1.5 sm:gap-3 shrink-0">
           <div
+            title={
+              isServerClockSynced
+                ? 'Waktu tersinkronisasi dengan server ujian'
+                : 'Menggunakan penanda waktu sesi tersimpan'
+            }
             className={`flex items-center gap-1.5 px-2.5 sm:px-3 py-1.5 rounded-xl text-xs font-bold shadow-xs transition-colors ${
               isTimeCritical
-                ? 'bg-red-50 text-red-700 border border-red-200 animate-pulse'
+                ? 'bg-rose-50 text-rose-700 border border-rose-300'
                 : 'bg-blue-50 text-blue-900 border border-blue-200'
             }`}
           >
-            <Clock className="w-4 h-4 shrink-0" />
-            <span className="tabular-nums">{formatTimer(timeLeftSeconds)}</span>
-          </div>
-
-          <div className="hidden sm:flex items-center gap-1.5 text-[11px] text-slate-500">
-            {saveStatus === 'saved' ? (
-              <>
-                <CheckCircle className="w-3.5 h-3.5 text-emerald-600" />
-                <span className="text-emerald-700 font-semibold">Tersimpan</span>
-              </>
-            ) : saveStatus === 'saving' ? (
-              <>
-                <RefreshCw className="w-3.5 h-3.5 text-blue-600 animate-spin" />
-                <span>Menyimpan...</span>
-              </>
+            {isTimeCritical ? (
+              <AlertTriangle className="w-3.5 h-3.5 shrink-0 text-rose-600" />
             ) : (
-              <>
-                <AlertTriangle className="w-3.5 h-3.5 text-amber-600" />
-                <span className="text-amber-700 font-semibold">Mode Offline</span>
-              </>
+              <Clock className="w-3.5 h-3.5 shrink-0" />
+            )}
+            <span className="tabular-nums">{formatTimer(timeLeftSeconds)}</span>
+            {isTimeCritical && (
+              <span className="hidden md:inline text-[10px] font-extrabold uppercase tracking-wide">
+                &bull; Segera
+              </span>
             )}
           </div>
 
           <button
-            onClick={() => setShowSubmitModal(true)}
+            type="button"
+            onClick={() => flushCloudSync()}
+            title={
+              saveStatus === 'saved'
+                ? 'Semua jawaban aman tersimpan di server & perangkat'
+                : saveStatus === 'saving'
+                ? 'Sedang mengirim jawaban ke server...'
+                : saveStatus === 'pending'
+                ? 'Tersimpan di perangkat — menunggu sinkronisasi server (ketuk untuk coba lagi)'
+                : 'Koneksi terputus — jawaban tersimpan aman di perangkat'
+            }
+            className="flex items-center gap-1 px-2 py-1.5 rounded-lg text-[11px] font-semibold border border-slate-200 bg-slate-50 hover:bg-slate-100 transition-colors cursor-pointer"
+          >
+            {saveStatus === 'saved' ? (
+              <>
+                <CheckCircle className="w-3.5 h-3.5 text-emerald-600 shrink-0" />
+                <span className="hidden sm:inline text-emerald-700">Tersimpan</span>
+              </>
+            ) : saveStatus === 'saving' ? (
+              <>
+                <RefreshCw className="w-3.5 h-3.5 text-blue-600 animate-spin shrink-0" />
+                <span className="hidden sm:inline text-slate-600">Menyimpan...</span>
+              </>
+            ) : saveStatus === 'pending' ? (
+              <>
+                <UploadCloud className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                <span className="hidden sm:inline text-amber-700">Antre Sync</span>
+              </>
+            ) : (
+              <>
+                <AlertTriangle className="w-3.5 h-3.5 text-amber-600 shrink-0" />
+                <span className="hidden sm:inline text-amber-700">Lokal (Offline)</span>
+              </>
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={() => {
+              if (dirtySyncRef.current && navigator.onLine) {
+                flushCloudSync().catch(() => {});
+              }
+              setShowSubmitModal(true);
+            }}
             className="px-3 sm:px-3.5 py-2 bg-emerald-600 hover:bg-emerald-500 text-white rounded-xl text-xs font-bold shadow-xs flex items-center gap-1.5 transition-colors cursor-pointer min-h-[38px]"
           >
             <Send className="w-3.5 h-3.5" />
@@ -1635,7 +2358,13 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
                     {currentIndex + 1}
                   </span>
                   <span className="text-xs font-bold uppercase tracking-wider text-slate-500">
-                    {currentSoal.tipe === 'pilihan_ganda' ? 'Pilihan Ganda' : 'Uraian / Esai'}
+                    {currentSoal.tipe === 'pilihan_ganda'
+                      ? 'Pilihan Ganda'
+                      : currentSoal.tipe === 'benar_salah'
+                      ? 'Benar / Salah'
+                      : currentSoal.tipe === 'isian_singkat'
+                      ? 'Isian Singkat'
+                      : 'Uraian / Esai'}
                   </span>
                 </div>
 
@@ -1777,6 +2506,63 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
                     );
                   })}
                 </div>
+              ) : currentSoal.tipe === 'benar_salah' ? (
+                <div className="pt-2 grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  {(['BENAR', 'SALAH'] as const).map((tfVal) => {
+                    const isSelected = (currentDetail.jawabanDipilih || '').toUpperCase() === tfVal;
+                    return (
+                      <button
+                        key={tfVal}
+                        type="button"
+                        onClick={() => handleSelectAnswer(currentSoal.id, tfVal, tfVal, false)}
+                        className={`p-4 rounded-2xl border text-left transition-all flex items-center gap-3 cursor-pointer min-h-[56px] ${
+                          isSelected
+                            ? tfVal === 'BENAR'
+                              ? 'bg-emerald-50 border-emerald-600 ring-2 ring-emerald-600/20 text-emerald-950 font-bold shadow-xs'
+                              : 'bg-rose-50 border-rose-600 ring-2 ring-rose-600/20 text-rose-950 font-bold shadow-xs'
+                            : 'bg-white border-slate-200 hover:border-slate-300 text-slate-800'
+                        }`}
+                      >
+                        <span
+                          className={`w-9 h-9 rounded-xl flex items-center justify-center text-sm font-extrabold shrink-0 ${
+                            isSelected
+                              ? tfVal === 'BENAR'
+                                ? 'bg-emerald-600 text-white'
+                                : 'bg-rose-600 text-white'
+                              : 'bg-slate-100 text-slate-700'
+                          }`}
+                        >
+                          {tfVal === 'BENAR' ? 'B' : 'S'}
+                        </span>
+                        <div>
+                          <span className="block text-sm font-extrabold">
+                            {tfVal === 'BENAR' ? 'BENAR' : 'SALAH'}
+                          </span>
+                          <span className="text-[11px] text-slate-500 font-normal">
+                            {tfVal === 'BENAR' ? 'Pernyataan di atas sesuai / benar' : 'Pernyataan di atas tidak sesuai / salah'}
+                          </span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              ) : currentSoal.tipe === 'isian_singkat' ? (
+                <div className="space-y-2 pt-2">
+                  <label className="text-xs font-bold text-slate-700">
+                    Tuliskan Jawaban Singkat Anda:
+                  </label>
+                  <input
+                    type="text"
+                    value={currentDetail.jawabanDipilih || ''}
+                    onChange={(e) => handleSelectAnswer(currentSoal.id, e.target.value, undefined, true)}
+                    placeholder="Ketik jawaban singkat dengan ejaan yang tepat..."
+                    className="w-full py-3.5 px-4 rounded-2xl border border-slate-200 focus:border-blue-600 focus:ring-4 focus:ring-blue-100 outline-none text-sm font-semibold transition-all"
+                  />
+                  <div className="flex justify-between text-[11px] text-slate-400">
+                    <span>Isi dengan kata, angka, atau istilah singkat yang tepat.</span>
+                    <span>{(currentDetail.jawabanDipilih || '').length} karakter</span>
+                  </div>
+                </div>
               ) : (
                 <div className="space-y-2 pt-2">
                   <label className="text-xs font-bold text-slate-700">Tuliskan Jawaban Uraian Anda:</label>
@@ -1798,7 +2584,7 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
               <div className="hidden lg:flex pt-6 border-t border-slate-100 items-center justify-between">
                 <button
                   type="button"
-                  onClick={() => setCurrentIndex((prev) => Math.max(0, prev - 1))}
+                  onClick={() => goToQuestion(Math.max(0, currentIndex - 1))}
                   disabled={currentIndex === 0}
                   className="px-4 py-2.5 rounded-xl border border-slate-200 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-40 disabled:pointer-events-none transition-colors flex items-center gap-1.5 cursor-pointer"
                 >
@@ -1818,7 +2604,7 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
                 ) : (
                   <button
                     type="button"
-                    onClick={() => setCurrentIndex((prev) => Math.min(totalSoal - 1, prev + 1))}
+                    onClick={() => goToQuestion(Math.min(totalSoal - 1, currentIndex + 1))}
                     className="px-5 py-2.5 rounded-xl bg-blue-700 hover:bg-blue-600 text-white text-xs font-bold shadow-md transition-colors flex items-center gap-1.5 cursor-pointer"
                   >
                     <span>Berikutnya</span>
@@ -1839,7 +2625,7 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
               <h3 className="text-xs font-bold text-slate-900 uppercase tracking-wider">
                 Navigasi Soal
               </h3>
-              <span className="text-[11px] font-semibold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-full">
+              <span className="text-[11px] font-semibold text-blue-700 bg-blue-50 px-2 py-0.5 rounded-full tabular-nums">
                 {answeredCount} / {totalSoal}
               </span>
             </div>
@@ -1855,8 +2641,8 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
                   <button
                     key={q.id}
                     type="button"
-                    onClick={() => setCurrentIndex(idx)}
-                    className={`h-10 rounded-xl text-xs font-bold transition-all flex items-center justify-center cursor-pointer ${
+                    onClick={() => goToQuestion(idx)}
+                    className={`h-10 rounded-xl text-xs font-bold transition-all flex items-center justify-center cursor-pointer tabular-nums ${
                       isCurrent ? 'ring-2 ring-blue-600 ring-offset-2' : ''
                     } ${
                       isRagu
@@ -1894,7 +2680,7 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
       <div className="lg:hidden sticky bottom-0 z-30 bg-white/95 backdrop-blur border-t border-slate-200 px-3 pt-2.5 pb-[max(0.625rem,env(safe-area-inset-bottom))] flex items-center justify-between gap-2 shadow-[0_-4px_12px_rgba(15,23,42,0.06)]">
         <button
           type="button"
-          onClick={() => setCurrentIndex((prev) => Math.max(0, prev - 1))}
+          onClick={() => goToQuestion(Math.max(0, currentIndex - 1))}
           disabled={currentIndex === 0}
           className="px-3.5 min-h-[44px] rounded-xl border border-slate-200 text-xs font-bold text-slate-700 hover:bg-slate-50 disabled:opacity-40 disabled:pointer-events-none flex items-center gap-1 cursor-pointer"
         >
@@ -1908,7 +2694,7 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
           className="flex-1 min-h-[44px] px-3 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-800 text-xs font-bold flex items-center justify-center gap-1.5 cursor-pointer"
         >
           <LayoutGrid className="w-4 h-4 text-blue-700" />
-          <span>
+          <span className="tabular-nums">
             Soal {currentIndex + 1}/{totalSoal} &bull; {answeredCount} Terjawab
           </span>
         </button>
@@ -1925,7 +2711,7 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
         ) : (
           <button
             type="button"
-            onClick={() => setCurrentIndex((prev) => Math.min(totalSoal - 1, prev + 1))}
+            onClick={() => goToQuestion(Math.min(totalSoal - 1, currentIndex + 1))}
             className="px-4 min-h-[44px] rounded-xl bg-blue-700 hover:bg-blue-600 text-white text-xs font-bold shadow-sm flex items-center gap-1 cursor-pointer"
           >
             <span>Next</span>
@@ -1941,7 +2727,7 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
             <div className="flex items-center justify-between border-b border-slate-100 pb-3">
               <div>
                 <h3 className="text-sm font-extrabold text-slate-900">Peta Nomor Soal</h3>
-                <p className="text-[11px] text-slate-500">
+                <p className="text-[11px] text-slate-500 tabular-nums">
                   Terjawab {answeredCount} &bull; Kosong {unansweredCount} &bull; Ragu {raguCount}
                 </p>
               </div>
@@ -1966,7 +2752,7 @@ export const UjianSiswaView: React.FC<UjianSiswaViewProps> = ({
                     key={q.id}
                     type="button"
                     onClick={() => {
-                      setCurrentIndex(idx);
+                      goToQuestion(idx);
                       setShowMobileNavModal(false);
                     }}
                     className={`h-11 rounded-xl text-xs font-bold transition-all flex items-center justify-center cursor-pointer ${

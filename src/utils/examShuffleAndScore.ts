@@ -2,11 +2,135 @@ import {
   DetailJawabanSiswa,
   ModePengacakanUjian,
   SesiUjianSiswa,
+  Siswa,
   SoalUjian,
+  TipeSoalUjian,
   UjianOnline,
 } from '../types';
 
 const CHOICE_LETTERS = ['A', 'B', 'C', 'D', 'E'] as const;
+
+export function normalizeClassName(cls?: string): string {
+  return (cls || '').toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+export function doesStudentMatchTargetClasses(studentClass: string | undefined, targetClasses: string[]): boolean {
+  if (!targetClasses || targetClasses.length === 0) return true;
+  if (
+    targetClasses.some((c) => {
+      const n = normalizeClassName(c);
+      return n === 'semuakelas' || n === 'semua' || n === 'all';
+    })
+  ) {
+    return true;
+  }
+  const normStudent = normalizeClassName(studentClass);
+  if (!normStudent) return false;
+  return targetClasses.some((c) => {
+    const normC = normalizeClassName(c);
+    return (
+      normC === normStudent ||
+      normC === `kelas${normStudent}` ||
+      `kelas${normC}` === normStudent
+    );
+  });
+}
+
+/**
+ * Normalizes True/False answers and keys to 'BENAR' | 'SALAH' | ''.
+ */
+export function normalizeTrueFalseValue(val?: string, soal?: Pick<SoalUjian, 'pilihan'>): 'BENAR' | 'SALAH' | '' {
+  const clean = (val || '').trim().toUpperCase();
+  if (!clean) return '';
+
+  if (/^(?:BENAR|BETUL|TRUE|YA|Y|T|1)$/.test(clean)) return 'BENAR';
+  if (/^(?:SALAH|FALSE|TIDAK|F|S|0)$/.test(clean)) return 'SALAH';
+
+  // If represented as option A / B from parsed choices ("A. Benar", "B. Salah")
+  const hasOptionB = Boolean(soal?.pilihan?.B && /salah|false|tidak/i.test(soal.pilihan.B));
+  const hasOptionA = Boolean(soal?.pilihan?.A && /benar|betul|true|ya/i.test(soal.pilihan.A));
+  if (clean === 'A' && hasOptionA) return 'BENAR';
+  if (clean === 'B' && hasOptionB) return 'SALAH';
+  if (clean === 'B' && !soal?.pilihan?.B) return 'BENAR'; // Shorthand "B" = Benar when no option list
+  if (clean === 'A') return 'BENAR';
+
+  return '';
+}
+
+/**
+ * Normalizes and compares Isian Singkat against one or more keys separated by `;` or `|`.
+ */
+export function isShortAnswerMatch(studentAnswer?: string, keyPattern?: string): boolean {
+  const norm = (s: string) => s.trim().toLowerCase().replace(/\s+/g, ' ');
+  const ansNorm = norm(studentAnswer || '');
+  if (!ansNorm) return false;
+  const acceptedVariants = (keyPattern || '')
+    .split(/[;|]/)
+    .map((v) => norm(v))
+    .filter(Boolean);
+  if (acceptedVariants.length === 0) return false;
+  return acceptedVariants.includes(ansNorm);
+}
+
+/**
+ * Checks whether a single question answer is considered correct (`true`), incorrect (`false`), or empty (`null`).
+ */
+export function evaluateSingleQuestionResponse(
+  soal: SoalUjian,
+  ans?: DetailJawabanSiswa
+): { status: 'benar' | 'salah' | 'kosong' | 'perlu_koreksi'; skorDidapat: number; bobot: number } {
+  const bobot = Math.max(0, Number(soal.bobot) || 1);
+  const rawSelected = (ans?.opsiAsliDipilih || ans?.jawabanDipilih || '').trim();
+
+  if (soal.tipe === 'pilihan_ganda') {
+    if (!rawSelected) return { status: 'kosong', skorDidapat: 0, bobot };
+    const cleanKey = (soal.kunciJawaban || '').trim().toUpperCase();
+    if (cleanKey && rawSelected.toUpperCase() === cleanKey) {
+      return { status: 'benar', skorDidapat: bobot, bobot };
+    }
+    return { status: 'salah', skorDidapat: 0, bobot };
+  }
+
+  if (soal.tipe === 'benar_salah') {
+    if (!rawSelected) return { status: 'kosong', skorDidapat: 0, bobot };
+    const normAns = normalizeTrueFalseValue(rawSelected, soal);
+    const normKey = normalizeTrueFalseValue(soal.kunciJawaban, soal);
+    if (normKey && normAns && normAns === normKey) {
+      return { status: 'benar', skorDidapat: bobot, bobot };
+    }
+    return { status: 'salah', skorDidapat: 0, bobot };
+  }
+
+  if (soal.tipe === 'isian_singkat') {
+    if (!rawSelected) return { status: 'kosong', skorDidapat: 0, bobot };
+    if (typeof ans?.nilaiManual === 'number') {
+      const clamped = Math.max(0, Math.min(bobot, ans.nilaiManual));
+      return {
+        status: clamped >= bobot * 0.6 ? 'benar' : 'salah',
+        skorDidapat: clamped,
+        bobot,
+      };
+    }
+    if (isShortAnswerMatch(rawSelected, soal.kunciJawaban)) {
+      return { status: 'benar', skorDidapat: bobot, bobot };
+    }
+    return { status: 'salah', skorDidapat: 0, bobot };
+  }
+
+  // Uraian / Esai (manual teacher grading)
+  if (!ans || !rawSelected) {
+    return { status: 'kosong', skorDidapat: 0, bobot };
+  }
+  if (typeof ans.nilaiManual === 'number') {
+    const clamped = Math.max(0, Math.min(bobot, ans.nilaiManual));
+    return {
+      status: clamped >= bobot * 0.6 ? 'benar' : 'salah',
+      skorDidapat: clamped,
+      bobot,
+    };
+  }
+  return { status: 'perlu_koreksi', skorDidapat: 0, bobot };
+}
 
 /**
  * Deterministic 32-bit FNV-1a string hash.
@@ -125,9 +249,7 @@ export function generateSessionOrderState(
     existingSesi.urutanSoalIds.length > 0 &&
     existingSesi.urutanSoalIds.every((id) => validIdSet.has(id))
   ) {
-    // Keep previously persisted order across browser refreshes
     urutanSoalIds = [...existingSesi.urutanSoalIds];
-    // Append any newly added questions if jumlahSoalTampil is not restricting
     const limit = Number(ujian.jumlahSoalTampil) || 0;
     if (limit === 0) {
       rawQuestions.forEach((q) => {
@@ -150,7 +272,7 @@ export function generateSessionOrderState(
     }
   }
 
-  // 2. Option permutation per question
+  // 2. Option permutation per question (ONLY for Pilihan Ganda)
   const urutanPilihanMap: { [soalId: string]: string[] } = {};
   for (const q of rawQuestions) {
     if (q.tipe !== 'pilihan_ganda') continue;
@@ -213,8 +335,6 @@ export interface DisplayedChoiceItem {
 
 /**
  * Builds the displayed choice list for a single question using its locked permutation.
- * Re-labels choices sequentially A, B, C, D, E on screen while keeping each choice's text,
- * choice image, and originalKey bound together so grading always resolves accurately.
  */
 export function buildDisplayedChoicesForQuestion(
   soal: SoalUjian,
@@ -251,8 +371,7 @@ export interface ExamEvaluationSummary {
 }
 
 /**
- * Grades student answers deterministically using original option IDs (`opsiAsliDipilih || jawabanDipilih`)
- * so shuffled question order and shuffled option order never affect scoring accuracy.
+ * Grades student answers deterministically across Pilihan Ganda, Benar/Salah, Isian Singkat, and Uraian.
  */
 export function evaluateExamSessionScore(
   soalList: SoalUjian[],
@@ -278,41 +397,28 @@ export function evaluateExamSessionScore(
   let totalUraianDinilai = 0;
 
   for (const soal of activeQuestions) {
-    const bobot = Math.max(0, Number(soal.bobot) || 1);
     const ans = jawabanMap?.[soal.id];
-    const selectedOrigKey = (ans?.opsiAsliDipilih || ans?.jawabanDipilih || '').trim();
+    const evalItem = evaluateSingleQuestionResponse(soal, ans);
+    const isObjective = soal.tipe === 'pilihan_ganda' || soal.tipe === 'benar_salah' || soal.tipe === 'isian_singkat';
 
-    if (soal.tipe === 'pilihan_ganda') {
+    if (isObjective) {
       totalPgDinilai++;
-      bobotPgMaks += bobot;
-
-      if (!selectedOrigKey) {
-        jumlahKosong++;
-      } else {
-        const cleanKey = (soal.kunciJawaban || '').trim().toUpperCase();
-        if (cleanKey && selectedOrigKey.toUpperCase() === cleanKey) {
-          skorPgDidapat += bobot;
-          jumlahBenar++;
-        } else {
-          jumlahSalah++;
-        }
-      }
+      bobotPgMaks += evalItem.bobot;
+      skorPgDidapat += evalItem.skorDidapat;
     } else {
       totalUraianDinilai++;
-      bobotUraianMaks += bobot;
+      bobotUraianMaks += evalItem.bobot;
+      skorUraianDidapat += evalItem.skorDidapat;
+    }
 
-      if (!ans || !selectedOrigKey) {
-        jumlahKosong++;
-      } else if (typeof ans.nilaiManual === 'number') {
-        skorUraianDidapat += Math.max(0, Math.min(bobot, ans.nilaiManual));
-        if (ans.nilaiManual >= bobot * 0.6) {
-          jumlahBenar++;
-        } else {
-          jumlahSalah++;
-        }
-      } else {
-        adaUraianBelumDinilai = true;
-      }
+    if (evalItem.status === 'benar') {
+      jumlahBenar++;
+    } else if (evalItem.status === 'salah') {
+      jumlahSalah++;
+    } else if (evalItem.status === 'kosong') {
+      jumlahKosong++;
+    } else if (evalItem.status === 'perlu_koreksi') {
+      adaUraianBelumDinilai = true;
     }
   }
 
@@ -364,6 +470,12 @@ export function checkExamScheduleWindow(
       reason: 'Ujian ini sudah ditutup dan masa pengerjaan telah berakhir.',
     };
   }
+  if (ujian.status === 'terjadwal' && !ujian.tanggalMulai) {
+    return {
+      allowed: false,
+      reason: 'Ujian terjadwal menunggu penentuan waktu mulai oleh Guru.',
+    };
+  }
 
   if (ujian.tanggalMulai) {
     const startMs = new Date(ujian.tanggalMulai).getTime();
@@ -413,4 +525,144 @@ export function sanitizeExamForStudent(ujian: UjianOnline): UjianOnline {
     })),
   };
 }
+
+export interface QuestionItemAnalysis {
+  soalId: string;
+  nomor: number;
+  tipe: TipeSoalUjian;
+  pertanyaanSingkat: string;
+  benarCount: number;
+  salahCount: number;
+  kosongCount: number;
+  totalPeserta: number;
+  persentaseBenar: number;
+  tingkatKesulitan: 'Mudah' | 'Sedang' | 'Sulit';
+}
+
+export interface ExamAnalyticsSummary {
+  totalSiswaTarget: number;
+  pesertaSudahCount: number;
+  pesertaSedangCount: number;
+  pesertaBelumList: Siswa[];
+  rataRata: number;
+  nilaiTertinggi: number;
+  nilaiTerendah: number;
+  jumlahLulusKkm: number;
+  persenKetuntasan: number;
+  analisisButir: QuestionItemAnalysis[];
+}
+
+/**
+ * Computes comprehensive exam results & item difficulty analytics for teacher reporting.
+ */
+export function computeExamAnalytics(
+  exam: UjianOnline | undefined,
+  sessions: SesiUjianSiswa[],
+  allStudents: Siswa[]
+): ExamAnalyticsSummary {
+  if (!exam) {
+    return {
+      totalSiswaTarget: 0,
+      pesertaSudahCount: 0,
+      pesertaSedangCount: 0,
+      pesertaBelumList: [],
+      rataRata: 0,
+      nilaiTertinggi: 0,
+      nilaiTerendah: 0,
+      jumlahLulusKkm: 0,
+      persenKetuntasan: 0,
+      analisisButir: [],
+    };
+  }
+
+  const targetStudents = (allStudents || []).filter((st) =>
+    doesStudentMatchTargetClasses(st.kelas, exam.kelasTarget || [])
+  );
+
+  // Deduplicate latest/best session per student for class stats
+  const latestBySiswa = new Map<string, SesiUjianSiswa>();
+  for (const s of sessions || []) {
+    const key = s.siswaId || s.id;
+    const prev = latestBySiswa.get(key);
+    if (!prev) {
+      latestBySiswa.set(key, s);
+    } else {
+      const prevDone = prev.status === 'selesai' || prev.status === 'waktu_habis';
+      const curDone = s.status === 'selesai' || s.status === 'waktu_habis';
+      if ((curDone && !prevDone) || (s.nilaiAkhir > prev.nilaiAkhir)) {
+        latestBySiswa.set(key, s);
+      }
+    }
+  }
+
+  const dedupedSessions = Array.from(latestBySiswa.values());
+  const completedSessions = dedupedSessions.filter(
+    (s) => s.status === 'selesai' || s.status === 'waktu_habis' || Boolean(s.waktuSelesai)
+  );
+  const inProgressSessions = dedupedSessions.filter(
+    (s) => s.status === 'sedang_mengerjakan' || s.status === 'mengerjakan' || s.status === 'terverifikasi' || s.status === 'terkunci'
+  );
+
+  const participatedSiswaIds = new Set(dedupedSessions.map((s) => s.siswaId));
+  const pesertaBelumList = targetStudents.filter((st) => !participatedSiswaIds.has(st.id));
+
+  const scores = completedSessions.map((s) => Number(s.nilaiAkhir) || 0);
+  const rataRata =
+    scores.length > 0 ? Math.round((scores.reduce((a, b) => a + b, 0) / scores.length) * 10) / 10 : 0;
+  const nilaiTertinggi = scores.length > 0 ? Math.max(...scores) : 0;
+  const nilaiTerendah = scores.length > 0 ? Math.min(...scores) : 0;
+  const jumlahLulusKkm = completedSessions.filter((s) => s.lulusKkm).length;
+  const persenKetuntasan =
+    completedSessions.length > 0 ? Math.round((jumlahLulusKkm / completedSessions.length) * 100) : 0;
+
+  const analisisButir: QuestionItemAnalysis[] = (exam.soalList || []).map((q, idx) => {
+    let benarCount = 0;
+    let salahCount = 0;
+    let kosongCount = 0;
+    let totalExposed = 0;
+
+    for (const s of completedSessions) {
+      if (Array.isArray(s.urutanSoalIds) && s.urutanSoalIds.length > 0 && !s.urutanSoalIds.includes(q.id)) {
+        continue;
+      }
+      totalExposed++;
+      const res = evaluateSingleQuestionResponse(q, s.jawaban?.[q.id]);
+      if (res.status === 'benar') benarCount++;
+      else if (res.status === 'salah') salahCount++;
+      else kosongCount++;
+    }
+
+    const persentaseBenar = totalExposed > 0 ? Math.round((benarCount / totalExposed) * 100) : 0;
+    const tingkatKesulitan: 'Mudah' | 'Sedang' | 'Sulit' =
+      persentaseBenar >= 70 ? 'Mudah' : persentaseBenar >= 30 ? 'Sedang' : 'Sulit';
+
+    const cleanStem = (q.pertanyaan || '').replace(/\s+/g, ' ').trim();
+    return {
+      soalId: q.id,
+      nomor: q.nomor || idx + 1,
+      tipe: q.tipe,
+      pertanyaanSingkat: cleanStem.length > 85 ? `${cleanStem.slice(0, 82)}...` : cleanStem,
+      benarCount,
+      salahCount,
+      kosongCount,
+      totalPeserta: totalExposed,
+      persentaseBenar,
+      tingkatKesulitan,
+    };
+  });
+
+  return {
+    totalSiswaTarget: Math.max(targetStudents.length, dedupedSessions.length),
+    pesertaSudahCount: completedSessions.length,
+    pesertaSedangCount: inProgressSessions.length,
+    pesertaBelumList,
+    rataRata,
+    nilaiTertinggi,
+    nilaiTerendah,
+    jumlahLulusKkm,
+    persenKetuntasan,
+    analisisButir,
+  };
+}
+
 

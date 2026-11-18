@@ -31,7 +31,8 @@ service cloud.firestore {
         'bel_jadwal',
         'exams',
         'exam_sessions',
-        'exam_images'
+        'exam_images',
+        'bank_soal'
       ];
     }
 

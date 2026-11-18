@@ -427,9 +427,11 @@ export interface BahanAjarAI {
 
 // ==================== UJIAN ONLINE / CBT MODULE ====================
 
-export type TipeSoalUjian = 'pilihan_ganda' | 'uraian';
+export type TipeSoalUjian = 'pilihan_ganda' | 'benar_salah' | 'isian_singkat' | 'uraian';
 
 export type ModePengacakanUjian = 'off' | 'sama' | 'per_siswa';
+
+export type TingkatKesulitanSoal = 'mudah' | 'sedang' | 'sulit';
 
 export type KontenElemenSoal =
   | { id: string; tipe: 'teks'; isi: string }
@@ -472,7 +474,7 @@ export interface SoalUjian {
   pilihan?: { [key: string]: string }; // A, B, C, D, E (teks pilihan)
   pilihanGambar?: { [key: string]: string }; // A, B, C, D, E (gambar pilihan)
   pilihanGambarMeta?: { [key: string]: { imageId?: string; storagePath?: string } };
-  kunciJawaban: string; // e.g. "A", "B" atau kata kunci uraian
+  kunciJawaban: string; // e.g. "A", "BENAR", "SALAH", jawaban isian singkat (pisahkan `;` untuk variasi), atau pedoman uraian
   bobot: number; // default 1
   gambar?: string; // Data URI base64 atau storage URL
   gambarId?: string; // ID unik aset gambar di koleksi exam_images
@@ -490,11 +492,44 @@ export interface SoalUjian {
   gambarStatus?: 'ok' | 'warning' | 'error';
   gambarWarning?: string;
   pedomanPenilaian?: string; // Rubrik skor untuk soal uraian
+  pembahasan?: string; // Penjelasan jawaban untuk pembahasan atau Bank Soal
   perluVerifikasi?: boolean;
   catatanVerifikasi?: string;
 }
 
-export type StatusUjian = 'draf' | 'terbit' | 'aktif' | 'selesai' | 'ditutup';
+export interface BankSoalItem {
+  id: string;
+  schoolId?: string;
+  mataPelajaran: string;
+  kelas: string;
+  materi?: string;
+  tingkatKesulitan: TingkatKesulitanSoal;
+  tipe: TipeSoalUjian;
+  pertanyaan: string;
+  kontenElemen?: KontenElemenSoal[];
+  pilihan?: { [key: string]: string };
+  pilihanGambar?: { [key: string]: string };
+  kunciJawaban: string;
+  bobot: number;
+  pembahasan?: string;
+  pedomanPenilaian?: string;
+  gambar?: string;
+  gambarCaption?: string;
+  gambarTambahan?: Array<{
+    url: string;
+    imageId?: string;
+    storagePath?: string;
+    caption?: string;
+    posisi?: 'atas' | 'tengah' | 'bawah';
+  }>;
+  gambarPosisi?: 'atas' | 'tengah' | 'bawah';
+  gambarUkuran?: 'kecil' | 'sedang' | 'besar' | 'asli';
+  dibuatOleh?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type StatusUjian = 'draf' | 'terjadwal' | 'terbit' | 'aktif' | 'selesai' | 'ditutup';
 
 export interface UjianOnline {
   id: string;
@@ -555,6 +590,7 @@ export interface SesiUjianSiswa {
   namaSiswa: string;
   nisn: string;
   kelas: string;
+  attemptNumber?: number;
   sessionToken: string; // Unique URL token
   passCode: string; // 6-digit pairing code (e.g. 482195)
   status: StatusSesiUjian;
@@ -588,66 +624,3 @@ export interface SesiUjianSiswa {
   createdAt: string;
   updatedAt: string;
 }
-
-// ==================== AI PEMBACA SOAL OTOMATIS BERBASIS FILE ====================
-
-export type AiReaderStatusTerbaca = 'terbaca' | 'kurang_jelas' | 'tidak_terbaca';
-export type AiReaderStatusJawaban =
-  | 'belum_dijawab'
-  | 'terjawab'
-  | 'informasi_tidak_cukup'
-  | 'tidak_terbaca';
-
-export interface AiReaderQuestionItem {
-  id: string;
-  nomor: number;
-  nomorTeksAsli?: string;
-  sumberFile: string;
-  halaman?: number;
-  tipe: 'pilihan_ganda' | 'uraian';
-  pertanyaan: string;
-  pilihan?: {
-    A?: string;
-    B?: string;
-    C?: string;
-    D?: string;
-    E?: string;
-    [key: string]: string | undefined;
-  };
-  kunciAsliDokumen?: string;
-  jawaban?: string;
-  pembahasan?: string;
-  langkahMatematika?: string[];
-  statusTerbaca: AiReaderStatusTerbaca;
-  statusJawaban: AiReaderStatusJawaban;
-  catatanPembacaan?: string;
-  mengandungVisual?: boolean;
-  previewGambarDataUri?: string;
-}
-
-export interface AiReaderValidationReport {
-  totalSoal: number;
-  urutanValid: boolean;
-  nomorTerurut: number[];
-  nomorHilang: number[];
-  nomorDuplikat: number[];
-  soalTidakTerbaca: number[];
-  soalInformasiKurang: number[];
-  peringatanHalaman: string[];
-  kesesuaianJawabanIssues: string[];
-}
-
-export interface AiReaderSessionRecord {
-  id: string;
-  schoolId?: string;
-  guruId?: string;
-  guruName?: string;
-  judul: string;
-  namaFiles: string[];
-  soalList: AiReaderQuestionItem[];
-  validation: AiReaderValidationReport;
-  createdAt: string;
-  updatedAt: string;
-}
-
-

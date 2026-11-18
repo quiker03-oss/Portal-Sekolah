@@ -2,8 +2,13 @@ import { db as firestoreDb, doc, setDoc, getDoc, getDocFromServer, deleteDoc, co
 import { getWibDateStr, getWibTimeStr } from '../utils/dateHelper';
 import {
   evaluateExamSessionScore,
+  evaluateSingleQuestionResponse,
   sanitizeExamForStudent,
 } from '../utils/examShuffleAndScore';
+import {
+  mergeExamSessionListMonotonic,
+  mergeExamSessionMonotonic,
+} from '../utils/examSessionResilience';
 import {
   User,
   SekolahInfo,
@@ -36,7 +41,8 @@ import {
   DetailJawabanSiswa,
   LogPelanggaranSesi,
   ExamImageMeta,
-  AiReaderSessionRecord,
+  BankSoalItem,
+  TingkatKesulitanSoal,
 } from '../types';
 
 const STORAGE_KEYS = {
@@ -65,11 +71,11 @@ const STORAGE_KEYS = {
   ACTIVE_SCHOOL_ID: 'sdn2_active_school_id',
   AI_MODUL: 'sdn2_ai_modul',
   AI_MATERI: 'sdn2_ai_materi',
-  AI_SOAL_READER: 'sdn2_ai_soal_reader',
   BEL_JADWAL: 'sdn2_bel_jadwal',
   UJIAN_ONLINE: 'sdn2_ujian_online',
   SESI_UJIAN: 'sdn2_sesi_ujian',
   EXAM_IMAGES: 'sdn2_exam_images',
+  BANK_SOAL: 'sdn2_bank_soal',
 };
 
 // Default school emblem
@@ -954,12 +960,13 @@ class DatabaseService {
     return res;
   }
 
-  private async syncToFirestore(schoolId: string, collectionName: string, item: any): Promise<void> {
-    if (!schoolId || !item || !item.id) return;
+  private async syncToFirestore(schoolId: string, collectionName: string, item: any): Promise<boolean> {
+    if (!schoolId || !item || !item.id) return false;
     const path = `schools/${schoolId}/${collectionName}/${String(item.id)}`;
     try {
       const sanitized = this.sanitizeForFirestore(item);
       await setDoc(doc(firestoreDb, `schools/${schoolId}/${collectionName}`, String(item.id)), sanitized);
+      return true;
     } catch (e: any) {
       const msg = e instanceof Error ? e.message : String(e);
       if (msg.toLowerCase().includes('permission') || msg.toLowerCase().includes('insufficient')) {
@@ -971,6 +978,7 @@ class DatabaseService {
       } else {
         console.error(`[Firestore Sync Error] path=${path}:`, e);
       }
+      return false;
     }
   }
 
@@ -1071,7 +1079,7 @@ class DatabaseService {
           [STORAGE_KEYS.UJIAN_ONLINE]: 'exams',
           [STORAGE_KEYS.SESI_UJIAN]: 'exam_sessions',
           [STORAGE_KEYS.EXAM_IMAGES]: 'exam_images',
-          [STORAGE_KEYS.AI_SOAL_READER]: 'ai_soal_reader',
+          [STORAGE_KEYS.BANK_SOAL]: 'bank_soal',
         }
       : {
           // Public & unauthenticated student sessions NEVER subscribe to 'exams' (kunciJawaban), 'kas', 'nilai', etc.
@@ -1179,26 +1187,53 @@ class DatabaseService {
               }
             }
 
-            this.cache.set(actualKey, list);
+            let finalList = list;
+            if (colName === 'exam_sessions') {
+              let existingLocal: SesiUjianSiswa[] = [];
+              const cached = this.cache.get(actualKey);
+              if (Array.isArray(cached) && cached.length > 0) {
+                existingLocal = cached as SesiUjianSiswa[];
+              } else {
+                try {
+                  const stored = localStorage.getItem(actualKey);
+                  if (stored) existingLocal = JSON.parse(stored);
+                } catch {}
+              }
+
+              if (Array.isArray(existingLocal) && existingLocal.length > 0) {
+                const { mergedList, sessionsNeedingUpload } = mergeExamSessionListMonotonic(
+                  existingLocal,
+                  list as SesiUjianSiswa[]
+                );
+                finalList = mergedList;
+                if (sessionsNeedingUpload.length > 0 && typeof navigator !== 'undefined' && navigator.onLine) {
+                  sessionsNeedingUpload.forEach((sess) => {
+                    this.syncToFirestore(schoolId, 'exam_sessions', sess).catch(() => false);
+                  });
+                }
+              }
+            }
+
+            this.cache.set(actualKey, finalList);
             try {
-              localStorage.setItem(actualKey, JSON.stringify(list));
+              localStorage.setItem(actualKey, JSON.stringify(finalList));
             } catch (e) {
               console.error('Storage error:', e);
             }
             window.dispatchEvent(new Event(`data_${colName}_changed`));
 
             if (colName === 'bel_jadwal') {
-              window.dispatchEvent(new CustomEvent('bel_jadwal_updated', { detail: list }));
+              window.dispatchEvent(new CustomEvent('bel_jadwal_updated', { detail: finalList }));
               window.dispatchEvent(new Event('bel_jadwal_updated'));
             }
             if (colName === 'exams') {
-              window.dispatchEvent(new CustomEvent('ujian_online_updated', { detail: list }));
+              window.dispatchEvent(new CustomEvent('ujian_online_updated', { detail: finalList }));
             }
             if (colName === 'exam_sessions') {
-              window.dispatchEvent(new CustomEvent('sesi_ujian_updated', { detail: list }));
+              window.dispatchEvent(new CustomEvent('sesi_ujian_updated', { detail: finalList }));
             }
-            if (colName === 'ai_soal_reader') {
-              window.dispatchEvent(new CustomEvent('ai_soal_reader_updated', { detail: list }));
+            if (colName === 'bank_soal') {
+              window.dispatchEvent(new CustomEvent('bank_soal_updated', { detail: finalList }));
             }
           },
           (err) => {
@@ -1315,7 +1350,7 @@ class DatabaseService {
       const arrayCollections = new Set([
         'absensi_siswa', 'absensi_guru', 'kas', 'siswa', 'guru', 'kelas', 'mapel',
         'nilai', 'nilai_harian', 'catatan_rapor', 'pengumuman', 'berita', 'galeri',
-        'users', 'bel_jadwal', 'exams', 'exam_sessions', 'exam_images', 'ai_modul', 'ai_materi', 'ai_soal_reader'
+        'users', 'bel_jadwal', 'exams', 'exam_sessions', 'exam_images', 'ai_modul', 'ai_materi', 'bank_soal'
       ]);
       if (arrayCollections.has(colName) && Array.isArray(value)) {
         const prevList = Array.isArray(previous) ? previous : [];
@@ -1417,7 +1452,7 @@ class DatabaseService {
          }
       }
 
-    if (colName === 'absensi_siswa' || colName === 'kas' || colName === 'siswa' || colName === 'guru' || colName === 'kelas' || colName === 'mapel' || colName === 'nilai' || colName === 'nilai_harian' || colName === 'catatan_rapor' || colName === 'pengumuman' || colName === 'berita' || colName === 'galeri' || colName === 'users' || colName === 'school_accounts' || colName === 'bel_jadwal' || colName === 'exams' || colName === 'exam_sessions' || colName === 'exam_images' || colName === 'ai_soal_reader') {
+    if (colName === 'absensi_siswa' || colName === 'kas' || colName === 'siswa' || colName === 'guru' || colName === 'kelas' || colName === 'mapel' || colName === 'nilai' || colName === 'nilai_harian' || colName === 'catatan_rapor' || colName === 'pengumuman' || colName === 'berita' || colName === 'galeri' || colName === 'users' || colName === 'school_accounts' || colName === 'bel_jadwal' || colName === 'exams' || colName === 'exam_sessions' || colName === 'exam_images' || colName === 'bank_soal') {
       if (Array.isArray(value)) {
         const previous = (this.cache.get(actualKey) as any[]) || [];
         
@@ -3395,50 +3430,6 @@ class DatabaseService {
     window.dispatchEvent(new CustomEvent('ai_materi_updated', { detail: updated }));
   }
 
-  // ==================== AI PEMBACA SOAL OTOMATIS ====================
-
-  getAiReaderSessions(): AiReaderSessionRecord[] {
-    const list = this.getItem<AiReaderSessionRecord[]>(STORAGE_KEYS.AI_SOAL_READER, []);
-    return [...list].sort(
-      (a, b) => new Date(b.updatedAt || b.createdAt).getTime() - new Date(a.updatedAt || a.createdAt).getTime()
-    );
-  }
-
-  saveAiReaderSession(session: AiReaderSessionRecord): AiReaderSessionRecord {
-    const list = this.getItem<AiReaderSessionRecord[]>(STORAGE_KEYS.AI_SOAL_READER, []);
-    const activeSchoolId = this.getActiveSchoolId();
-    const now = new Date().toISOString();
-    const prepared: AiReaderSessionRecord = {
-      ...session,
-      schoolId: session.schoolId || activeSchoolId,
-      createdAt: session.createdAt || now,
-      updatedAt: now,
-    };
-
-    const existingIdx = list.findIndex((s) => s.id === prepared.id);
-    let updated: AiReaderSessionRecord[];
-    if (existingIdx >= 0) {
-      updated = [...list];
-      updated[existingIdx] = prepared;
-    } else {
-      updated = [prepared, ...list];
-    }
-
-    this.setItem(STORAGE_KEYS.AI_SOAL_READER, updated);
-    window.dispatchEvent(new CustomEvent('ai_soal_reader_updated', { detail: updated }));
-    return prepared;
-  }
-
-  deleteAiReaderSession(id: string): void {
-    const list = this.getItem<AiReaderSessionRecord[]>(STORAGE_KEYS.AI_SOAL_READER, []);
-    const target = list.find((s) => s.id === id);
-    const updated = list.filter((s) => s.id !== id);
-    this.setItem(STORAGE_KEYS.AI_SOAL_READER, updated);
-    const schoolId = target?.schoolId || this.getActiveSchoolId();
-    this.deleteFromFirestore(schoolId, 'ai_soal_reader', id).catch(() => {});
-    window.dispatchEvent(new CustomEvent('ai_soal_reader_updated', { detail: updated }));
-  }
-
   // ==================== UJIAN ONLINE / CBT METHODS ====================
 
   getUjianList(): UjianOnline[] {
@@ -3514,10 +3505,25 @@ class DatabaseService {
       try {
         const params = new URLSearchParams({ id: examId });
         if (preferredSchoolId) params.set('school', preferredSchoolId);
+        const reqStartPerfMs = typeof performance !== 'undefined' ? performance.now() : 0;
         const resp = await fetch(`/api/ujian/exam?${params.toString()}`);
+        const reqEndPerfMs = typeof performance !== 'undefined' ? performance.now() : 0;
+        const reqEndClientMs = Date.now();
         if (resp.ok) {
           const json = await resp.json().catch(() => null);
           if (json?.success && json?.exam) {
+            if (typeof json.serverTimeMs === 'number' && typeof window !== 'undefined') {
+              window.dispatchEvent(
+                new CustomEvent('ujian_server_time_sync', {
+                  detail: {
+                    serverTimeMs: json.serverTimeMs,
+                    reqStartPerfMs,
+                    reqEndPerfMs,
+                    reqEndClientMs,
+                  },
+                })
+              );
+            }
             const sanitizedExam = this.sanitizeExamForStudent(json.exam as UjianOnline);
             const resolvedSchoolId = json.schoolId || sanitizedExam.schoolId || preferredSchoolId || this.getActiveSchoolId();
             await this.hydrateSchoolForStudentExam(resolvedSchoolId);
@@ -3618,14 +3624,16 @@ class DatabaseService {
       if (foundSesi) {
         await this.resolveExamFromFirestore(foundSesi.ujianId, foundSchoolId);
         const currentSessions = this.getSesiUjianList();
-        const merged = currentSessions.some((s) => s.id === foundSesi!.id)
-          ? currentSessions.map((s) => (s.id === foundSesi!.id ? foundSesi! : s))
-          : [foundSesi, ...currentSessions];
+        const existingLocal = currentSessions.find((s) => s.id === foundSesi!.id);
+        const reconciled = mergeExamSessionMonotonic(existingLocal, foundSesi);
+        const merged = existingLocal
+          ? currentSessions.map((s) => (s.id === reconciled.id ? reconciled : s))
+          : [reconciled, ...currentSessions];
         this.setItem(STORAGE_KEYS.SESI_UJIAN, merged, false);
         if (typeof window !== 'undefined') {
           window.dispatchEvent(new CustomEvent('sesi_ujian_updated', { detail: merged }));
         }
-        return foundSesi;
+        return reconciled;
       }
     } catch (err) {
       console.warn('resolveSessionFromFirestore warning:', err);
@@ -3798,34 +3806,71 @@ class DatabaseService {
     );
   }
 
-  getSesiBySiswaAndUjian(ujianId: string, siswaId: string): SesiUjianSiswa | undefined {
-    return this.getSesiUjianList(ujianId).find((s) => s.siswaId === siswaId);
+  getSesiListBySiswaAndUjian(ujianId: string, siswaId: string): SesiUjianSiswa[] {
+    return this.getSesiUjianList(ujianId)
+      .filter((s) => s.siswaId === siswaId)
+      .sort((a, b) => {
+        const attA = Number(a.attemptNumber) || 1;
+        const attB = Number(b.attemptNumber) || 1;
+        if (attA !== attB) return attB - attA;
+        return (b.updatedAt || '').localeCompare(a.updatedAt || '');
+      });
   }
 
-  async saveSesiUjian(sesi: SesiUjianSiswa): Promise<SesiUjianSiswa> {
+  getSesiBySiswaAndUjian(ujianId: string, siswaId: string): SesiUjianSiswa | undefined {
+    const attempts = this.getSesiListBySiswaAndUjian(ujianId, siswaId);
+    if (attempts.length === 0) return undefined;
+    const active = attempts.find((s) => s.status === 'terverifikasi' || s.status === 'sedang_mengerjakan');
+    return active || attempts[0];
+  }
+
+  saveSesiUjianLocal(sesi: SesiUjianSiswa): SesiUjianSiswa {
     const list = this.getSesiUjianList();
     const activeSchoolId = this.getActiveSchoolId();
+    const existing = list.find((s) => s.id === sesi.id);
+    const base = existing ? mergeExamSessionMonotonic(sesi, existing) : sesi;
+    // Prefer caller's latest status/jawaban/waktuMulai explicitly over stale cache
     const prepared: SesiUjianSiswa = {
+      ...base,
       ...sesi,
+      jawaban: mergeExamSessionMonotonic(existing, sesi).jawaban,
       schoolId: sesi.schoolId || activeSchoolId,
       updatedAt: new Date().toISOString(),
       terakhirAktif: new Date().toISOString(),
     };
 
     const idx = list.findIndex((s) => s.id === sesi.id);
-    let updated: SesiUjianSiswa[];
-    if (idx >= 0) {
-      updated = [...list];
-      updated[idx] = prepared;
-    } else {
-      updated = [prepared, ...list];
-    }
+    const updated =
+      idx >= 0 ? list.map((s, i) => (i === idx ? prepared : s)) : [prepared, ...list];
 
     this.setItem(STORAGE_KEYS.SESI_UJIAN, updated);
-    this.syncToFirestore(prepared.schoolId || activeSchoolId, "exam_sessions", prepared).catch(() => {});
     if (typeof window !== 'undefined') {
-      window.dispatchEvent(new CustomEvent("sesi_ujian_updated", { detail: updated }));
+      window.dispatchEvent(new CustomEvent('sesi_ujian_updated', { detail: updated }));
     }
+    return prepared;
+  }
+
+  async syncSesiUjianToCloud(sesiOrId: SesiUjianSiswa | string, timeoutMs = 8000): Promise<boolean> {
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      return false;
+    }
+    const target = typeof sesiOrId === 'string' ? this.getSesiById(sesiOrId) : sesiOrId;
+    if (!target || !target.id) return false;
+    const schoolId = target.schoolId || this.getActiveSchoolId();
+    try {
+      const ok = await Promise.race<boolean>([
+        this.syncToFirestore(schoolId, 'exam_sessions', target),
+        new Promise<boolean>((resolve) => setTimeout(() => resolve(false), timeoutMs)),
+      ]);
+      return ok;
+    } catch {
+      return false;
+    }
+  }
+
+  async saveSesiUjian(sesi: SesiUjianSiswa): Promise<SesiUjianSiswa> {
+    const prepared = this.saveSesiUjianLocal(sesi);
+    this.syncToFirestore(prepared.schoolId || this.getActiveSchoolId(), 'exam_sessions', prepared).catch(() => false);
     return prepared;
   }
 
@@ -3862,28 +3907,46 @@ class DatabaseService {
     };
   }
 
-  async createOrGetSesiUjian(ujianInput: UjianOnline | string, siswa: Siswa): Promise<SesiUjianSiswa> {
+  async createOrGetSesiUjian(
+    ujianInput: UjianOnline | string,
+    siswa: Siswa,
+    options?: { forceNewAttempt?: boolean }
+  ): Promise<SesiUjianSiswa> {
     const ujian = typeof ujianInput === 'string' ? this.getUjianById(ujianInput) : ujianInput;
     if (!ujian) {
       throw new Error('Naskah ujian tidak ditemukan dalam sistem.');
     }
-    const existing = this.getSesiBySiswaAndUjian(ujian.id, siswa.id);
-    if (existing) {
-      return existing;
+    const attempts = this.getSesiListBySiswaAndUjian(ujian.id, siswa.id);
+    const activeSession = attempts.find(
+      (s) => s.status === 'terverifikasi' || s.status === 'sedang_mengerjakan'
+    );
+    if (activeSession) {
+      return activeSession;
     }
 
+    const maxAttempts = Math.max(1, Number(ujian.jumlahPercobaan) || 1);
+    if (attempts.length > 0 && (!options?.forceNewAttempt || attempts.length >= maxAttempts)) {
+      return attempts[0];
+    }
+
+    const nextAttempt = attempts.length + 1;
     // Generate unique 6-digit access code (e.g. 749215)
     const passCode = Math.floor(100000 + Math.random() * 900000).toString();
-    const token = `cbt_${ujian.id}_${siswa.id}_${Date.now()}`;
+    const token = `cbt_${ujian.id}_${siswa.id}_a${nextAttempt}_${Date.now()}`;
+    const sessionId =
+      nextAttempt === 1
+        ? `sesi_${ujian.id}_${siswa.id}`
+        : `sesi_${ujian.id}_${siswa.id}_att_${nextAttempt}`;
 
     const newSession: SesiUjianSiswa = {
-      id: `sesi_${ujian.id}_${siswa.id}`,
+      id: sessionId,
       schoolId: ujian.schoolId || this.getActiveSchoolId(),
       ujianId: ujian.id,
       siswaId: siswa.id,
       namaSiswa: siswa.namaLengkap,
       nisn: siswa.nisn || "",
       kelas: siswa.kelas || "",
+      attemptNumber: nextAttempt,
       sessionToken: token,
       passCode,
       status: "terverifikasi",
@@ -3906,11 +3969,11 @@ class DatabaseService {
     return await this.saveSesiUjian(newSession);
   }
 
-  async saveJawabanSiswa(
+  saveJawabanSiswaLocalSync(
     sessionId: string,
     soalId: string,
     detail: DetailJawabanSiswa
-  ): Promise<SesiUjianSiswa | undefined> {
+  ): SesiUjianSiswa | undefined {
     const sesi = this.getSesiById(sessionId);
     if (!sesi) return undefined;
     if (sesi.status === "selesai" || sesi.status === "terkunci") return sesi;
@@ -3919,7 +3982,6 @@ class DatabaseService {
     const incomingTs = Number(detail.clientUpdatedAt) || Date.now();
     const existingTs = Number(existingAns?.clientUpdatedAt) || 0;
     if (existingAns && existingTs > incomingTs) {
-      // Ignore stale out-of-order autosave
       return sesi;
     }
 
@@ -3928,26 +3990,39 @@ class DatabaseService {
       [soalId]: {
         ...detail,
         clientUpdatedAt: incomingTs,
-        waktuJawab: new Date().toISOString(),
+        waktuJawab: detail.waktuJawab || new Date(incomingTs).toISOString(),
       },
     };
 
-    // Student browser never runs final score calculation mid-exam (authoritative grading is on backend /api/ujian/submit)
     const updatedSesi: SesiUjianSiswa = {
       ...sesi,
       status: sesi.status === "terverifikasi" ? "sedang_mengerjakan" : sesi.status,
-      waktuMulai: sesi.waktuMulai || new Date().toISOString(),
+      waktuMulai: sesi.waktuMulai || new Date(incomingTs).toISOString(),
       jawaban: updatedJawaban,
       terakhirAktif: new Date().toISOString(),
     };
 
-    return await this.saveSesiUjian(updatedSesi);
+    return this.saveSesiUjianLocal(updatedSesi);
+  }
+
+  async saveJawabanSiswa(
+    sessionId: string,
+    soalId: string,
+    detail: DetailJawabanSiswa
+  ): Promise<SesiUjianSiswa | undefined> {
+    const updatedSesi = this.saveJawabanSiswaLocalSync(sessionId, soalId, detail);
+    if (!updatedSesi) return undefined;
+    if (updatedSesi.status === "selesai" || updatedSesi.status === "terkunci") {
+      return updatedSesi;
+    }
+    this.syncToFirestore(updatedSesi.schoolId || this.getActiveSchoolId(), "exam_sessions", updatedSesi).catch(() => false);
+    return updatedSesi;
   }
 
   async submitUjianKeBackend(sessionId: string): Promise<{
     sesi?: SesiUjianSiswa;
     syncedToServer: boolean;
-    pembahasanMap?: Record<string, { kunciJawaban?: string; benar?: boolean }>;
+    pembahasanMap?: Record<string, { kunciJawaban?: string; benar?: boolean; pembahasan?: string }>;
   }> {
     const sesi = this.getSesiById(sessionId);
     if (!sesi) return { syncedToServer: false };
@@ -4014,7 +4089,11 @@ class DatabaseService {
     // 3. Offline / unreachable fallback: if local exam actually contains keys (e.g. teacher simulation), grade locally
     const ujian = this.getUjianById(sesi.ujianId);
     const hasKeysLocally = Boolean(
-      ujian?.soalList?.some((q) => q.tipe === "pilihan_ganda" && Boolean(q.kunciJawaban?.trim()))
+      ujian?.soalList?.some(
+        (q) =>
+          (q.tipe === "pilihan_ganda" || q.tipe === "benar_salah" || q.tipe === "isian_singkat") &&
+          Boolean(q.kunciJawaban?.trim())
+      )
     );
     if (ujian && hasKeysLocally) {
       const calc = this.hitungNilaiSesi(ujian, localPending.jawaban, localPending.urutanSoalIds);
@@ -4024,7 +4103,21 @@ class DatabaseService {
         gradedBy: "local",
         gradedAt: now.toISOString(),
       });
-      return { sesi: saved, syncedToServer: false };
+      const localPembahasanMap =
+        Boolean(ujian.tampilkanPembahasan) && Boolean(ujian.tampilkanNilaiLangsung)
+          ? (ujian.soalList || []).reduce((acc, q) => {
+              const evalRes = evaluateSingleQuestionResponse(q, localPending.jawaban?.[q.id]);
+              const isObj =
+                q.tipe === "pilihan_ganda" || q.tipe === "benar_salah" || q.tipe === "isian_singkat";
+              acc[q.id] = {
+                kunciJawaban: isObj ? q.kunciJawaban : undefined,
+                benar: isObj && Boolean(q.kunciJawaban) ? evalRes.status === "benar" : undefined,
+                pembahasan: q.pembahasan || undefined,
+              };
+              return acc;
+            }, {} as Record<string, { kunciJawaban?: string; benar?: boolean; pembahasan?: string }>)
+          : undefined;
+      return { sesi: saved, syncedToServer: false, pembahasanMap: localPembahasanMap };
     }
 
     return { sesi: localPending, syncedToServer: false };
@@ -4102,6 +4195,99 @@ class DatabaseService {
     };
 
     return await this.saveSesiUjian(updated);
+  }
+
+  // ==================== BANK SOAL METHODS ====================
+  getBankSoalList(): BankSoalItem[] {
+    const list = this.getItem<BankSoalItem[]>(STORAGE_KEYS.BANK_SOAL, []);
+    return [...list].sort((a, b) => (b.updatedAt || '').localeCompare(a.updatedAt || ''));
+  }
+
+  async saveBankSoalItem(
+    item: Omit<BankSoalItem, 'id' | 'schoolId' | 'createdAt' | 'updatedAt'> & { id?: string; createdAt?: string }
+  ): Promise<BankSoalItem> {
+    const list = this.getBankSoalList();
+    const schoolId = this.getActiveSchoolId();
+    const now = new Date().toISOString();
+    const prepared: BankSoalItem = {
+      ...item,
+      id: item.id || `bank_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+      schoolId,
+      createdAt: item.createdAt || now,
+      updatedAt: now,
+    };
+
+    const idx = list.findIndex((b) => b.id === prepared.id);
+    const updated = idx >= 0
+      ? list.map((b, i) => (i === idx ? prepared : b))
+      : [prepared, ...list];
+
+    this.setItem(STORAGE_KEYS.BANK_SOAL, updated);
+    this.syncToFirestore(schoolId, 'bank_soal', prepared).catch(() => {});
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('bank_soal_updated', { detail: updated }));
+    }
+    return prepared;
+  }
+
+  async saveBulkToBankSoal(
+    soalList: SoalUjian[],
+    meta: {
+      mataPelajaran: string;
+      kelas: string;
+      materi?: string;
+      tingkatKesulitan?: TingkatKesulitanSoal;
+      dibuatOleh?: string;
+    }
+  ): Promise<BankSoalItem[]> {
+    const now = new Date().toISOString();
+    const schoolId = this.getActiveSchoolId();
+    const existing = this.getBankSoalList();
+    const created: BankSoalItem[] = soalList.map((s, idx) => ({
+      id: `bank_${Date.now()}_${idx + 1}_${Math.random().toString(36).slice(2, 5)}`,
+      schoolId,
+      mataPelajaran: meta.mataPelajaran || 'Umum',
+      kelas: meta.kelas || 'Semua Kelas',
+      materi: meta.materi || '',
+      tingkatKesulitan: meta.tingkatKesulitan || 'sedang',
+      tipe: s.tipe,
+      pertanyaan: s.pertanyaan,
+      kontenElemen: s.kontenElemen,
+      pilihan: s.pilihan,
+      pilihanGambar: s.pilihanGambar,
+      kunciJawaban: s.kunciJawaban,
+      bobot: s.bobot,
+      pembahasan: s.pembahasan,
+      pedomanPenilaian: s.pedomanPenilaian,
+      gambar: s.gambar,
+      gambarCaption: s.gambarCaption,
+      gambarTambahan: s.gambarTambahan,
+      gambarPosisi: s.gambarPosisi,
+      gambarUkuran: s.gambarUkuran,
+      dibuatOleh: meta.dibuatOleh,
+      createdAt: now,
+      updatedAt: now,
+    }));
+
+    const updated = [...created, ...existing];
+    this.setItem(STORAGE_KEYS.BANK_SOAL, updated);
+    created.forEach((entry) => {
+      this.syncToFirestore(schoolId, 'bank_soal', entry).catch(() => {});
+    });
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('bank_soal_updated', { detail: updated }));
+    }
+    return created;
+  }
+
+  deleteBankSoalItem(id: string): void {
+    const schoolId = this.getActiveSchoolId();
+    const updated = this.getBankSoalList().filter((b) => b.id !== id);
+    this.setItem(STORAGE_KEYS.BANK_SOAL, updated);
+    this.deleteFromFirestore(schoolId, 'bank_soal', id).catch(() => {});
+    if (typeof window !== 'undefined') {
+      window.dispatchEvent(new CustomEvent('bank_soal_updated', { detail: updated }));
+    }
   }
 }
 

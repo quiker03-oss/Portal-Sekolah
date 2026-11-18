@@ -1,8 +1,6 @@
 import {
   getGeminiApiKey,
   parseExamDocumentWithGemini,
-  readQuestionsForAiReaderWithGemini,
-  answerQuestionsForAiReaderWithGemini,
 } from "./_lib/geminiBackend.ts";
 import { getSafeKeyDiagnostics, logBackendError } from "./_lib/diagnosticHelper.ts";
 import {
@@ -224,50 +222,6 @@ export default async function handler(req: any, res: any) {
         return res.status(404).json(result);
       }
       return res.status(200).json(result);
-    }
-
-    if (pathname === "/ai-reader/read") {
-      if (req.method !== "POST") {
-        return res.status(405).json({ success: false, error: "Metode request harus POST." });
-      }
-      if (!getGeminiApiKey()) {
-        return res.status(503).json({
-          success: false,
-          error: "GEMINI_API_KEY belum dikonfigurasi pada server.",
-        });
-      }
-      const { fileBase64, fileName = "dokumen-soal", mimeType, text, pages, chunkLabel } =
-        body && typeof body === "object" ? body : {};
-      const result = await readQuestionsForAiReaderWithGemini({
-        text: typeof text === "string" && text.trim() ? text : undefined,
-        fileBase64: typeof fileBase64 === "string" && fileBase64.trim() ? fileBase64 : undefined,
-        mimeType: typeof mimeType === "string" ? mimeType.trim().toLowerCase() : undefined,
-        fileName: typeof fileName === "string" && fileName.trim() ? fileName.trim() : "dokumen-soal",
-        pages: Array.isArray(pages) && pages.length > 0 ? pages : undefined,
-        chunkLabel: typeof chunkLabel === "string" ? chunkLabel : undefined,
-      });
-      return res.status(200).json({ success: true, data: result });
-    }
-
-    if (pathname === "/ai-reader/answer") {
-      if (req.method !== "POST") {
-        return res.status(405).json({ success: false, error: "Metode request harus POST." });
-      }
-      if (!getGeminiApiKey()) {
-        return res.status(503).json({
-          success: false,
-          error: "GEMINI_API_KEY belum dikonfigurasi pada server.",
-        });
-      }
-      const { questions, pageImages } = body && typeof body === "object" ? body : {};
-      if (!Array.isArray(questions) || questions.length === 0) {
-        return res.status(400).json({ success: false, error: "Daftar soal kosong." });
-      }
-      const result = await answerQuestionsForAiReaderWithGemini({
-        questions,
-        pageImages: Array.isArray(pageImages) && pageImages.length > 0 ? pageImages : undefined,
-      });
-      return res.status(200).json({ success: true, data: result });
     }
 
     return res.status(404).json({

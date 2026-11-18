@@ -17,6 +17,7 @@ import type {
 import {
   checkExamScheduleWindow,
   evaluateExamSessionScore,
+  evaluateSingleQuestionResponse,
   sanitizeExamForStudent,
 } from "../../src/utils/examShuffleAndScore.ts";
 
@@ -266,18 +267,27 @@ export async function submitAndGradeExamOnBackend(payload: BackendSubmitPayload)
   }
 
   // Only include answer-key review if teacher explicitly enabled tampilkanPembahasan AND student finished
-  const pembahasanMap: Record<string, { kunciJawaban?: string; benar?: boolean }> | undefined =
+  const pembahasanMap:
+    | Record<string, { kunciJawaban?: string; benar?: boolean; pembahasan?: string }>
+    | undefined =
     Boolean(exam.tampilkanPembahasan) && Boolean(exam.tampilkanNilaiLangsung)
       ? (exam.soalList || []).reduce((acc, q) => {
           const ans = mergedJawaban[q.id];
-          const chosen = (ans?.opsiAsliDipilih || ans?.jawabanDipilih || "").trim().toUpperCase();
-          const key = (q.kunciJawaban || "").trim().toUpperCase();
+          const evalRes = evaluateSingleQuestionResponse(q, ans);
+          const isObjective =
+            q.tipe === "pilihan_ganda" ||
+            q.tipe === "benar_salah" ||
+            q.tipe === "isian_singkat";
           acc[q.id] = {
-            kunciJawaban: q.tipe === "pilihan_ganda" ? key : undefined,
-            benar: q.tipe === "pilihan_ganda" && Boolean(key) ? chosen === key : undefined,
+            kunciJawaban: isObjective ? q.kunciJawaban : undefined,
+            benar:
+              isObjective && Boolean(q.kunciJawaban)
+                ? evalRes.status === "benar"
+                : undefined,
+            pembahasan: q.pembahasan || undefined,
           };
           return acc;
-        }, {} as Record<string, { kunciJawaban?: string; benar?: boolean }>)
+        }, {} as Record<string, { kunciJawaban?: string; benar?: boolean; pembahasan?: string }>)
       : undefined;
 
   return {

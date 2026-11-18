@@ -137,6 +137,27 @@
         "updatedAt": { "type": "string" }
       },
       "required": ["id", "judul", "createdAt"]
+    },
+    "BankSoalItem": {
+      "title": "BankSoalItem",
+      "description": "Reusable school question bank item categorized by subject, class, topic, and difficulty",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string" },
+        "schoolId": { "type": "string" },
+        "mataPelajaran": { "type": "string" },
+        "kelas": { "type": "string" },
+        "materi": { "type": "string" },
+        "tingkatKesulitan": { "type": "string", "enum": ["mudah", "sedang", "sulit"] },
+        "tipe": { "type": "string", "enum": ["pilihan_ganda", "benar_salah", "isian_singkat", "uraian"] },
+        "pertanyaan": { "type": "string" },
+        "kunciJawaban": { "type": "string" },
+        "bobot": { "type": "number" },
+        "dibuatOleh": { "type": "string" },
+        "createdAt": { "type": "string" },
+        "updatedAt": { "type": "string" }
+      },
+      "required": ["id", "mataPelajaran", "kelas", "tingkatKesulitan", "tipe", "pertanyaan", "createdAt"]
     }
   },
   "firestore": {
@@ -179,6 +200,10 @@
     "/schools/{schoolId}/ai_soal_reader/{readerId}": {
       "schema": { "$ref": "#/entities/AiSoalReaderSession" },
       "description": "Saved AI automatic question reader sessions"
+    },
+    "/schools/{schoolId}/bank_soal/{bankId}": {
+      "schema": { "$ref": "#/entities/BankSoalItem" },
+      "description": "Curated reusable school question bank items"
     }
   }
 }

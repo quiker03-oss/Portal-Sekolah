@@ -1,7 +1,8 @@
 import mammoth from 'mammoth';
 import JSZip from 'jszip';
 import * as XLSX from 'xlsx';
-import { KontenElemenSoal, SoalUjian } from '../types';
+import { KontenElemenSoal, SoalUjian, TipeSoalUjian } from '../types';
+import { normalizeTrueFalseValue } from '../utils/examShuffleAndScore';
 import {
   extractEmbeddedChoicesFromStem,
   isLikelyExamInstructionLine,
@@ -19,7 +20,7 @@ export interface ExtractedImageAsset {
   url: string;
   label: string;
   pageNumber?: number;
-  source: 'docx' | 'pdf' | 'pdf-page';
+  source: 'docx' | 'pdf' | 'pdf-page' | 'clipboard';
 }
 
 export interface ParseDocumentResult {
@@ -360,13 +361,30 @@ function pdfImageObjToDataUrl(imgObj: any): string | null {
   return null;
 }
 
+function isGarbledPdfText(text: string): boolean {
+  const clean = text.replace(/\s+/g, '');
+  if (!clean) return false;
+  const replacementChars = (clean.match(/\uFFFD/g) || []).length;
+  const cidTokens = (text.match(/\bcid:\d+\b/gi) || []).length;
+  return replacementChars / clean.length > 0.12 || cidTokens >= 3;
+}
+
 /**
- * Reconstructs clean reading-order lines from PDF.js textContent items using Y/X coordinates.
+ * Reconstructs clean reading-order lines from PDF.js textContent items using Y/X coordinates and width gaps.
  * Automatically detects true 2-column exam pages (numbered questions on both left and right halves)
  * while preserving side-by-side choices (A./B. and C./D.) on single-column exams.
  */
 function buildPdfPageText(items: any[]): string {
-  const positioned: Array<{ str: string; x: number; y: number; hasEOL: boolean }> = [];
+  interface PdfItemPos {
+    str: string;
+    x: number;
+    y: number;
+    w: number;
+    h: number;
+    hasEOL: boolean;
+  }
+
+  const positioned: PdfItemPos[] = [];
   let minX = Infinity;
   let maxX = -Infinity;
 
@@ -375,45 +393,89 @@ function buildPdfPageText(items: any[]): string {
     const str = String(item.str || '');
     const x = Array.isArray(item.transform) ? Number(item.transform[4]) || 0 : 0;
     const y = Array.isArray(item.transform) ? Number(item.transform[5]) || 0 : 0;
+    const rawH = Math.abs(
+      Number(item.height) ||
+        (Array.isArray(item.transform) ? Number(item.transform[0]) || Number(item.transform[3]) : 11) ||
+        11
+    );
+    const h = rawH >= 4 && rawH <= 72 ? rawH : 11;
+    const w = Math.max(0, Number(item.width) || 0);
+
     if (str.trim()) {
       if (x < minX) minX = x;
-      if (x > maxX) maxX = x;
+      const rightEdge = Math.max(x, x + w);
+      if (rightEdge > maxX) maxX = rightEdge;
     }
     positioned.push({
       str,
       x,
       y,
+      w,
+      h,
       hasEOL: Boolean(item.hasEOL),
     });
   }
 
   if (positioned.length === 0) return '';
 
-  const collapseRows = (subset: Array<{ str: string; x: number; y: number; hasEOL: boolean }>): string[] => {
-    // Sort top-to-bottom (higher PDF Y = higher on page), then left-to-right
+  const collapseRows = (subset: PdfItemPos[]): string[] => {
     const sorted = [...subset].sort((a, b) => {
-      if (Math.abs(b.y - a.y) > 4) return b.y - a.y;
+      const tol = Math.max(3.5, Math.min(5.5, ((a.h + b.h) / 2) * 0.42));
+      if (Math.abs(b.y - a.y) > tol) return b.y - a.y;
       return a.x - b.x;
     });
 
     const lines: string[] = [];
     let currentRowY: number | null = null;
-    let rowItems: Array<{ str: string; x: number }> = [];
+    let currentRowTol = 4.2;
+    let rowItems: PdfItemPos[] = [];
 
     const flushRow = () => {
       if (rowItems.length === 0) return;
       rowItems.sort((a, b) => a.x - b.x);
-      // Emit standalone image items cleanly while keeping inline option images attached where helpful
-      const textParts: string[] = [];
+      const textItems: PdfItemPos[] = [];
       const imgParts: string[] = [];
       for (const item of rowItems) {
         if (item.str.includes('[[IMAGE_DATA:')) {
           imgParts.push(item.str.trim());
-        } else {
-          textParts.push(item.str);
+        } else if (item.str.length > 0) {
+          textItems.push(item);
         }
       }
-      const joinedText = textParts.join(' ').replace(/[ \t]+/g, ' ').trim();
+
+      let joinedText = '';
+      let prevEndX: number | null = null;
+      let prevEndsSpace = true;
+
+      for (const item of textItems) {
+        const chunk = item.str;
+        if (!chunk) continue;
+        const refSize = Math.max(7.5, Math.min(18, item.h || 11));
+
+        if (!joinedText) {
+          joinedText = chunk;
+        } else if (prevEndX !== null) {
+          const gap = item.x - prevEndX;
+          const currStartsSpace = /^\s/.test(chunk);
+          if (prevEndsSpace || currStartsSpace || gap <= refSize * 0.18) {
+            joinedText += chunk;
+          } else if (gap >= refSize * 1.6) {
+            // Preserve column separation for side-by-side choices (A. ...   B. ...)
+            joinedText += '   ' + chunk.trimStart();
+          } else {
+            joinedText += ' ' + chunk.trimStart();
+          }
+        } else {
+          joinedText += chunk;
+        }
+
+        const estWidth = item.w > 0 ? item.w : chunk.length * refSize * 0.48;
+        prevEndX = item.x + estWidth;
+        prevEndsSpace = /\s$/.test(chunk);
+      }
+
+      joinedText = joinedText.replace(/\t+/g, '   ').replace(/ {4,}/g, '   ').trim();
+
       if (joinedText && imgParts.length > 0) {
         lines.push(`${joinedText} ${imgParts.join(' ')}`.trim());
       } else if (joinedText) {
@@ -425,32 +487,40 @@ function buildPdfPageText(items: any[]): string {
     };
 
     for (const it of sorted) {
-      if (currentRowY !== null && Math.abs(it.y - currentRowY) > 4) {
+      if (!it.str.trim() && !it.str.includes('[[IMAGE_DATA:')) continue;
+      const itemTol = Math.max(3.5, Math.min(5.5, it.h * 0.42));
+      if (currentRowY !== null && Math.abs(it.y - currentRowY) > Math.max(currentRowTol, itemTol)) {
         flushRow();
         currentRowY = it.y;
+        currentRowTol = itemTol;
       } else if (currentRowY === null) {
         currentRowY = it.y;
+        currentRowTol = itemTol;
       }
 
-      if (it.str) {
-        rowItems.push({ str: it.str, x: it.x });
-      }
+      rowItems.push(it);
     }
     flushRow();
     return lines;
   };
 
-  // Detect true 2-column exam layout (left half has >= 2 question numbers AND right half has >= 2 question numbers)
+  // Detect true 2-column exam layout (ignore top/bottom edge page numbers when finding column bounds)
   const span = maxX - minX;
   if (span > 200) {
     const midX = minX + span * 0.48;
+    const isPageNumArtifact = (s: string) =>
+      /^(?:hal(?:aman)?\.?\s*\d+(?:\s*(?:dari|\/|of)\s*\d+)?|page\s+\d+(?:\s+of\s+\d+)?|-\s*\d+\s*-|\d{1,3})$/i.test(
+        s.trim()
+      );
     const rightAll = positioned.filter((p) => p.x >= midX && p.str.trim());
+    const rightContent = rightAll.filter((p) => !isPageNumArtifact(p.str));
     const leftAll = positioned.filter((p) => p.x < midX && p.str.trim());
-    const qStartRe = /^\(?\d{1,3}[\.\)]/;
+    const qStartRe = /^\(?\d{1,3}\s*[\.\)]/;
+    const optStartRe = /^\(?[A-Ea-e]\s*[\.\)]/;
 
-    if (rightAll.length > 0 && leftAll.length > 0) {
-      const maxRightY = Math.max(...rightAll.map((p) => p.y));
-      const minRightY = Math.min(...rightAll.map((p) => p.y));
+    if (rightContent.length > 0 && leftAll.length > 0) {
+      const maxRightY = Math.max(...rightContent.map((p) => p.y));
+      const minRightY = Math.min(...rightContent.map((p) => p.y));
 
       const headerItems = positioned.filter((p) => p.y > maxRightY + 6);
       const bodyLeft = leftAll.filter((p) => p.y <= maxRightY + 6);
@@ -462,16 +532,25 @@ function buildPdfPageText(items: any[]): string {
       const footerY = kunciItem ? kunciItem.y : -Infinity;
 
       const leftColItems = bodyLeft.filter((p) => p.y > footerY + 2);
+      const rightColItems = rightAll.filter((p) => p.y <= maxRightY + 6 && p.y > footerY + 2);
       const footerItems = positioned.filter((p) => p.y <= footerY + 2);
 
-      const leftQCount = collapseRows(leftColItems).filter((l) => qStartRe.test(l)).length;
-      const rightQCount = collapseRows(rightAll).filter((l) => qStartRe.test(l)).length;
+      const leftLines = collapseRows(leftColItems);
+      const rightLines = collapseRows(rightColItems);
 
-      if (leftQCount >= 2 && rightQCount >= 2) {
+      const leftQCount = leftLines.filter((l) => qStartRe.test(l)).length;
+      const rightQCount = rightLines.filter((l) => qStartRe.test(l)).length;
+      const leftOptCount = leftLines.filter((l) => optStartRe.test(l)).length;
+      const rightOptCount = rightLines.filter((l) => optStartRe.test(l)).length;
+
+      if (
+        (leftQCount >= 2 && rightQCount >= 2) ||
+        (leftQCount >= 1 && rightQCount >= 1 && leftOptCount >= 2 && rightOptCount >= 2)
+      ) {
         return [
           ...collapseRows(headerItems),
-          ...collapseRows(leftColItems),
-          ...collapseRows(rightAll),
+          ...leftLines,
+          ...rightLines,
           ...collapseRows(footerItems),
         ].join('\n');
       }
@@ -575,7 +654,7 @@ async function extractFromPdf(arrayBuffer: ArrayBuffer): Promise<{
               fn === OPS.paintInlineImageXObject
           );
           const prePageText = buildPdfPageText(textContent.items as any[]);
-          const isLowTextPage = prePageText.trim().length < 80;
+          const isLowTextPage = prePageText.trim().length < 80 || isGarbledPdfText(prePageText);
 
           if (hasImageOps || (isLowTextPage && i <= 25)) {
             const viewport = page.getViewport({ scale: 1.4 });
@@ -587,7 +666,7 @@ async function extractFromPdf(arrayBuffer: ArrayBuffer): Promise<{
             if (ctx) {
               await page.render({ canvasContext: ctx, viewport }).promise;
 
-              if (isLowTextPage || i <= 8) {
+              if (isLowTextPage || i <= 20) {
                 const pageDataUrl = canvas.toDataURL('image/jpeg', 0.78);
                 const commaIdx = pageDataUrl.indexOf(',');
                 if (commaIdx !== -1) {
@@ -597,7 +676,7 @@ async function extractFromPdf(arrayBuffer: ArrayBuffer): Promise<{
                     mimeType: 'image/jpeg',
                   });
                 }
-                if (isLowTextPage || i <= 5) {
+                if (isLowTextPage || i <= 8) {
                   assets.push({
                     id: `pdf_page_${i}`,
                     url: pageDataUrl,
@@ -760,8 +839,19 @@ function expandWordOrderedListsInDom(root: HTMLElement): void {
 
     listItems.forEach((li, itemIdx) => {
       const nestedOls = Array.from(li.querySelectorAll(':scope > ol')) as HTMLOListElement[];
-      nestedOls.forEach((nested) => {
-        processList(nested, true);
+      nestedOls.forEach((nested, nestedPos) => {
+        const nestedType = (nested.getAttribute('type') || '').toLowerCase();
+        const nestedLis = Array.from(nested.children).filter((el) => el.tagName === 'LI');
+        const hasLetteredSiblingAfter = nestedOls.slice(nestedPos + 1).some((sib) => {
+          const st = (sib.getAttribute('type') || '').toLowerCase();
+          return st === 'a';
+        });
+        const looksLikeSubStatementList =
+          nestedType !== 'a' &&
+          (hasLetteredSiblingAfter ||
+            nestedLis.length > 5 ||
+            nestedLis.every((nl) => /^\(?\d+[\.\)]/.test((nl.textContent || '').trim())));
+        processList(nested, !looksLikeSubStatementList);
       });
 
       const currentText = (li.textContent || '').trim();
@@ -851,14 +941,92 @@ function expandWordOrderedListsInDom(root: HTMLElement): void {
 }
 
 /**
- * Helper to expand layout table rows cleanly (including paired columns like "A. | optA | B. | optB").
+ * Formats structured Word/HTML columnar exam tables (No | Pertanyaan | A | B | C | D | E | Kunci | Pembahasan)
+ * into clean sequential question text so columns are never scrambled.
+ */
+function tryFormatColumnarExamTable(parsedRows: string[][]): string[] | null {
+  if (parsedRows.length < 2) return null;
+  const header = parsedRows[0].map((c) => c.trim().toLowerCase());
+  const qCol = header.findIndex((h) => /^(?:pertanyaan|soal|teks\s*soal|butir\s*soal|question)$/.test(h));
+  if (qCol === -1) return null;
+
+  const colMap: Record<string, number> = { pertanyaan: qCol };
+  header.forEach((h, idx) => {
+    if (/^(?:no|no\.?|nomor)$/.test(h)) colMap.no = idx;
+    else if (/^(?:a|pilihan\s*a|opsi\s*a|jwb\s*a)$/.test(h)) colMap.A = idx;
+    else if (/^(?:b|pilihan\s*b|opsi\s*b|jwb\s*b)$/.test(h)) colMap.B = idx;
+    else if (/^(?:c|pilihan\s*c|opsi\s*c|jwb\s*c)$/.test(h)) colMap.C = idx;
+    else if (/^(?:d|pilihan\s*d|opsi\s*d|jwb\s*d)$/.test(h)) colMap.D = idx;
+    else if (/^(?:e|pilihan\s*e|opsi\s*e|jwb\s*e)$/.test(h)) colMap.E = idx;
+    else if (/^(?:kunci|kunci\s*jawaban|jawaban|kj|answer)$/.test(h)) colMap.kunci = idx;
+    else if (/^(?:pembahasan|penjelasan|rubrik|pedoman)$/.test(h)) colMap.pembahasan = idx;
+  });
+
+  if (colMap.A === undefined && colMap.B === undefined && colMap.kunci === undefined) {
+    return null;
+  }
+
+  const lines: string[] = [];
+  let autoNo = 0;
+  for (let r = 1; r < parsedRows.length; r++) {
+    const row = parsedRows[r];
+    const qText = (row[colMap.pertanyaan] || '').trim();
+    if (!qText) continue;
+    autoNo++;
+    const rawNo = colMap.no !== undefined ? (row[colMap.no] || '').replace(/[\.\)]$/, '').trim() : '';
+    const num = /^\d+$/.test(rawNo) ? rawNo : String(autoNo);
+    const hasNumPrefix = /^(?:soal\s*|no\.?\s*)?\(?\d+[\.\)]/.test(qText);
+    lines.push(hasNumPrefix ? qText : `${num}. ${qText}`);
+
+    (['A', 'B', 'C', 'D', 'E'] as const).forEach((letter) => {
+      if (colMap[letter] !== undefined) {
+        const val = (row[colMap[letter]] || '').trim();
+        if (val) {
+          const cleanOpt = stripRedundantOptionLabel(letter, val);
+          lines.push(`${letter}. ${cleanOpt || val}`);
+        }
+      }
+    });
+
+    if (colMap.kunci !== undefined && row[colMap.kunci]?.trim()) {
+      lines.push(`Kunci: ${row[colMap.kunci].trim()}`);
+    }
+    if (colMap.pembahasan !== undefined && row[colMap.pembahasan]?.trim()) {
+      lines.push(`Pembahasan: ${row[colMap.pembahasan].trim()}`);
+    }
+  }
+  return lines.length > 0 ? lines : null;
+}
+
+/**
+ * Helper to expand layout table rows cleanly (including paired columns, columnar tables, and 2x2 A/C + B/D option grids).
  */
 function formatLayoutTableRows(parsedRows: string[][]): string[] {
-  const outLines: string[] = [];
-  for (const cells of parsedRows) {
-    const nonEmpty = cells.map((c) => c.trim()).filter(Boolean);
-    if (nonEmpty.length === 0) continue;
+  const columnar = tryFormatColumnarExamTable(parsedRows);
+  if (columnar) return columnar;
 
+  // Detect 2x2 or 2xN vertical-first option grid (e.g. Row 1: ["A. ...", "C. ..."], Row 2: ["B. ...", "D. ..."])
+  const nonEmptyRows = parsedRows
+    .map((cells) => cells.map((c) => c.trim()).filter(Boolean))
+    .filter((r) => r.length > 0);
+  if (
+    nonEmptyRows.length >= 2 &&
+    nonEmptyRows[0].length === 2 &&
+    /^\(?A[\.\)]/i.test(nonEmptyRows[0][0]) &&
+    /^\(?C[\.\)]/i.test(nonEmptyRows[0][1]) &&
+    /^\(?B[\.\)]/i.test(nonEmptyRows[1]?.[0] || '')
+  ) {
+    const col1: string[] = [];
+    const col2: string[] = [];
+    for (const r of nonEmptyRows) {
+      if (r[0]) col1.push(r[0]);
+      if (r[1]) col2.push(r[1]);
+    }
+    return [...col1, ...col2];
+  }
+
+  const outLines: string[] = [];
+  for (const nonEmpty of nonEmptyRows) {
     // Case 1: Paired columns like ['A.', 'Jakarta', 'B.', 'Bandung'] or ['1.', 'Pertanyaan', 'Kunci', 'A']
     if (
       nonEmpty.length >= 4 &&
@@ -884,9 +1052,102 @@ function formatLayoutTableRows(parsedRows: string[][]): string[] {
 }
 
 /**
- * Converts HTML tables, Word <ol> numbering, and embedded <img> tags into structured lines.
+ * Distinguishes actual data tables inside a question stem (e.g. physics/math measurement tables)
+ * from Word/HTML exam layout tables where column 1 holds question numbers and column 2+ holds stems/options.
  */
-function convertHtmlTablesToMarkdown(html: string): {
+function isLayoutExamTable(parsedRows: string[][], hasThHeaderRow: boolean): boolean {
+  if (parsedRows.length === 0) return false;
+  const headerCells = parsedRows[0] || [];
+  const headerJoined = headerCells.map((h) => h.trim().toLowerCase()).join(' | ');
+
+  // Explicit layout header for question tables (e.g. "No | Soal | Pilihan A ...")
+  const hasExplicitExamTableHeader =
+    headerCells.length >= 2 &&
+    (/\b(?:soal|pertanyaan|butir)\b/i.test(headerJoined) ||
+      /\b(?:pilihan\s*a|opsi\s*a)\b/i.test(headerJoined));
+
+  const looksLikeDataTableHeader =
+    !hasExplicitExamTableHeader &&
+    headerCells.length >= 2 &&
+    (hasThHeaderRow ||
+      headerCells.some((h) =>
+        /^(?:no\.?|nama|nilai|jumlah|frekuensi|data|bulan|tahun|kelas|siswa|hasil|skor|keterangan|jenis|persentase|hari|tanggal|mata pelajaran|mapel|kunci|waktu|jarak|kecepatan|suhu|massa|berat|tinggi|panjang|lebar|luas|volume|harga|usia|umur|kota|negara|x|y|f\(x\))(?:\s*\([^)]+\))?$/i.test(
+          h.trim()
+        )
+      ));
+
+  if (looksLikeDataTableHeader) {
+    return false;
+  }
+
+  const hasExplicitQuestionOrOptionLayout = parsedRows.some((cells) =>
+    cells.some(
+      (c) =>
+        c.includes('[[IMAGE_DATA:') ||
+        c.includes('[[IMAGE_ERROR:') ||
+        /^(?:soal\s*)?\d+[\.\)]\s+/i.test(c) ||
+        /^\(?[A-Ea-e][\.\)](?:\s|$)/.test(c)
+    )
+  );
+
+  const hasStandaloneNumberColumn = parsedRows.some((cells) => {
+    const first = (cells[0] || '').trim();
+    const rest = cells.slice(1).join(' ').trim();
+    if (!/^\d+[\.\)]?$/.test(first)) return false;
+    // Short numeric/scalar cell in column 2+ indicates tabular data, not a question stem
+    return rest.length >= 16 || /[?]|\.{3,}|\b[A-D][\.\)]\s+/.test(rest);
+  });
+
+  return hasExplicitQuestionOrOptionLayout || hasStandaloneNumberColumn;
+}
+
+const SUP_DIGIT_MAP: Record<string, string> = {
+  '0': '⁰',
+  '1': '¹',
+  '2': '²',
+  '3': '³',
+  '4': '⁴',
+  '5': '⁵',
+  '6': '⁶',
+  '7': '⁷',
+  '8': '⁸',
+  '9': '⁹',
+};
+const SUB_DIGIT_MAP: Record<string, string> = {
+  '0': '₀',
+  '1': '₁',
+  '2': '₂',
+  '3': '₃',
+  '4': '₄',
+  '5': '₅',
+  '6': '₆',
+  '7': '₇',
+  '8': '₈',
+  '9': '₉',
+};
+
+function formatSuperscriptText(raw: string): string {
+  const s = raw.trim();
+  if (!s) return '';
+  if (/^[0-9]+$/.test(s)) {
+    return s.split('').map((c) => SUP_DIGIT_MAP[c] || c).join('');
+  }
+  return `^{${s}}`;
+}
+
+function formatSubscriptText(raw: string): string {
+  const s = raw.trim();
+  if (!s) return '';
+  if (/^[0-9]+$/.test(s)) {
+    return s.split('').map((c) => SUB_DIGIT_MAP[c] || c).join('');
+  }
+  return `_{${s}}`;
+}
+
+/**
+ * Converts HTML tables, Word <ol> numbering, <sup>/<sub>, and embedded <img> tags into structured lines.
+ */
+export function convertHtmlTablesToMarkdown(html: string): {
   cleanHtml: string;
   textWithTables: string;
   extractedImageUrls: string[];
@@ -907,20 +1168,34 @@ function convertHtmlTablesToMarkdown(html: string): {
       return `\n[[IMAGE_ERROR:Sumber gambar tidak terbaca]]\n`;
     });
 
+    text = text.replace(/<sup[^>]*>([\s\S]*?)<\/sup>/gi, (_m, inner) =>
+      formatSuperscriptText(inner.replace(/<[^>]+>/g, ''))
+    );
+    text = text.replace(/<sub[^>]*>([\s\S]*?)<\/sub>/gi, (_m, inner) =>
+      formatSubscriptText(inner.replace(/<[^>]+>/g, ''))
+    );
+
     // Convert <ol> lists from innermost outward so nested question/option lists keep A-E & 1-N!
     let guard = 0;
     while (/<ol[^>]*>/i.test(text) && guard < 20) {
       guard++;
       const hadInner = text;
-      text = text.replace(/<ol([^>]*)>((?:(?!<ol[\s>])[\s\S])*?)<\/ol>/gi, (_m, attrs, inner) => {
+      text = text.replace(/<ol([^>]*)>((?:(?!<ol[\s>])[\s\S])*?)<\/ol>/gi, (fullMatch, attrs, inner, matchOffset) => {
         const isAlphaAttr = /type=["']?[aA]["']?/i.test(attrs);
         const liMatches = [...inner.matchAll(/<li[^>]*>([\s\S]*?)<\/li>/gi)];
+        const insideLi = text.lastIndexOf('<li', matchOffset) > text.lastIndexOf('</li>', matchOffset);
         const isShortAlphaCandidate =
+          insideLi &&
           liMatches.length >= 2 &&
           liMatches.length <= 5 &&
           liMatches.every((lm) => {
             const plain = lm[1].replace(/<[^>]+>/g, ' ').trim();
-            return plain.length < 180 && !/^\d+[\.\)]/.test(plain) && !/\b[A-E]\.\s+/.test(plain);
+            return (
+              plain.length < 180 &&
+              !/^\d+[\.\)]/.test(plain) &&
+              !/\b[A-E]\.\s+/.test(plain) &&
+              !/[?]$|\.{4,}/.test(plain)
+            );
           });
         const useAlpha = isAlphaAttr || isShortAlphaCandidate;
 
@@ -958,30 +1233,8 @@ function convertHtmlTablesToMarkdown(html: string): {
         );
       });
 
-      const headerCells = parsedRows[0] || [];
-      const looksLikeDataTableHeader =
-        headerCells.length >= 2 &&
-        headerCells.some((h) =>
-          /^(?:no\.?|nama|nilai|jumlah|frekuensi|data|bulan|tahun|kelas|siswa|hasil|skor|keterangan|jenis|persentase|hari|tanggal|mata pelajaran|mapel|kunci)$/i.test(
-            h.trim()
-          )
-        );
-
-      const hasExplicitQuestionOrOptionLayout = parsedRows.some((cells) =>
-        cells.some(
-          (c) =>
-            c.includes('[[IMAGE_DATA:') ||
-            c.includes('[[IMAGE_ERROR:') ||
-            /^(?:soal\s*)?\d+[\.\)]\s+/i.test(c) ||
-            /^\(?[A-Ea-e][\.\)](?:\s|$)/.test(c)
-        )
-      );
-
-      const hasStandaloneNumberColumn =
-        !looksLikeDataTableHeader &&
-        parsedRows.some((cells) => /^\d+[\.\)]?$/.test(cells[0] || ''));
-
-      const isLayoutTable = hasExplicitQuestionOrOptionLayout || hasStandaloneNumberColumn;
+      const hasThHeaderRow = /<th[\s>]/i.test(tableInner);
+      const isLayoutTable = isLayoutExamTable(parsedRows, hasThHeaderRow);
 
       if (isLayoutTable) {
         return '\n' + formatLayoutTableRows(parsedRows).join('\n') + '\n';
@@ -1028,6 +1281,16 @@ function convertHtmlTablesToMarkdown(html: string): {
     }
   });
 
+  // Preserve superscripts & subscripts before flattening DOM to text
+  container.querySelectorAll('sup').forEach((sup) => {
+    const val = formatSuperscriptText(sup.textContent || '');
+    sup.replaceWith(docRef.createTextNode(val));
+  });
+  container.querySelectorAll('sub').forEach((sub) => {
+    const val = formatSubscriptText(sub.textContent || '');
+    sub.replaceWith(docRef.createTextNode(val));
+  });
+
   // Expand Word auto-numbered / auto-lettered lists (<ol><li>) BEFORE flattening paragraphs
   expandWordOrderedListsInDom(container);
 
@@ -1057,30 +1320,9 @@ function convertHtmlTablesToMarkdown(html: string): {
       }
     });
 
-    const headerCells = parsedRows[0] || [];
-    const looksLikeDataTableHeader =
-      headerCells.length >= 2 &&
-      headerCells.some((h) =>
-        /^(?:no\.?|nama|nilai|jumlah|frekuensi|data|bulan|tahun|kelas|siswa|hasil|skor|keterangan|jenis|persentase|hari|tanggal|mata pelajaran|mapel|kunci)$/i.test(
-          h.trim()
-        )
-      );
-
-    const hasExplicitQuestionOrOptionLayout = parsedRows.some((cells) =>
-      cells.some(
-        (c) =>
-          c.includes('[[IMAGE_DATA:') ||
-          c.includes('[[IMAGE_ERROR:') ||
-          /^(?:soal\s*)?\d+[\.\)]\s+/i.test(c) ||
-          /^\(?[A-Ea-e][\.\)](?:\s|$)/.test(c)
-      )
-    );
-
-    const hasStandaloneNumberColumn =
-      !looksLikeDataTableHeader &&
-      parsedRows.some((cells) => /^\d+[\.\)]?$/.test(cells[0] || ''));
-
-    const isLayoutTable = hasExplicitQuestionOrOptionLayout || hasStandaloneNumberColumn;
+    const firstTr = table.querySelector('tr');
+    const hasThHeaderRow = Boolean(firstTr && firstTr.querySelector('th'));
+    const isLayoutTable = isLayoutExamTable(parsedRows, hasThHeaderRow);
 
     if (isLayoutTable) {
       table.replaceWith(docRef.createTextNode('\n' + formatLayoutTableRows(parsedRows).join('\n') + '\n'));
@@ -1138,24 +1380,34 @@ export function extractAnswerKeysFromSection(text: string): Record<number, strin
   const keysMap: Record<number, string> = {};
   if (!text) return keysMap;
 
-  // 1. Table format: "| 1 | A |" or "| 1 | A | 2 | B |"
-  const tableCellRegex = /\|\s*(\d+)\s*\|\s*([A-Ea-e])\s*\|/g;
+  // 1. Table format: "| 1 | A |" or "| 1 | BENAR |"
+  const tableCellRegex = /\|\s*(\d+)\s*\|\s*(BENAR|SALAH|TRUE|FALSE|[A-Ea-e])\s*\|/gi;
   let match: RegExpExecArray | null;
   while ((match = tableCellRegex.exec(text)) !== null) {
     const num = parseInt(match[1], 10);
-    const letter = match[2].toUpperCase();
+    const val = match[2].toUpperCase();
     if (num > 0 && num <= 500) {
-      keysMap[num] = letter;
+      keysMap[num] = val;
     }
   }
 
-  // 2. Standard list & inline format: "1. A", "1) B", "1=C", "1: D", "1.A"
-  const listRegex = /(?:^|\s|\b)(\d+)\s*[\.\)\:\=\-]\s*([A-Ea-e])\b/g;
+  // 2. Standard list & inline format: "1. A", "1) B", "1=C", "1: Benar", "1. Salah"
+  const listRegex = /(?:^|\s|\b)(\d+)\s*[\.\)\:\=\-]\s*(BENAR|SALAH|TRUE|FALSE|[A-Ea-e])\b/gi;
   while ((match = listRegex.exec(text)) !== null) {
     const num = parseInt(match[1], 10);
-    const letter = match[2].toUpperCase();
-    if (num > 0 && num <= 500) {
-      keysMap[num] = letter;
+    const val = match[2].toUpperCase();
+    if (num > 0 && num <= 500 && !keysMap[num]) {
+      keysMap[num] = val;
+    }
+  }
+
+  // 3. Space-delimited tabular copy-paste format inside key section ("1 A  2 B  3 Benar")
+  const spacedRegex = /(?:^|\s)(\d{1,3})\s+(BENAR|SALAH|TRUE|FALSE|[A-E])(?=\s|$)/g;
+  while ((match = spacedRegex.exec(text)) !== null) {
+    const num = parseInt(match[1], 10);
+    const val = match[2].toUpperCase();
+    if (num > 0 && num <= 500 && !keysMap[num]) {
+      keysMap[num] = val;
     }
   }
 
@@ -1173,11 +1425,19 @@ export function applyAnswerKeysFromText(
   let appliedCount = 0;
 
   const updated = soalList.map((q) => {
-    if (extractedKeys[q.nomor]) {
+    const rawKey = extractedKeys[q.nomor];
+    if (rawKey) {
+      let normalizedKey = rawKey;
+      if (q.tipe === 'benar_salah') {
+        const tfKey = normalizeTrueFalseValue(rawKey);
+        if (tfKey) {
+          normalizedKey = tfKey;
+        }
+      }
       appliedCount++;
       return {
         ...q,
-        kunciJawaban: extractedKeys[q.nomor],
+        kunciJawaban: normalizedKey,
         perluVerifikasi: false,
         catatanVerifikasi: undefined,
       };
@@ -1242,8 +1502,9 @@ export function parseQuestionsFromText(
     }
   }
 
-  // 2. Separate dedicated answer key section if located at the end of the document
-  const keySectionKeywords = [
+  // 2. Separate dedicated answer key appendix if located at the end of the document
+  // Guard: NEVER split on per-question keys (e.g. "Kunci Jawaban: B") or when numbered MC questions continue below!
+  const keyHeadingKeywords = [
     'kunci jawaban',
     'kunci jawaban soal',
     'pedoman kunci jawaban',
@@ -1251,25 +1512,40 @@ export function parseQuestionsFromText(
     'kunci soal',
     'kunci jawaban pilihan ganda',
     'daftar kunci jawaban',
-    'kunci:',
   ];
 
   let splitIndex = -1;
-  for (let i = 0; i < allLines.length; i++) {
-    const cleanLine = allLines[i].toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
-    const withoutPrefix = cleanLine.replace(/^(?:[ivx]{1,4}|[a-d]|bagian\s+[a-z0-9]+)\s+/, '').trim();
-    const isTableKeyHeader = /^\|\s*no\.?\s*\|\s*kunci/i.test(allLines[i]);
-    if (
+  for (let i = 2; i < allLines.length; i++) {
+    const rawLine = allLines[i].trim();
+    const isSingleQuestionKeyLine =
+      /^(?:kunci(?:\s+jawaban)?|jawaban(?:\s+benar)?|kj)\s*[:=\-]\s*(?:\(?[A-Ea-e]\)?|benar|betul|salah|false|true|\d+|[^\n]{1,60})$/i.test(
+        rawLine
+      ) && !/1\s*[\.\:\)\=]\s*[A-E]/i.test(rawLine);
+
+    if (isSingleQuestionKeyLine) continue;
+
+    const cleanLine = rawLine.toLowerCase().replace(/[^a-z0-9\s]/g, '').trim();
+    const withoutPrefix = cleanLine.replace(/^(?:[ivx]{1,4}|[a-e]|bagian\s+[a-z0-9]+)\s+/, '').trim();
+    const isTableKeyHeader = /^\|\s*no\.?\s*\|\s*kunci/i.test(rawLine);
+    const isKeyHeading =
       isTableKeyHeader ||
-      keySectionKeywords.some(
+      keyHeadingKeywords.some(
         (kw) =>
           cleanLine === kw ||
-          cleanLine.startsWith(kw + ' ') ||
           withoutPrefix === kw ||
-          withoutPrefix.startsWith(kw + ' ')
-      )
-    ) {
-      if (i >= 2) {
+          ((cleanLine.startsWith(kw + ' ') || withoutPrefix.startsWith(kw + ' ')) &&
+            rawLine.length <= 80 &&
+            !/\?$/.test(rawLine))
+      );
+
+    if (isKeyHeading) {
+      // Confirm the tail does NOT resume full multi-choice question stems (e.g. "1. Apa... \n A. ... B. ...")
+      const tailSlice = allLines.slice(i + 1, i + 25);
+      const hasFullQuestionAfter = tailSlice.some((tl, idx) => {
+        const nextFew = tailSlice.slice(idx + 1, idx + 5).join('\n');
+        return /^\(?\d{1,3}[\.\)]\s+\S{15,}/.test(tl) && /(?:^|\n)\s*[A-B][\.\)]\s+\S/.test(nextFew);
+      });
+      if (!hasFullQuestionAfter) {
         splitIndex = i;
         break;
       }
@@ -1306,6 +1582,7 @@ export function parseQuestionsFromText(
   let activeOptionLetter: string | null = null;
   let justAttachedStemImage = false;
   let elemCounter = 0;
+  let currentSectionType: TipeSoalUjian | null = null;
 
   const flushPendingTable = () => {
     if (pendingTableLines.length === 0) return;
@@ -1428,7 +1705,36 @@ export function parseQuestionsFromText(
 
     const optKeys = Object.keys(currentPilihan);
     const hasOptions = optKeys.length >= 2 || Object.keys(currentPilihanGambar).length >= 2;
-    const tipe = hasOptions ? 'pilihan_ganda' : 'uraian';
+    const isBinaryTrueFalseChoices =
+      optKeys.length === 2 &&
+      Boolean(currentPilihan.A && currentPilihan.B) &&
+      /^(?:benar|betul|true|ya)$/i.test(currentPilihan.A.trim()) &&
+      /^(?:salah|false|tidak)$/i.test(currentPilihan.B.trim());
+
+    let rawKunci = (currentSoal.kunciJawaban || '').trim();
+    const stemTrailingTfMatch = pertanyaanText.match(
+      /\(\s*(Benar\s*\/\s*Salah|B\s*\/\s*S|True\s*\/\s*False)\s*\)\s*[\.\?]?$/i
+    );
+
+    let tipe: TipeSoalUjian;
+    if (isBinaryTrueFalseChoices || (currentSectionType === 'benar_salah' && !hasOptions) || stemTrailingTfMatch) {
+      tipe = 'benar_salah';
+    } else if (hasOptions) {
+      tipe = 'pilihan_ganda';
+    } else if (
+      currentSectionType === 'isian_singkat' ||
+      /_{3,}/.test(pertanyaanText) ||
+      (/\.{4,}/.test(pertanyaanText) && currentSectionType !== 'uraian') ||
+      (rawKunci.length > 0 && rawKunci.length <= 60 && currentSectionType !== 'uraian')
+    ) {
+      tipe = 'isian_singkat';
+    } else {
+      tipe = 'uraian';
+    }
+
+    if (tipe === 'benar_salah') {
+      currentPilihan = { A: 'Benar', B: 'Salah' };
+    }
 
     const primaryImgObj = currentStemImages[0];
     const primaryImage = primaryImgObj?.url;
@@ -1456,17 +1762,32 @@ export function parseQuestionsFromText(
       }
     }
 
-    let kunci = currentSoal.kunciJawaban || '';
+    let kunci = rawKunci;
+    // Extract trailing inline key markers like "(Kunci: B)" or "[KJ: C]" in stem if key is still missing
+    if (!kunci && pertanyaanText) {
+      const stemInlineKey = pertanyaanText.match(
+        /[\(\[]\s*(?:kunci(?:\s+jawaban)?|kj)\s*[:=\-]?\s*([A-Ea-e]|benar|betul|salah|true|false)\s*[\)\]][\.\?]?\s*$/i
+      );
+      if (stemInlineKey) {
+        kunci = stemInlineKey[1].toUpperCase();
+        pertanyaanText = pertanyaanText.slice(0, stemInlineKey.index).trim();
+        if (currentElements.length > 0) {
+          const lastTextEl = [...currentElements].reverse().find((el) => el.tipe === 'teks');
+          if (lastTextEl && lastTextEl.tipe === 'teks') {
+            lastTextEl.isi = lastTextEl.isi.slice(0, lastTextEl.isi.length - stemInlineKey[0].length).trim();
+          }
+        }
+      }
+    }
+
     if (tipe === 'pilihan_ganda' && !kunci) {
       for (const [k, v] of Object.entries(currentPilihan)) {
         if (
-          v.includes('[KUNCI]') ||
-          v.includes('(KUNCI)') ||
-          v.startsWith('*') ||
+          /\[KUNCI\]|\(KUNCI\)|\(JAWABAN\)|^\*|[✓✔]/i.test(v) ||
           v.includes('*(Kunci)*')
         ) {
           kunci = k;
-          currentPilihan[k] = v.replace(/\[KUNCI\]|\(KUNCI\)|\*|\(kunci\)/gi, '').trim();
+          currentPilihan[k] = v.replace(/\[KUNCI\]|\(KUNCI\)|\(JAWABAN\)|\*|\(kunci\)|[✓✔]/gi, '').trim();
           break;
         }
       }
@@ -1474,14 +1795,21 @@ export function parseQuestionsFromText(
 
     const nomorSoal = soalList.length + 1;
     const docNomor = currentSoal.nomor || nomorSoal;
-    const finalKunci =
-      kunci ||
-      (tipe === 'pilihan_ganda' ? trailingKeys[docNomor] || trailingKeys[nomorSoal] || '' : '');
+    let finalKunci = kunci || trailingKeys[docNomor] || trailingKeys[nomorSoal] || '';
+    if (tipe === 'pilihan_ganda') {
+      const m = finalKunci.trim().toUpperCase().match(/^[A-E]/);
+      finalKunci = m ? m[0] : '';
+    } else if (tipe === 'benar_salah') {
+      finalKunci = normalizeTrueFalseValue(finalKunci, { pilihan: currentPilihan });
+    }
 
     // Keep kontenElemen whenever question has multiple visual blocks, tables, formulas, or interleaved image+text
     const hasRichElements = currentElements.some(
       (el) => el.tipe === 'tabel' || el.tipe === 'rumus' || el.tipe === 'gambar'
     );
+
+    const needsKeyVerification =
+      (tipe === 'pilihan_ganda' || tipe === 'benar_salah' || tipe === 'isian_singkat') && !finalKunci;
 
     soalList.push({
       id: `soal-${Date.now()}-${nomorSoal}`,
@@ -1491,10 +1819,13 @@ export function parseQuestionsFromText(
         pertanyaanText ||
         (primaryImage ? '(Perhatikan gambar berikut)' : `Soal nomor ${nomorSoal}`),
       kontenElemen: hasRichElements ? [...currentElements] : undefined,
-      pilihan: hasOptions ? currentPilihan : undefined,
-      pilihanGambar: Object.keys(currentPilihanGambar).length > 0 ? currentPilihanGambar : undefined,
+      pilihan: tipe === 'pilihan_ganda' || tipe === 'benar_salah' ? currentPilihan : undefined,
+      pilihanGambar:
+        tipe === 'pilihan_ganda' && Object.keys(currentPilihanGambar).length > 0
+          ? currentPilihanGambar
+          : undefined,
       kunciJawaban: finalKunci,
-      bobot: currentSoal.bobot || (tipe === 'pilihan_ganda' ? 1 : 2),
+      bobot: currentSoal.bobot || (tipe === 'uraian' ? 2 : 1),
       gambar: primaryImage,
       gambarCaption: primaryImgObj?.caption,
       gambarTambahan: extraImages,
@@ -1507,11 +1838,12 @@ export function parseQuestionsFromText(
           ? currentSoal.pedomanPenilaian ||
             'Kriteria: Kesesuaian konsep, kelengkapan uraian, ketepatan penalaran.'
           : undefined,
-      perluVerifikasi: (tipe === 'pilihan_ganda' && !finalKunci) || currentImageStatus === 'warning' || currentImageStatus === 'error',
+      pembahasan: currentSoal.pembahasan || undefined,
+      perluVerifikasi: needsKeyVerification || currentImageStatus === 'warning' || currentImageStatus === 'error',
       catatanVerifikasi:
         currentImageWarning ||
-        (tipe === 'pilihan_ganda' && !finalKunci
-          ? 'Kunci jawaban belum ditentukan pada dokumen asli. Silakan pilih kunci jawaban yang benar.'
+        (needsKeyVerification
+          ? 'Kunci jawaban belum ditentukan pada dokumen asli. Silakan pilih/isi kunci jawaban yang benar.'
           : undefined),
     });
 
@@ -1529,6 +1861,8 @@ export function parseQuestionsFromText(
     currentImageStatus = undefined;
     activeOptionLetter = null;
     justAttachedStemImage = false;
+    readingPembahasan = false;
+    pembahasanStepNum = 0;
   };
 
   let inInstructionBlock = false;
@@ -1536,10 +1870,27 @@ export function parseQuestionsFromText(
   let justSawSectionHeader = false;
   let inSubStatementList = false;
   let subListLastNum = 0;
+  let readingPembahasan = false;
+  let pembahasanStepNum = 0;
+  let justPassedPageBreak = false;
+
+  const isExplicitSectionHeader = (lineText: string): boolean => {
+    const clean = lineText.replace(/^[#*_\s]+|[#*_\s]+$/g, '').trim();
+    if (!clean || clean.length > 110 || /\?$/.test(clean) || /_{3,}|\.{4,}/.test(clean)) return false;
+
+    const prefixedSectionRe =
+      /^(?:(?:[IVX]{1,4}|[A-E]|BAGIAN\s+[A-Z0-9]+|ROMAWI\s+[IVX]+)\s*[\.\:\)\-]\s*)(?:(?:SOAL\s+)?(?:PILIHAN\s+GANDA|BENAR\s*[\/\-]\s*SALAH|BENAR\s+(?:ATAU\s+)?SALAH|URAIAN(?:\s+SINGKAT)?|ESAI|ESSAY|ISIAN\s+SINGKAT|ISIAN)|PILIHLAH\s+(?:SALAH\s+)?SATU\s+JAWABAN|JAWABLAH\s+PERTANYAAN(?:-PERTANYAAN)?|LENGKAPI\s+(?:TITIK-TITIK|ISIAN|KALIMAT\s+DI\s+BAWAH|PERNYATAAN\s+BERIKUT))/i;
+    if (prefixedSectionRe.test(clean)) return true;
+
+    const standaloneHeadingRe =
+      /^(?:(?:SOAL\s+)?(?:PILIHAN\s+GANDA|BENAR\s*[\/\-]\s*SALAH|BENAR\s+(?:ATAU\s+)?SALAH|URAIAN(?:\s+SINGKAT)?|ESAI|ESSAY|ISIAN\s+SINGKAT)|PILIHLAH\s+(?:SALAH\s+)?SATU\s+JAWABAN\s+(?:YANG\s+PALING\s+)?(?:BENAR|TEPAT)[!:\s]*|JAWABLAH\s+PERTANYAAN(?:-PERTANYAAN)?\s+(?:DI\s+BAWAH\s+INI|BERIKUT(?:\s+INI)?)\s*(?:DENGAN\s+(?:BENAR|SINGKAT|JELAS|TEPAT))?[!:\s]*)$/i;
+    return standaloneHeadingRe.test(clean);
+  };
 
   for (let i = 0; i < questionLines.length; i++) {
     const rawLine = questionLines[i];
     if (/^\[---\s*HALAMAN\s+\d+\s*---\]$/.test(rawLine)) {
+      justPassedPageBreak = true;
       continue;
     }
 
@@ -1568,6 +1919,20 @@ export function parseQuestionsFromText(
       .replace(/\[\[IMAGE_ERROR:[^\]]+\]\]/g, '')
       .trim();
 
+    // Skip standalone PDF/Word page numbers or page footers right across page breaks
+    if (
+      line &&
+      lineImages.length === 0 &&
+      (/^(?:hal(?:aman)?\.?\s*\d+(?:\s*(?:dari|\/|of)\s*\d+)?|page\s+\d+(?:\s+of\s+\d+)?|-\s*\d+\s*-)$/i.test(
+        line
+      ) ||
+        (justPassedPageBreak && /^\d{1,3}\.?$/.test(line)))
+    ) {
+      justPassedPageBreak = false;
+      continue;
+    }
+    justPassedPageBreak = false;
+
     if (
       !line &&
       lineImages.length === 0 &&
@@ -1592,38 +1957,100 @@ export function parseQuestionsFromText(
       continue;
     }
 
-    // Ignore Roman numeral / Bagian section headers (e.g. "I. Pilihan Ganda", "II. Uraian", "B. Jawablah...")
-    if (
-      /^(?:(?:[IVX]{1,4}|[A-D]|BAGIAN\s+[A-Z0-9]+)\s*[\.\:\)]\s*)?(?:PILIHAN\s+GANDA|SOAL\s+PILIHAN\s+GANDA|SOAL\s+URAIAN|SOAL\s+ISIAN|URAIAN(?:\s+SINGKAT)?|ESAI|ESSAY|ISIAN(?:\s+SINGKAT)?|JAWABLAH(?:\s+PERTANYAAN|\s+DENGAN)?)/i.test(
-        line
-      )
-    ) {
+    // Track explicit Roman numeral / Bagian section headers (without false positives on normal questions!)
+    if (isExplicitSectionHeader(line)) {
       finalizeSoal();
       inInstructionBlock = false;
       sectionStarted = true;
       justSawSectionHeader = true;
       inSubStatementList = false;
       subListLastNum = 0;
+      const secUpper = line.toUpperCase();
+      if (/BENAR\s*[\/\-]\s*SALAH|BENAR\s+(?:ATAU\s+)?SALAH/.test(secUpper)) {
+        currentSectionType = 'benar_salah';
+      } else if (/ISIAN\s+SINGKAT|SOAL\s+ISIAN|LENGKAPI|^ISIAN\b/.test(secUpper)) {
+        currentSectionType = 'isian_singkat';
+      } else if (/URAIAN|ESAI|ESSAY/.test(secUpper)) {
+        currentSectionType = 'uraian';
+      } else if (/PILIHAN\s+GANDA|PILIHLAH/.test(secUpper)) {
+        currentSectionType = 'pilihan_ganda';
+      } else if (/JAWABLAH/.test(secUpper) && currentSectionType === 'pilihan_ganda') {
+        currentSectionType = 'uraian';
+      }
       continue;
     }
 
     const qParsed = parseQuestionNumberPrefix(line);
     const optParsed = parseOptionPrefix(line);
-    const keyMatch = line.match(/^(?:kunci(?:\s+jawaban)?|jawaban(?:\s+benar)?|kj)\s*[:=\-]\s*\(?([A-Ea-e])\)?/i);
+    const keyMatch = line.match(/^(?:kunci(?:\s+jawaban)?|jawaban(?:\s+benar)?|kj)\s*[:=\-]\s*(.+)$/i);
+    const pembahasanMatch = line.match(/^(?:pembahasan|penjelasan|penyelesaian|alasan)\s*[:=\-]\s*(.*)$/i);
+    const pedomanMatch = line.match(/^(?:pedoman(?:\s+penilaian)?|rubrik(?:\s+penilaian)?)\s*[:=\-]\s*(.+)$/i);
+    const bobotMatch = line.match(/^(?:bobot(?:\s+soal)?|skor(?:\s+maks(?:imal)?)?)\s*[:=\-]\s*(\d+(?:[\.,]\d+)?)/i);
 
     if (qParsed && !optParsed) {
       const parsedNum = qParsed.nomor;
       const delimiterChar = qParsed.delimiter;
       const cleanQText = qParsed.content;
 
-      // Skip Petunjuk Umum / Tata Tertib numbered rules at the top of exam sheets
-      if (
-        !sectionStarted &&
-        soalList.length === 0 &&
-        !currentSoal &&
-        (inInstructionBlock || isLikelyExamInstructionLine(cleanQText))
-      ) {
-        continue;
+      // Skip Petunjuk Umum / Tata Tertib numbered rules at the top of exam sheets,
+      // but automatically exit instruction mode as soon as an actual exam question starts!
+      if (!sectionStarted && soalList.length === 0 && !currentSoal) {
+        if (isLikelyExamInstructionLine(cleanQText)) {
+          continue;
+        }
+        const hasDirectChoiceOrKeyBeforeNextQ = (fromIdx: number): boolean => {
+          const limit = Math.min(questionLines.length, fromIdx + 7);
+          for (let j = fromIdx; j < limit; j++) {
+            const nl = questionLines[j].replace(/\[\[IMAGE_DATA:[^\]]+\]\]/g, '').trim();
+            if (!nl) continue;
+            if (isExplicitSectionHeader(nl)) break;
+            if (parseQuestionNumberPrefix(nl)) break;
+            if (parseOptionPrefix(nl) || /^(?:kunci(?:\s+jawaban)?|kj|pembahasan)\s*[:=\-]/i.test(nl)) {
+              return true;
+            }
+          }
+          return false;
+        };
+
+        if (inInstructionBlock) {
+          const upcomingHasChoicesOrKey = hasDirectChoiceOrKeyBeforeNextQ(i + 1);
+          const looksLikeRealFirstQ =
+            (parsedNum === 1 && cleanQText.length > 0) ||
+            /[?\…]$|\.\.\.$|_{3,}/.test(cleanQText) ||
+            upcomingHasChoicesOrKey;
+          if (!looksLikeRealFirstQ) {
+            continue;
+          }
+          inInstructionBlock = false;
+        }
+      }
+
+      // If currently reading Pembahasan, treat numbered solution steps (1., 2., 3.) as explanation text
+      // unless this line directly carries choices/keys of the next main question before any other numbered line
+      if (readingPembahasan && currentSoal) {
+        let upcomingHasDirectChoiceOrKey = false;
+        const limit = Math.min(questionLines.length, i + 7);
+        for (let j = i + 1; j < limit; j++) {
+          const nl = questionLines[j].replace(/\[\[IMAGE_DATA:[^\]]+\]\]/g, '').trim();
+          if (!nl) continue;
+          if (isExplicitSectionHeader(nl) || parseQuestionNumberPrefix(nl)) break;
+          if (parseOptionPrefix(nl) || /^(?:kunci(?:\s+jawaban)?|kj)\s*[:=\-]/i.test(nl)) {
+            upcomingHasDirectChoiceOrKey = true;
+            break;
+          }
+        }
+        const nextMainNum = (currentSoal.nomor || soalList.length + 1) + 1;
+        const isMathStep =
+          !upcomingHasDirectChoiceOrKey &&
+          (parsedNum === 1 ||
+            (pembahasanStepNum > 0 && parsedNum === pembahasanStepNum + 1 && parsedNum !== nextMainNum));
+        if (isMathStep) {
+          pembahasanStepNum = parsedNum;
+          currentSoal.pembahasan = currentSoal.pembahasan
+            ? `${currentSoal.pembahasan}\n${line}`
+            : line;
+          continue;
+        }
       }
 
       // Guard against numbered statements inside a question ("Perhatikan pernyataan: 1) ... 2) ...")
@@ -1716,15 +2143,28 @@ export function parseQuestionsFromText(
     ) {
       inSubStatementList = false;
       subListLastNum = 0;
+      readingPembahasan = false;
+      pembahasanStepNum = 0;
       const letter = optParsed.letter;
-      const optText = optParsed.content;
+      let optText = optParsed.content;
 
       if (
         currentPilihan[letter] &&
-        /(?:jawablah|uraian|esai|essay|isian singkat|isian)/i.test(optText)
+        isExplicitSectionHeader(optText)
       ) {
         finalizeSoal();
         continue;
+      }
+
+      // Extract trailing inline key e.g. "D. Surabaya (Kunci: B)" or "D. Surabaya   Kunci: B"
+      const optInlineKey = optText.match(
+        /(?:\s+[\(\[]?|\s{2,})(?:kunci(?:\s+jawaban)?|kj)\s*[:=\-]\s*([A-Ea-e])[\)\]]?\s*$/i
+      );
+      if (optInlineKey) {
+        if (!currentSoal.kunciJawaban) {
+          currentSoal.kunciJawaban = optInlineKey[1].toUpperCase();
+        }
+        optText = optText.slice(0, optInlineKey.index).trim();
       }
 
       activeOptionLetter = letter;
@@ -1737,20 +2177,67 @@ export function parseQuestionsFromText(
     }
 
     if (keyMatch && currentSoal) {
-      currentSoal.kunciJawaban = keyMatch[1].toUpperCase();
+      readingPembahasan = false;
+      pembahasanStepNum = 0;
+      const rawKeyStr = keyMatch[1].trim();
+      const singleLetter = rawKeyStr.match(/^\(?([A-Ea-e])\)?[\.]?$/);
+      currentSoal.kunciJawaban = singleLetter ? singleLetter[1].toUpperCase() : rawKeyStr;
+      continue;
+    }
+
+    if (pembahasanMatch && currentSoal) {
+      readingPembahasan = true;
+      pembahasanStepNum = 0;
+      const val = pembahasanMatch[1].trim();
+      if (val) {
+        currentSoal.pembahasan = currentSoal.pembahasan
+          ? `${currentSoal.pembahasan}\n${val}`
+          : val;
+      }
+      continue;
+    }
+
+    if (pedomanMatch && currentSoal) {
+      readingPembahasan = false;
+      pembahasanStepNum = 0;
+      currentSoal.pedomanPenilaian = pedomanMatch[1].trim();
+      continue;
+    }
+
+    if (bobotMatch && currentSoal) {
+      const parsedBobot = Number(bobotMatch[1].replace(',', '.'));
+      if (Number.isFinite(parsedBobot) && parsedBobot > 0) {
+        currentSoal.bobot = parsedBobot;
+      }
       continue;
     }
 
     if (currentSoal) {
       if (line) {
-        if (Object.keys(currentPilihan).length === 0) {
+        if (readingPembahasan) {
+          currentSoal.pembahasan = currentSoal.pembahasan
+            ? `${currentSoal.pembahasan}\n${line}`
+            : line;
+        } else if (Object.keys(currentPilihan).length === 0) {
           // If a closing prompt line follows sub-statements ("Pernyataan yang benar adalah..."), close the sub-statement run
           if (inSubStatementList && !/[:：]$/.test(line)) {
             inSubStatementList = false;
           }
           pushStemTextLine(line);
         } else if (activeOptionLetter) {
-          currentPilihan[activeOptionLetter] = `${currentPilihan[activeOptionLetter]} ${line}`.trim();
+          let contLine = line;
+          const contKeyMatch = contLine.match(
+            /(?:\s+[\(\[]?|\s{2,})(?:kunci(?:\s+jawaban)?|kj)\s*[:=\-]\s*([A-Ea-e])[\)\]]?\s*$/i
+          );
+          if (contKeyMatch) {
+            if (!currentSoal.kunciJawaban) {
+              currentSoal.kunciJawaban = contKeyMatch[1].toUpperCase();
+            }
+            contLine = contLine.slice(0, contKeyMatch.index).trim();
+          }
+          if (contLine) {
+            currentPilihan[activeOptionLetter] = `${currentPilihan[activeOptionLetter]} ${contLine}`.trim();
+          }
         }
       }
 
@@ -1922,6 +2409,18 @@ function areRegexParsedQuestionsTrustworthy(soalList: SoalUjian[], rawText: stri
   const veryShortCount = soalList.filter((q) => q.pertanyaan.trim().length < 10 && !q.gambar).length;
   if (veryShortCount > Math.max(1, Math.floor(soalList.length * 0.35))) return false;
 
+  // Detect severe truncation (e.g. raw document contains questions 1..20, yet only a small fraction extracted)
+  const docNums = new Set<number>();
+  const numLineRe = /(?:^|\n)\s*(\d{1,3})\s*[\.\)]\s+\S{8,}/g;
+  let nm: RegExpExecArray | null;
+  while ((nm = numLineRe.exec(rawText)) !== null) {
+    const val = parseInt(nm[1], 10);
+    if (val >= 1 && val <= 150) docNums.add(val);
+  }
+  if (docNums.size >= 5 && soalList.length < Math.floor(docNums.size * 0.55)) {
+    return false;
+  }
+
   // If raw document clearly contains many A./B./C./D. options, ensure extracted PG choices aren't mostly broken
   const optionMarkersInDoc = (rawText.match(/(?:^|\n|\s)[A-D][\.\)]\s+\S/g) || []).length;
   const pgCount = soalList.filter((q) => q.tipe === 'pilihan_ganda').length;
@@ -1939,7 +2438,7 @@ function areRegexParsedQuestionsTrustworthy(soalList: SoalUjian[], rawText: stri
 /**
  * Applies final structural validation & annotates question verification flags on minor pattern issues.
  */
-function finalizeValidatedParseResult(
+export function finalizeValidatedParseResult(
   baseResult: Omit<ParseDocumentResult, 'kunciDitemukanCount' | 'kunciBelumDitemukanCount' | 'siapDiterbitkan'>,
   rawTextForCheck?: string
 ): ParseDocumentResult {
@@ -1968,9 +2467,11 @@ function finalizeValidatedParseResult(
     };
   });
 
-  const pgQuestions = annotatedSoal.filter((s) => s.tipe === 'pilihan_ganda');
-  const kunciDitemukanCount = pgQuestions.filter((s) => Boolean(s.kunciJawaban)).length;
-  const kunciBelumDitemukanCount = pgQuestions.length - kunciDitemukanCount;
+  const objQuestions = annotatedSoal.filter(
+    (s) => s.tipe === 'pilihan_ganda' || s.tipe === 'benar_salah' || s.tipe === 'isian_singkat'
+  );
+  const kunciDitemukanCount = objQuestions.filter((s) => Boolean(s.kunciJawaban?.trim())).length;
+  const kunciBelumDitemukanCount = objQuestions.length - kunciDitemukanCount;
 
   const mergedWarnings = Array.from(
     new Set([...(baseResult.imageWarnings || []), ...structure.warnings])
@@ -2125,29 +2626,72 @@ async function prepareImageFileForUpload(
 }
 
 /**
- * Formats AI-parsed questions into SoalUjian objects with anti-hallucination verification flags.
+ * Formats AI-parsed questions into SoalUjian objects with full 4-type support, pembahasan, and verification flags.
  */
 function formatAiParsedSoalList(rawList: any[], isOcr = false): SoalUjian[] {
   return rawList.map((q: any, idx: number) => {
     const mentionsVisual = /gambar|diagram|grafik|tabel|peta|ilustrasi/i.test(q.pertanyaan || '');
-    const tipe = q.tipe === 'uraian' ? 'uraian' : 'pilihan_ganda';
+    const rawTipe = typeof q.tipe === 'string' ? q.tipe.trim().toLowerCase() : '';
+    const hasChoicesObj = q.pilihan && typeof q.pilihan === 'object' && Object.keys(q.pilihan).length >= 2;
+    const isBinaryTf =
+      hasChoicesObj &&
+      Object.keys(q.pilihan).length === 2 &&
+      /^(?:benar|betul|true|ya)$/i.test(String(q.pilihan.A || '').trim()) &&
+      /^(?:salah|false|tidak)$/i.test(String(q.pilihan.B || '').trim());
+
+    let tipe: TipeSoalUjian;
+    if (rawTipe === 'benar_salah' || isBinaryTf) {
+      tipe = 'benar_salah';
+    } else if (hasChoicesObj || rawTipe === 'pilihan_ganda') {
+      tipe = 'pilihan_ganda';
+    } else if (rawTipe === 'isian_singkat' || rawTipe === 'isian') {
+      tipe = 'isian_singkat';
+    } else if (rawTipe === 'uraian' || rawTipe === 'esai' || rawTipe === 'essay') {
+      tipe = 'uraian';
+    } else if (/_{3,}|\.{4,}/.test(String(q.pertanyaan || ''))) {
+      tipe = 'isian_singkat';
+    } else {
+      tipe = 'uraian';
+    }
+
+    const finalPilihan =
+      tipe === 'benar_salah'
+        ? hasChoicesObj
+          ? q.pilihan
+          : { A: 'Benar', B: 'Salah' }
+        : tipe === 'pilihan_ganda'
+        ? q.pilihan
+        : undefined;
+
+    const finalKunci =
+      tipe === 'benar_salah'
+        ? normalizeTrueFalseValue(String(q.kunciJawaban || ''), { pilihan: finalPilihan })
+        : String(q.kunciJawaban || '').trim();
+
+    const isObj = tipe === 'pilihan_ganda' || tipe === 'benar_salah' || tipe === 'isian_singkat';
+    const needsKey = isObj && !finalKunci;
+
     return {
       id: `soal-${isOcr ? 'ocr' : 'ai'}-${Date.now()}-${idx + 1}`,
       nomor: q.nomor || idx + 1,
       tipe,
       pertanyaan: q.pertanyaan || '',
-      pilihan: tipe === 'pilihan_ganda' ? q.pilihan : undefined,
-      kunciJawaban: q.kunciJawaban || '',
+      pilihan: finalPilihan,
+      kunciJawaban: finalKunci,
       bobot: q.bobot || (tipe === 'uraian' ? 2 : 1),
-      pedomanPenilaian: q.pedomanPenilaian,
+      pembahasan: typeof q.pembahasan === 'string' && q.pembahasan.trim() ? q.pembahasan.trim() : undefined,
+      pedomanPenilaian:
+        tipe === 'uraian'
+          ? q.pedomanPenilaian || 'Kriteria: Kesesuaian konsep, kelengkapan uraian, ketepatan penalaran.'
+          : q.pedomanPenilaian,
       gambarStatus: mentionsVisual ? 'warning' : undefined,
       gambarWarning: mentionsVisual
         ? 'Soal ini merujuk pada gambar/tabel di dokumen. Gunakan "Tambah Gambar -> Gambar Tersedia / Crop" untuk melampirkannya bila belum terpasang.'
         : undefined,
-      perluVerifikasi: (tipe === 'pilihan_ganda' && !q.kunciJawaban) || mentionsVisual,
+      perluVerifikasi: needsKey || mentionsVisual,
       catatanVerifikasi: mentionsVisual
         ? 'Soal merujuk visual: periksa atau lampirkan gambar yang sesuai.'
-        : tipe === 'pilihan_ganda' && !q.kunciJawaban
+        : needsKey
         ? 'Kunci jawaban belum ditemukan di dokumen. Silakan tentukan kunci jawaban.'
         : undefined,
     };
@@ -2316,11 +2860,15 @@ export async function parseExamDocument(
         console.warn('[DocxParser] convertToHtml warning:', err);
       }
 
-      // Direct OOXML fallback via JSZip if mammoth did not yield readable text
-      if (!rawDocxText || rawDocxText.trim().length < 10) {
-        try {
-          const fallbackZip = await JSZip.loadAsync(preprocessedDocxBuffer);
-          const docXmlFile = fallbackZip.file('word/document.xml');
+      // Direct OOXML fallback via JSZip if mammoth missed text (e.g. Word TextBoxes <w:txbxContent>, shapes, or VML images)
+      try {
+        const fallbackZip = await JSZip.loadAsync(preprocessedDocxBuffer);
+        const docXmlFile = fallbackZip.file('word/document.xml');
+        const docXml = docXmlFile ? await docXmlFile.async('string') : '';
+        const hasHiddenShapesOrTextboxes =
+          docXml.includes('<w:txbxContent') || docXml.includes('<v:imagedata');
+
+        if (docXml && (!rawDocxText || rawDocxText.trim().length < 20 || hasHiddenShapesOrTextboxes)) {
           const relsXmlFile = fallbackZip.file('word/_rels/document.xml.rels');
           const relIdToTarget: Record<string, string> = {};
           if (relsXmlFile) {
@@ -2334,57 +2882,61 @@ export async function parseExamDocument(
             }
           }
 
-          if (docXmlFile) {
-            const docXml = await docXmlFile.async('string');
-            const cleanXmlText = (chunk: string) => {
-              const withImgs = chunk.replace(/<a:blip\b[^>]*r:embed="([^"]+)"[^>]*\/?>/gi, (_bm, rId) =>
+          const cleanXmlText = (chunk: string) => {
+            const withImgs = chunk
+              .replace(/<a:blip\b[^>]*r:embed="([^"]+)"[^>]*\/?>/gi, (_bm, rId) =>
+                relIdToTarget[rId] ? `\n[[IMAGE_DATA:${relIdToTarget[rId]}]]\n` : ''
+              )
+              .replace(/<v:imagedata\b[^>]*r:id="([^"]+)"[^>]*\/?>/gi, (_bm, rId) =>
                 relIdToTarget[rId] ? `\n[[IMAGE_DATA:${relIdToTarget[rId]}]]\n` : ''
               );
-              return withImgs
-                .replace(/<w:tab\s*\/?>/gi, ' ')
-                .replace(/<w:br\s*\/?>/gi, '\n')
-                .replace(/<[^>]+>/g, '')
-                .replace(/&amp;/g, '&')
-                .replace(/&lt;/g, '<')
-                .replace(/&gt;/g, '>')
-                .replace(/&quot;/g, '"')
-                .replace(/&#39;/g, "'")
-                .replace(/[ \t]+/g, ' ')
-                .trim();
-            };
+            return withImgs
+              .replace(/<\/w:p>/gi, '\n')
+              .replace(/<w:tab\s*\/?>/gi, ' ')
+              .replace(/<w:br\s*\/?>/gi, '\n')
+              .replace(/<[^>]+>/g, '')
+              .replace(/&amp;/g, '&')
+              .replace(/&lt;/g, '<')
+              .replace(/&gt;/g, '>')
+              .replace(/&quot;/g, '"')
+              .replace(/&#39;/g, "'")
+              .replace(/[ \t]+/g, ' ')
+              .trim();
+          };
 
-            const outHtmlBlocks: string[] = [];
-            const blockRe = /<w:tbl\b[^>]*>[\s\S]*?<\/w:tbl>|<w:p\b[^>]*>[\s\S]*?<\/w:p>/g;
-            let m: RegExpExecArray | null;
-            let lastTblEnd = 0;
-            while ((m = blockRe.exec(docXml)) !== null) {
-              if (m.index < lastTblEnd) continue;
-              const block = m[0];
-              if (block.startsWith('<w:tbl')) {
-                lastTblEnd = m.index + block.length;
-                const rowsHtml = (block.match(/<w:tr\b[^>]*>[\s\S]*?<\/w:tr>/g) || []).map((tr, rIdx) => {
-                  const cells = (tr.match(/<w:tc\b[^>]*>[\s\S]*?<\/w:tc>/g) || []).map((tc) =>
-                    cleanXmlText(tc).replace(/\n+/g, ' ')
-                  );
-                  const tag = rIdx === 0 ? 'th' : 'td';
-                  return `<tr>${cells.map((c) => `<${tag}>${c}</${tag}>`).join('')}</tr>`;
-                });
-                if (rowsHtml.length > 0) {
-                  outHtmlBlocks.push(`<table><tbody>${rowsHtml.join('')}</tbody></table>`);
-                }
-              } else {
-                const txt = cleanXmlText(block);
-                if (txt) outHtmlBlocks.push(`<p>${txt}</p>`);
+          const outHtmlBlocks: string[] = [];
+          const blockRe = /<w:tbl\b[^>]*>[\s\S]*?<\/w:tbl>|<w:p\b[^>]*>[\s\S]*?<\/w:p>/g;
+          let m: RegExpExecArray | null;
+          let lastTblEnd = 0;
+          while ((m = blockRe.exec(docXml)) !== null) {
+            if (m.index < lastTblEnd) continue;
+            const block = m[0];
+            if (block.startsWith('<w:tbl')) {
+              lastTblEnd = m.index + block.length;
+              const rowsHtml = (block.match(/<w:tr\b[^>]*>[\s\S]*?<\/w:tr>/g) || []).map((tr, rIdx) => {
+                const cells = (tr.match(/<w:tc\b[^>]*>[\s\S]*?<\/w:tc>/g) || []).map((tc) =>
+                  cleanXmlText(tc).replace(/\n+/g, ' ')
+                );
+                const tag = rIdx === 0 ? 'th' : 'td';
+                return `<tr>${cells.map((c) => `<${tag}>${c}</${tag}>`).join('')}</tr>`;
+              });
+              if (rowsHtml.length > 0) {
+                outHtmlBlocks.push(`<table><tbody>${rowsHtml.join('')}</tbody></table>`);
               }
-            }
-            const xmlDerivedText = convertHtmlTablesToMarkdown(outHtmlBlocks.join('\n')).textWithTables.trim();
-            if (xmlDerivedText.length > rawDocxText.trim().length) {
-              rawDocxText = xmlDerivedText;
+            } else {
+              const txt = cleanXmlText(block);
+              if (txt) outHtmlBlocks.push(`<p>${txt}</p>`);
             }
           }
-        } catch (xmlErr) {
-          console.warn('[DocxParser] OOXML direct fallback warning:', xmlErr);
+          const xmlDerivedText = convertHtmlTablesToMarkdown(outHtmlBlocks.join('\n')).textWithTables.trim();
+          const mammothPlainLen = rawDocxText.replace(/\[\[IMAGE_DATA:[^\]]+\]\]/g, '').trim().length;
+          const xmlPlainLen = xmlDerivedText.replace(/\[\[IMAGE_DATA:[^\]]+\]\]/g, '').trim().length;
+          if (!rawDocxText || mammothPlainLen < 20 || xmlPlainLen > mammothPlainLen * 1.15) {
+            rawDocxText = xmlDerivedText;
+          }
         }
+      } catch (xmlErr) {
+        console.warn('[DocxParser] OOXML direct fallback warning:', xmlErr);
       }
 
       const { soalList, metadata, imageWarnings, failedImagesCount: lineFailedImages } =
@@ -2795,16 +3347,36 @@ export async function parseExamDocument(
 
             const rawTipe = colMap.tipe !== undefined ? String(row[colMap.tipe] ?? '').toLowerCase() : '';
             const hasOpts = Object.keys(pilihan).length >= 2;
-            const tipe: 'pilihan_ganda' | 'uraian' =
-              rawTipe.includes('uraian') || rawTipe.includes('esai') || !hasOpts
-                ? 'uraian'
-                : 'pilihan_ganda';
+            let tipe: TipeSoalUjian;
+            if (rawTipe.includes('benar') || rawTipe.includes('salah') || rawTipe === 'bs') {
+              tipe = 'benar_salah';
+            } else if (rawTipe.includes('isian') || rawTipe.includes('singkat')) {
+              tipe = 'isian_singkat';
+            } else if (rawTipe.includes('uraian') || rawTipe.includes('esai') || rawTipe.includes('essay')) {
+              tipe = 'uraian';
+            } else if (hasOpts) {
+              const isTf =
+                Object.keys(pilihan).length === 2 &&
+                /^(?:benar|betul|true|ya)$/i.test(pilihan.A || '') &&
+                /^(?:salah|false|tidak)$/i.test(pilihan.B || '');
+              tipe = isTf ? 'benar_salah' : 'pilihan_ganda';
+            } else {
+              tipe = 'uraian';
+            }
+
+            if (tipe === 'benar_salah' && !hasOpts) {
+              pilihan.A = 'Benar';
+              pilihan.B = 'Salah';
+            }
 
             const rawKunci =
-              colMap.kunci !== undefined ? String(row[colMap.kunci] ?? '').trim().toUpperCase() : '';
+              colMap.kunci !== undefined ? String(row[colMap.kunci] ?? '').trim() : '';
+            const upperKunci = rawKunci.toUpperCase();
             const cleanKunci =
               tipe === 'pilihan_ganda'
-                ? rawKunci.match(/^[A-E]/)?.[0] || rawKunci.replace(/[^A-E]/g, '').slice(0, 1)
+                ? upperKunci.match(/^[A-E]/)?.[0] || upperKunci.replace(/[^A-E]/g, '').slice(0, 1)
+                : tipe === 'benar_salah'
+                ? normalizeTrueFalseValue(rawKunci, { pilihan })
                 : rawKunci;
 
             const rawGambar =
@@ -2821,12 +3393,16 @@ export async function parseExamDocument(
             const pedoman =
               colMap.pedoman !== undefined ? String(row[colMap.pedoman] ?? '').trim() : '';
 
+            const needsExcelVerify =
+              (tipe === 'pilihan_ganda' || tipe === 'benar_salah' || tipe === 'isian_singkat') &&
+              !cleanKunci;
+
             excelSoal.push({
               id: `soal-xlsx-${Date.now()}-${nomor}`,
               nomor,
               tipe,
               pertanyaan,
-              pilihan: tipe === 'pilihan_ganda' ? pilihan : undefined,
+              pilihan: tipe === 'pilihan_ganda' || tipe === 'benar_salah' ? pilihan : undefined,
               kunciJawaban: cleanKunci,
               bobot,
               gambar: validGambar,
@@ -2837,11 +3413,11 @@ export async function parseExamDocument(
                 tipe === 'uraian'
                   ? pedoman || 'Kriteria: Kesesuaian konsep, kelengkapan uraian, ketepatan penalaran.'
                   : undefined,
-              perluVerifikasi: tipe === 'pilihan_ganda' && !cleanKunci,
-              catatanVerifikasi:
-                tipe === 'pilihan_ganda' && !cleanKunci
-                  ? 'Kunci jawaban pada kolom Excel masih kosong. Silakan pilih kunci jawaban.'
-                  : undefined,
+              pembahasan: pedoman || undefined,
+              perluVerifikasi: needsExcelVerify,
+              catatanVerifikasi: needsExcelVerify
+                ? 'Kunci jawaban pada kolom Excel masih kosong. Silakan isi kunci jawaban.'
+                : undefined,
             });
           }
         } else {
@@ -2922,8 +3498,24 @@ export async function parseExamDocument(
     // ------------------------------------------------------------------------
     // 4. PLAIN TEXT / CSV PARSER (.TXT, .CSV)
     // ------------------------------------------------------------------------
-    const textDecoder = new TextDecoder('utf-8');
-    const rawText = textDecoder.decode(arrayBuffer);
+    const txtBytes = new Uint8Array(arrayBuffer);
+    let txtEncoding = 'utf-8';
+    let txtSliceOffset = 0;
+    if (txtBytes.length >= 2 && txtBytes[0] === 0xff && txtBytes[1] === 0xfe) {
+      txtEncoding = 'utf-16le';
+      txtSliceOffset = 2;
+    } else if (txtBytes.length >= 2 && txtBytes[0] === 0xfe && txtBytes[1] === 0xff) {
+      txtEncoding = 'utf-16be';
+      txtSliceOffset = 2;
+    } else if (
+      txtBytes.length >= 3 &&
+      txtBytes[0] === 0xef &&
+      txtBytes[1] === 0xbb &&
+      txtBytes[2] === 0xbf
+    ) {
+      txtSliceOffset = 3;
+    }
+    const rawText = new TextDecoder(txtEncoding).decode(txtBytes.subarray(txtSliceOffset));
     const { soalList, metadata, imageWarnings, failedImagesCount } = parseQuestionsFromText(rawText);
 
     if (soalList.length > 0 && areRegexParsedQuestionsTrustworthy(soalList, rawText)) {
